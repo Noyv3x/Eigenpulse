@@ -1,0 +1,1 @@
+(function(){try{var v=(localStorage.getItem('ep.tweaks')||document.cookie.match(/(?:^|; )ep_tweaks=([^;]+)/)?.[1]||'light:comfortable').split(':');var d=document.documentElement;d.setAttribute('data-theme',v[0]||'light');d.setAttribute('data-density',v[1]||'comfortable');}catch(e){}})();

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">
+  <rect width="192" height="192" rx="40" fill="#16181c"/>
+  <text x="96" y="124" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, monospace" font-weight="700" font-size="100" fill="#fbf9f5" letter-spacing="-6">E</text>
+  <circle cx="148" cy="148" r="18" fill="#5cb88a" stroke="#16181c" stroke-width="6"/>
+</svg>

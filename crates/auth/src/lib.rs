@@ -1,0 +1,29 @@
+#[cfg(feature = "ssr")]
+pub mod argon;
+#[cfg(feature = "ssr")]
+pub mod session;
+#[cfg(feature = "ssr")]
+pub mod middleware;
+#[cfg(feature = "ssr")]
+pub mod pat;
+#[cfg(feature = "ssr")]
+pub mod bootstrap;
+
+#[cfg(feature = "ssr")]
+pub use argon::{hash_password, verify_password};
+#[cfg(feature = "ssr")]
+pub use session::{Session, AuthUser, COOKIE_NAME, login_create_session, logout_destroy_session, lookup_session};
+#[cfg(feature = "ssr")]
+pub use middleware::{require_session, require_user_for_server_fn};
+#[cfg(feature = "ssr")]
+pub use pat::{require_pat, AuthPat, generate_pat, list_pats, revoke_pat, hash_token};
+#[cfg(feature = "ssr")]
+pub use bootstrap::bootstrap_admin;
+
+#[cfg(feature = "ssr")]
+pub fn unauthorized(message: &str) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let body = format!(r#"{{"error":{{"code":"unauthorized","message":"{}"}}}}"#, message.replace('"', "\\\""));
+    (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+}

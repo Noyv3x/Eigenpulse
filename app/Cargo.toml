@@ -1,0 +1,94 @@
+[package]
+name        = "eigenpulse"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+default-run = "eigenpulse"
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "eigenpulse"
+path = "src/main.rs"
+required-features = ["ssr"]
+
+[features]
+default = []
+ssr = [
+    "dep:axum", "dep:axum-extra", "dep:tokio", "dep:tower", "dep:tower-http",
+    "dep:leptos_axum", "dep:sqlx", "dep:cookie", "dep:tracing",
+    "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess",
+    "dep:base64", "dep:rand", "dep:hex", "dep:futures-util", "dep:tokio-stream",
+    "leptos/ssr",
+    "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-ui/ssr",
+    "ep-notify/ssr", "ep-api/ssr",
+    "ep-finance/ssr", "ep-fitness/ssr", "ep-learning/ssr", "ep-marketplace/ssr",
+]
+hydrate = [
+    "leptos/hydrate",
+    "ep-core/hydrate", "ep-ui/hydrate",
+    "ep-finance/hydrate", "ep-fitness/hydrate", "ep-learning/hydrate", "ep-marketplace/hydrate",
+]
+
+[dependencies]
+ep-core      = { workspace = true }
+ep-db        = { workspace = true }
+ep-auth      = { workspace = true }
+ep-ui        = { workspace = true }
+ep-notify    = { workspace = true }
+ep-api       = { workspace = true }
+ep-finance   = { workspace = true }
+ep-fitness   = { workspace = true }
+ep-learning  = { workspace = true }
+ep-marketplace = { workspace = true }
+
+leptos        = { workspace = true }
+leptos_meta   = { workspace = true }
+leptos_router = { workspace = true }
+
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+anyhow        = { workspace = true }
+thiserror     = { workspace = true }
+time          = { workspace = true }
+
+# SSR-only
+axum             = { workspace = true, optional = true }
+axum-extra       = { workspace = true, optional = true }
+tokio            = { workspace = true, optional = true }
+tower            = { workspace = true, optional = true }
+tower-http       = { workspace = true, optional = true }
+leptos_axum      = { workspace = true, optional = true }
+sqlx             = { workspace = true, optional = true }
+cookie           = { workspace = true, optional = true }
+tracing          = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+rust-embed       = { workspace = true, optional = true }
+mime_guess       = { workspace = true, optional = true }
+base64           = { workspace = true, optional = true }
+rand             = { workspace = true, optional = true }
+hex              = { workspace = true, optional = true }
+futures-util     = { workspace = true, optional = true }
+tokio-stream     = { workspace = true, optional = true }
+
+[package.metadata.leptos]
+output-name        = "eigenpulse"
+site-root          = "target/site"
+site-pkg-dir       = "pkg"
+style-file         = "assets/styles.css"
+assets-dir         = "assets"
+site-addr          = "0.0.0.0:3000"
+reload-port        = 3001
+end2end-cmd        = "playwright test"
+end2end-dir        = "end2end"
+browserquery       = "defaults"
+watch              = false
+env                = "DEV"
+bin-features       = ["ssr"]
+bin-default-features = false
+lib-package        = "ep-app-client"
+lib-features       = ["hydrate"]
+lib-default-features = false
+lib-profile-release = "wasm-release"

@@ -1,0 +1,10 @@
+/target
+/data
+**/*.rs.bk
+.DS_Store
+node_modules
+secret.key
+.env
+.env.local
+.idea/
+.vscode/

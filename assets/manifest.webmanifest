@@ -1,0 +1,24 @@
+{
+  "name": "Eigenpulse — Personal Life ERP",
+  "short_name": "Eigenpulse",
+  "description": "模块化的个人生活 ERP — 财务 / 健身 / 学习 / 通知 / 开放 API",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fbf9f5",
+  "theme_color": "#fbf9f5",
+  "icons": [
+    { "src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/static/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml" },
+    { "src": "/static/icons/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml" },
+    { "src": "/static/icons/maskable.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "记一笔",   "short_name": "记账", "url": "/finance" },
+    { "name": "今日聚焦", "short_name": "今日", "url": "/today" },
+    { "name": "通知中心", "short_name": "通知", "url": "/notifications" }
+  ]
+}

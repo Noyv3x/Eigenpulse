@@ -1,0 +1,27 @@
+[package]
+name        = "ep-app-client"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+hydrate = [
+    "eigenpulse/hydrate",
+    "leptos/hydrate",
+    "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:web-sys",
+]
+
+[dependencies]
+eigenpulse    = { path = "../app", default-features = false }
+leptos        = { workspace = true }
+leptos_meta   = { workspace = true }
+leptos_router = { workspace = true }
+
+wasm-bindgen             = { workspace = true, optional = true }
+console_error_panic_hook = { workspace = true, optional = true }
+web-sys                  = { workspace = true, optional = true, features = ["Window", "Navigator", "ServiceWorkerContainer"] }

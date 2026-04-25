@@ -1,0 +1,20 @@
+services:
+  eigenpulse:
+    image: eigenpulse:0.1.0
+    container_name: eigenpulse
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ep-data:/data
+    environment:
+      EP_SECRET:         "${EP_SECRET:?set EP_SECRET to a 64+ character hex value}"
+      EP_ADMIN_PASSWORD: "${EP_ADMIN_PASSWORD:?required for first boot}"
+      # Set to "1" only if you serve over HTTPS (public reverse proxy with TLS).
+      # Leave unset for LAN/NAS HTTP access so the session cookie can persist.
+      EP_COOKIE_SECURE:  "${EP_COOKIE_SECURE:-0}"
+      RUST_LOG:          "info"
+
+volumes:
+  ep-data: {}

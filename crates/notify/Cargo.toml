@@ -1,0 +1,28 @@
+[package]
+name        = "ep-notify"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+
+[features]
+default = []
+ssr     = [
+    "dep:tokio", "dep:sqlx", "dep:reqwest", "dep:lettre",
+    "dep:tracing", "ep-core/ssr", "ep-db/ssr"
+]
+
+[dependencies]
+ep-core    = { workspace = true }
+ep-db      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+async-trait = { workspace = true }
+
+tokio      = { workspace = true, optional = true }
+sqlx       = { workspace = true, optional = true }
+reqwest    = { workspace = true, optional = true }
+lettre     = { workspace = true, optional = true }
+tracing    = { workspace = true, optional = true }

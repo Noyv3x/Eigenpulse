@@ -1,0 +1,40 @@
+[package]
+name        = "ep-finance"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+
+[features]
+default = []
+ssr     = [
+    "dep:axum", "dep:tokio", "dep:sqlx", "dep:tracing",
+    "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-notify/ssr",
+    "ep-ui/ssr",
+    "leptos/ssr",
+]
+hydrate = [
+    "ep-core/hydrate", "ep-ui/hydrate",
+    "leptos/hydrate",
+]
+
+[dependencies]
+ep-core    = { workspace = true }
+ep-db      = { workspace = true }
+ep-auth    = { workspace = true }
+ep-notify  = { workspace = true }
+ep-ui      = { workspace = true }
+
+leptos       = { workspace = true }
+leptos_meta  = { workspace = true }
+leptos_router = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+time         = { workspace = true }
+
+axum       = { workspace = true, optional = true }
+tokio      = { workspace = true, optional = true }
+sqlx       = { workspace = true, optional = true }
+tracing    = { workspace = true, optional = true }
