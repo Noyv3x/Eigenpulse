@@ -44,6 +44,7 @@ pub fn provide_tweak_state(initial: TweakState) -> RwSignal<TweakState> {
 
     #[cfg(feature = "hydrate")]
     {
+        use wasm_bindgen::JsCast;
         Effect::new(move |prev: Option<TweakState>| -> TweakState {
             let v = s.get();
             if prev == Some(v) { return v; }
@@ -54,7 +55,9 @@ pub fn provide_tweak_state(initial: TweakState) -> RwSignal<TweakState> {
                 }
                 if let Some(doc) = win.document() {
                     let cookie = format!("ep_tweaks={serialized}; path=/; max-age=31536000; SameSite=Strict");
-                    let _ = doc.set_cookie(&cookie);
+                    if let Ok(html_doc) = doc.clone().dyn_into::<web_sys::HtmlDocument>() {
+                        let _ = html_doc.set_cookie(&cookie);
+                    }
                     if let Some(el) = doc.document_element() {
                         let _ = el.set_attribute("data-theme", v.theme.as_str());
                         let _ = el.set_attribute("data-density", v.density.as_str());

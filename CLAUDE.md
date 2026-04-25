@@ -109,6 +109,15 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - `EP_ADMIN_PASSWORD` is read **only** when `app_user` is empty (first boot). After bootstrap the row stays; the env var has no further effect. To rotate, change the row directly (a `/settings/security` UI for this is on the roadmap).
 - `cargo-leptos` is installed and invoked in the build stage; the runtime stage only contains the `eigenpulse` binary + `target/site/`.
 
+## Migration discipline
+
+`sqlx::migrate!()` records each applied migration's **byte-checksum** in `_sqlx_migrations`. Editing a migration file after **any** database has run it triggers `MigrateError::VersionMismatch` on the next startup — this is silent corruption from a developer's perspective.
+
+Rules:
+- **Never** edit `migrations/0001_init.sql` or `modules/*/migrations/00*_*.sql` once committed. To fix a schema, add a new `00N_<reason>.sql` next to it.
+- Connection-level PRAGMAs (`journal_mode = WAL`, `synchronous = NORMAL`, `foreign_keys = ON`) belong in `crates/db/src/pool.rs::open_pool` via `SqliteConnectOptions` — they cannot live inside a migration file because sqlx wraps each one in a transaction and SQLite rejects those PRAGMAs mid-transaction.
+- Module migrations are run idempotently by `ModuleRegistry::run_migrations()` against the `_ep_module_migration` ledger (filename-keyed; **no checksum**), so adding `002_*.sql` to a module crate is the canonical evolution path. Do not edit applied module SQL either — the ledger only tracks which name has been applied, but mutating the SQL after the fact will leave existing databases out of sync without warning.
+
 ## Things I keep getting wrong (avoid these)
 
 - **Don't** import `leptos::view::AnyView` — it's `leptos::prelude::AnyView` in 0.7.
@@ -116,6 +125,9 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - **Don't** wrap `ServerFnError::ServerError(...)` directly inside `.map_err(|e| …)` — type inference fails on the bare enum constructor. Define a local `fn err(msg: &str) -> ServerFnError` or use a typed closure return.
 - **Don't** call `Router::new()` without the explicit `Router::<AppState>::new()` turbofish at the workspace root; it'll be inferred as `Router<LeptosOptions>` and `leptos_routes_with_context` will reject `&state`.
 - **Don't** mark cookies `.secure(true)` unconditionally — local HTTP/NAS LAN deployment relies on `EP_COOKIE_SECURE=0` (the default).
+- **Don't** put `PRAGMA journal_mode/synchronous/foreign_keys` in a migration `.sql`. SQLite forbids these inside transactions and sqlx wraps every migration in one. Already configured in `pool.rs::open_pool`.
+- **Don't** add `[lib] crate-type = ["rlib"]` alone to the `app` crate; cargo-leptos 0.3.x needs `["cdylib", "rlib"]` to find the hydration target. Likewise the `[package.metadata.leptos]` keys `env`, `watch`, `reload-port`, `lib-package` are silently ignored — leave them out so you don't get false confidence.
+- **Don't** call `Document::set_cookie` in web-sys; it's `HtmlDocument::set_cookie` (cast via `dyn_into::<web_sys::HtmlDocument>()`).
 
 ## Plan reference
 

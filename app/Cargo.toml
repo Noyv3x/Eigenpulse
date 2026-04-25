@@ -7,7 +7,7 @@ license     = { workspace = true }
 default-run = "eigenpulse"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "eigenpulse"
@@ -28,6 +28,7 @@ ssr = [
 ]
 hydrate = [
     "leptos/hydrate",
+    "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:web-sys",
     "ep-core/hydrate", "ep-ui/hydrate",
     "ep-finance/hydrate", "ep-fitness/hydrate", "ep-learning/hydrate", "ep-marketplace/hydrate",
 ]
@@ -73,22 +74,21 @@ hex              = { workspace = true, optional = true }
 futures-util     = { workspace = true, optional = true }
 tokio-stream     = { workspace = true, optional = true }
 
+# hydrate-only
+wasm-bindgen             = { workspace = true, optional = true }
+console_error_panic_hook = { workspace = true, optional = true }
+web-sys                  = { workspace = true, optional = true, features = ["Window", "Navigator", "ServiceWorkerContainer"] }
+
 [package.metadata.leptos]
-output-name        = "eigenpulse"
-site-root          = "target/site"
-site-pkg-dir       = "pkg"
-style-file         = "assets/styles.css"
-assets-dir         = "assets"
-site-addr          = "0.0.0.0:3000"
-reload-port        = 3001
-end2end-cmd        = "playwright test"
-end2end-dir        = "end2end"
-browserquery       = "defaults"
-watch              = false
-env                = "DEV"
-bin-features       = ["ssr"]
+output-name          = "eigenpulse"
+site-root            = "target/site"
+site-pkg-dir         = "pkg"
+style-file           = "../assets/styles.css"
+assets-dir           = "../assets"
+site-addr            = "0.0.0.0:3000"
+browserquery         = "defaults"
+bin-features         = ["ssr"]
 bin-default-features = false
-lib-package        = "ep-app-client"
-lib-features       = ["hydrate"]
+lib-features         = ["hydrate"]
 lib-default-features = false
-lib-profile-release = "wasm-release"
+lib-profile-release  = "wasm-release"

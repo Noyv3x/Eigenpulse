@@ -8,7 +8,7 @@ license     = { workspace = true }
 [features]
 default = []
 ssr     = ["leptos/ssr", "ep-core/ssr"]
-hydrate = ["leptos/hydrate", "ep-core/hydrate"]
+hydrate = ["leptos/hydrate", "ep-core/hydrate", "dep:web-sys", "dep:wasm-bindgen"]
 
 [dependencies]
 ep-core      = { workspace = true }
@@ -17,3 +17,6 @@ leptos_meta  = { workspace = true }
 leptos_router = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
+
+web-sys      = { workspace = true, optional = true, features = ["Window", "Storage", "Document", "HtmlDocument", "HtmlElement", "Element"] }
+wasm-bindgen = { workspace = true, optional = true }

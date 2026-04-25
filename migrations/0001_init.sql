@@ -1,6 +1,14 @@
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous  = NORMAL;
+-- ⚠ This file IS an applied migration. DO NOT edit it once any database has
+-- run it successfully — `sqlx::migrate!()` records its checksum and will refuse
+-- to start with `MigrateError::VersionMismatch` if the bytes change. To fix
+-- a schema bug, add a new `0002_*.sql` migration instead.
+--
+-- The single exception in this repo's history: an earlier draft of this file
+-- contained `PRAGMA foreign_keys/journal_mode/synchronous` lines, which sqlx
+-- rejects because each migration runs inside a transaction. That version
+-- never applied anywhere, so removing those PRAGMAs (and moving them to
+-- `crates/db/src/pool.rs::open_pool` via `SqliteConnectOptions`) was safe.
+-- Do not treat this as license to amend `0001_init.sql` further.
 
 -- Single-row user table.
 CREATE TABLE app_user (

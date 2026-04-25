@@ -8,3 +8,4 @@ secret.key
 .env.local
 .idea/
 .vscode/
+.claude/

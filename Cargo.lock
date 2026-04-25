@@ -768,6 +768,7 @@ dependencies = [
  "axum 0.7.9",
  "axum-extra",
  "base64",
+ "console_error_panic_hook",
  "cookie",
  "ep-api",
  "ep-auth",
@@ -799,6 +800,8 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -1038,6 +1041,8 @@ dependencies = [
  "leptos_router",
  "serde",
  "serde_json",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
