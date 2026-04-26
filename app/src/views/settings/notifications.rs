@@ -96,7 +96,16 @@ pub async fn test_channel(id: i64) -> Result<(), ServerFnError> {
         let row: (String, String) = sqlx::query_as(
             "SELECT kind, config_json FROM notify_channel WHERE id = ?1"
         ).bind(id).fetch_one(&st.db).await.map_err(server_err)?;
-        ep_notify::test_channel(&row.0, &row.1).await.map_err(server_err)
+        // The notifier `Err` from lettre/reqwest can include the SMTP connection
+        // string with password, the Bark device-key URL, the Telegram bot URL
+        // (`api.telegram.org/bot<TOKEN>/sendMessage`), or the Discord webhook URL —
+        // i.e. the very secrets stored in `config_json`. Forwarding it via
+        // `server_err` would surface those secrets in the browser. Log the full
+        // detail server-side and return a generic, channel-typed message.
+        ep_notify::test_channel(&row.0, &row.1).await.map_err(|e| {
+            tracing::warn!(channel_id = id, kind = %row.0, error = %e, "notify channel test failed");
+            server_err(format!("{} 通道测试失败 · 详细错误已记录到服务器日志", row.0))
+        })
     }
     #[cfg(not(feature = "ssr"))]
     { Err(server_err("ssr-only")) }

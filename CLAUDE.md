@@ -118,6 +118,7 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - `pat.hash` is server-side only. UI shows `prefix` (12 visible chars). The plaintext token is returned **exactly once** in `GeneratePat::token` at creation time — never persisted in `pat.hash`, never re-fetchable.
 - `app_user.password_hash` is never serialized.
 - When adding a new server fn that touches a `*_secret` / `*_token` / `password*` / `webhook*` / `config_json` column, define a minimal DTO with only the fields the UI actually renders.
+- **Errors from third-party clients can also leak secrets.** `lettre::Error` may include the SMTP host:port and connection string; `reqwest::Error` may include the full request URL — and Bark device-keys / Telegram bot tokens / Discord webhooks all live *in the URL*. Don't `.map_err(server_err)?` straight from these libs into a `#[server]` fn that the browser can read. Use `tracing::warn!(...)` to log the full error server-side and return a generic message (`format!("{} 通道测试失败 · 详细错误已记录", kind)`). See `test_channel` in `app/src/views/settings/notifications.rs`.
 
 ## Wasm-side panics to avoid in view code
 
