@@ -108,6 +108,28 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - `EP_SECRET` is **only** the signing key for the `ep_sid` session cookie (`SignedCookieJar` in `crates/auth/src/middleware.rs` and `app/src/login.rs`). Rotating it invalidates all browser sessions; **PATs are unaffected** — `crates/auth/src/pat.rs::hash_token` is a plain unkeyed `sha256(token)` and never reads `EP_SECRET`. Don't suggest rotating `EP_SECRET` as a way to revoke leaked tokens; revoke individual rows in `pat` (set `revoked_at`) instead.
 - `EP_ADMIN_PASSWORD` is read **only** when `app_user` is empty (first boot). After bootstrap the row stays; the env var has no further effect. To rotate, change the row directly (a `/settings/security` UI for this is on the roadmap).
 - `cargo-leptos` is installed and invoked in the build stage; the runtime stage only contains the `eigenpulse` binary + `target/site/`.
+- `LEPTOS_WASM_OPT_VERSION=version_129` is set in the Dockerfile because cargo-leptos 0.3.6's default `version_123` has no aarch64 prebuilt and hangs on `--platform linux/arm64` builds.
+
+## Secret hygiene in server fns
+
+**Anything returned from a `#[server]` function ends up in the hydrate WASM bundle and over the wire to the browser.** Treat the DTO type as a public API.
+
+- `notify_channel.config_json` (SMTP password, Bark device key, Telegram bot token, Discord webhook URL) **must not** appear on any DTO returned by a server fn or open-API handler. The `ChannelDto` in `app/src/views/settings/notifications.rs` deliberately drops it; re-editing a channel re-prompts the user for the secret.
+- `pat.hash` is server-side only. UI shows `prefix` (12 visible chars). The plaintext token is returned **exactly once** in `GeneratePat::token` at creation time — never persisted in `pat.hash`, never re-fetchable.
+- `app_user.password_hash` is never serialized.
+- When adding a new server fn that touches a `*_secret` / `*_token` / `password*` / `webhook*` / `config_json` column, define a minimal DTO with only the fields the UI actually renders.
+
+## Wasm-side panics to avoid in view code
+
+`#[component]` bodies and any helper they call run on **both** SSR and the wasm32 hydrate target. A handful of std/third-party APIs panic or are unavailable on `wasm32-unknown-unknown` unless their wasm-bindgen feature is opted in. Symptom: hydration silently breaks (browser dev console shows a panic, the page falls back to the SSR snapshot only).
+
+Don't call from view code:
+- `time::OffsetDateTime::now_utc()` / `time::OffsetDateTime::now_local()` — needs the `time/wasm-bindgen` feature, otherwise panics. Compute the "now" comparison server-side in the `#[server]` fn and ship a pre-computed `is_expired: bool` / `is_active: bool` on the DTO. (See `PatDto` in `app/src/views/settings/security.rs` for the canonical pattern.)
+- `std::time::SystemTime::now()` — same deal, panics on wasm32 without the right feature.
+- `std::fs` / `std::process` / `tokio::fs` — silently won't link or panic.
+- Anything inside `#[cfg(feature = "ssr")]` is fine; the view's wasm-target compile sees only `#[cfg(not(feature = "ssr"))]` branches.
+
+Pure conversions like `time::OffsetDateTime::from_unix_timestamp(i64)` are pure math and are safe on wasm — that's what `fmt_ts` in security.rs uses.
 
 ## Migration discipline
 

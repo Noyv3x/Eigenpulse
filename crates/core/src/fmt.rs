@@ -33,3 +33,22 @@ pub fn fmt_int(v: f64) -> String {
 pub fn fmt_money(v: f64) -> String {
     thousands_sep(&format!("{:.2}", v))
 }
+
+/// Format an `Option<unix_seconds>` as `YYYY-MM-DD`. Returns `—` for `None` or
+/// invalid timestamps. Pure math — safe in wasm32 view code (no `now_utc`).
+pub fn fmt_ts_date(ts: Option<i64>) -> String {
+    let Some(t) = ts else { return "—".into() };
+    time::OffsetDateTime::from_unix_timestamp(t)
+        .ok()
+        .map(|d| format!("{:04}-{:02}-{:02}", d.year(), d.month() as u8, d.day()))
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Format an `Option<unix_seconds>` as `MM-DD HH:MM`. Same wasm32-safety note.
+pub fn fmt_ts_minute(ts: Option<i64>) -> String {
+    let Some(t) = ts else { return "—".into() };
+    time::OffsetDateTime::from_unix_timestamp(t)
+        .ok()
+        .map(|d| format!("{:02}-{:02} {:02}:{:02}", d.month() as u8, d.day(), d.hour(), d.minute()))
+        .unwrap_or_else(|| "—".into())
+}

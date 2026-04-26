@@ -63,10 +63,7 @@ pub fn NotificationsView() -> impl IntoView {
                                         "crit" => "tag rose",
                                         _ => "tag green",
                                     };
-                                    let when = time::OffsetDateTime::from_unix_timestamp(n.created_at)
-                                        .ok()
-                                        .map(|d| format!("{:02}-{:02} {:02}:{:02}", d.month() as u8, d.day(), d.hour(), d.minute()))
-                                        .unwrap_or_default();
+                                    let when = ep_core::fmt_ts_minute(Some(n.created_at));
                                     view! {
                                         <div class="list-row">
                                             <span class=cls_dot>{n.severity.to_uppercase()}</span>

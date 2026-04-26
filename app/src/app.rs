@@ -40,6 +40,8 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("reports")      view=crate::views::reports::ReportsView/>
                         <Route path=path!("notifications") view=crate::views::notifications::NotificationsView/>
                         <Route path=path!("settings")     view=crate::views::settings::SettingsIndex/>
+                        <Route path=path!("settings/notifications") view=crate::views::settings::notifications::NotificationChannelsView/>
+                        <Route path=path!("settings/security")      view=crate::views::settings::security::PatView/>
                     </Routes>
                 </main>
                 <TweaksPanel/>

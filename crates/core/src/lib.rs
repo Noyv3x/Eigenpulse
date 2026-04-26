@@ -26,7 +26,7 @@ pub mod errors;
 pub use nav::{NavSection, NavEntry, IconKind};
 pub use tone::Tone;
 pub use severity::Severity;
-pub use fmt::{fmt_int, fmt_money, thousands_sep};
+pub use fmt::{fmt_int, fmt_money, fmt_ts_date, fmt_ts_minute, thousands_sep};
 pub use escape::html_escape;
 
 #[cfg(feature = "ssr")]
