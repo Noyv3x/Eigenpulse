@@ -9,3 +9,4 @@ secret.key
 .idea/
 .vscode/
 .claude/
+.playwright-mcp/
