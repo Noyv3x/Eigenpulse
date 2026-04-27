@@ -26,8 +26,12 @@ SRC="$PKG_DIR/$NAME.wasm"
 DST="$PKG_DIR/${NAME}_bg.wasm"
 
 if [ ! -f "$SRC" ]; then
-    echo "leptos-postbuild: $SRC not found; nothing to do" >&2
-    exit 0
+    # Fail loudly. If `cargo leptos build` errored partway through, the
+    # wasm artifact won't exist; Dockerfile `RUN cargo leptos build && this`
+    # would otherwise mask the upstream failure (script returns 0, image
+    # ships with no wasm) and break hydration in production silently.
+    echo "leptos-postbuild: $SRC not found — did 'cargo leptos build' fail?" >&2
+    exit 1
 fi
 # Skip when the destination is already a fresh copy of the source —
 # avoids needless writes during `cargo leptos watch` rebuilds.
