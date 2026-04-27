@@ -5,12 +5,14 @@ pub mod security;
 // module crates. Re-export so existing `super::server_err` paths still resolve.
 pub use ep_core::server_err;
 
+use ep_ui::tweaks::{Density, TweakState, use_tweaks};
 use ep_ui::{Card, PageHead, StatRow};
 use leptos::prelude::*;
 use leptos_router::components::A;
 
 #[component]
 pub fn SettingsIndex() -> impl IntoView {
+    let tweaks = use_tweaks();
     view! {
         <div class="view">
             <PageHead
@@ -39,6 +41,21 @@ pub fn SettingsIndex() -> impl IntoView {
                 </Card>
                 <Card title="API · Personal Access Tokens" code="CFG-SEC" sub="/api/v1/* 端点鉴权">
                     <p class="muted">"在 " <A href="/settings/security">"安全管理"</A> " 中生成 PAT。"</p>
+                </Card>
+                <Card title="外观 · 显示密度" code="CFG-UI" sub="主题切换在右上角图标">
+                    <div class="tweak-row">
+                        <label>"密度 · DENSITY"</label>
+                        <div class="seg">
+                            <button
+                                class=move || if tweaks.get().density == Density::Comfortable { "on" } else { "" }
+                                on:click=move |_| tweaks.update(|v: &mut TweakState| v.density = Density::Comfortable)
+                            >"宽松"</button>
+                            <button
+                                class=move || if tweaks.get().density == Density::Compact { "on" } else { "" }
+                                on:click=move |_| tweaks.update(|v: &mut TweakState| v.density = Density::Compact)
+                            >"紧凑"</button>
+                        </div>
+                    </div>
                 </Card>
             </div>
         </div>

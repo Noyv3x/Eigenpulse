@@ -44,6 +44,22 @@ pub fn provide_tweak_state(initial: TweakState) -> RwSignal<TweakState> {
 
     #[cfg(feature = "hydrate")]
     {
+        // SSR rendered with `initial` (typically Default). theme-init.js
+        // already restored the real value to <html> / localStorage before
+        // first paint. Mirror that into the signal *post-mount* so reactive
+        // closures (button class, icon switch, button title) re-evaluate.
+        // A plain `s.set(p)` at this point is too early — views haven't
+        // mounted yet, so it just changes the initial value and the SSR
+        // DOM stays out of sync. Wrapping in `Effect::new` defers it until
+        // after hydrate completes; using `get_untracked` keeps this effect
+        // running exactly once.
+        Effect::new(move |_: Option<()>| {
+            if let Some(persisted) = read_persisted_tweaks() {
+                if persisted != s.get_untracked() {
+                    s.set(persisted);
+                }
+            }
+        });
         use wasm_bindgen::JsCast;
         Effect::new(move |prev: Option<TweakState>| -> TweakState {
             let v = s.get();
@@ -75,4 +91,30 @@ pub fn provide_tweak_state(initial: TweakState) -> RwSignal<TweakState> {
 pub fn use_tweaks() -> RwSignal<TweakState> {
     use_context::<RwSignal<TweakState>>()
         .expect("provide_tweak_state must be called in <App/>")
+}
+
+#[cfg(feature = "hydrate")]
+fn read_persisted_tweaks() -> Option<TweakState> {
+    let win = web_sys::window()?;
+    if let Ok(Some(storage)) = win.local_storage() {
+        if let Ok(Some(raw)) = storage.get_item("ep.tweaks") {
+            if !raw.is_empty() {
+                return Some(TweakState::parse_short(&raw));
+            }
+        }
+    }
+    // Fallback: theme-init.js parsed cookie + wrote attributes on <html>.
+    // Reading them here keeps SSR's pre-paint state and hydrate's signal
+    // value in lock-step, so the first Effect run is a no-op rather than a
+    // visible flash.
+    let doc = win.document()?;
+    let el = doc.document_element()?;
+    // `Theme::parse` / `Density::parse` already fall back to the variant's
+    // Default on unknown input, so passing the missing-attr empty string
+    // through them is the same as hard-coding "light"/"comfortable" here —
+    // and keeps the default in one place.
+    Some(TweakState {
+        theme: Theme::parse(el.get_attribute("data-theme").as_deref().unwrap_or("")),
+        density: Density::parse(el.get_attribute("data-density").as_deref().unwrap_or("")),
+    })
 }

@@ -14,7 +14,6 @@ pub mod ring;
 pub mod heatmap;
 pub mod sidebar;
 pub mod topbar;
-pub mod tweaks_panel;
 pub mod notifications;
 pub mod stat;
 
@@ -31,7 +30,6 @@ pub use ring::Ring;
 pub use heatmap::Heatmap;
 pub use sidebar::Sidebar;
 pub use topbar::Topbar;
-pub use tweaks_panel::TweaksPanel;
 pub use tweaks::{TweakState, Theme, Density, provide_tweak_state, use_tweaks};
 pub use notifications::{NotificationsBellPopover, provide_unread_signal, use_unread_signal};
 pub use stat::StatRow;

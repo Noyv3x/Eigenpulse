@@ -570,30 +570,7 @@ body {
 .module-glyph.mod { background: var(--violet-soft); color: var(--violet-ink); }
 .module-glyph.hub { background: var(--ink); color: var(--bg); }
 
-/* --- Tweaks panel --- */
-.tweaks-panel {
-  position: fixed; bottom: 20px; right: 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lg);
-  z-index: 100;
-  width: 260px;
-  overflow: hidden;
-  font-size: 13px;
-}
-.tweaks-head {
-  padding: 10px 14px;
-  display: flex; align-items: center; justify-content: space-between;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-2);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-3);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.tweaks-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 14px; }
+/* --- Tweak rows + segmented toggles (Settings · CFG-UI) --- */
 .tweak-row { display: flex; flex-direction: column; gap: 6px; }
 .tweak-row label { font-size: 11.5px; color: var(--ink-3); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
 .seg {

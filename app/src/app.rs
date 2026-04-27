@@ -1,5 +1,5 @@
 use ep_ui::{
-    provide_tweak_state, Sidebar, Topbar, TweakState, TweaksPanel,
+    provide_tweak_state, Sidebar, Topbar, TweakState,
 };
 use ep_ui::notifications::provide_unread_signal;
 use leptos::prelude::*;
@@ -44,7 +44,6 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("settings/security")      view=crate::views::settings::security::PatView/>
                     </Routes>
                 </main>
-                <TweaksPanel/>
             </div>
         </Router>
     }

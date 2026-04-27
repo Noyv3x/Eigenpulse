@@ -1,4 +1,5 @@
 use crate::sidebar::NAV;
+use crate::tweaks::{Theme, TweakState, use_tweaks};
 use crate::{notifications::use_unread_signal, Icon};
 use ep_core::IconKind;
 use leptos::prelude::*;
@@ -8,6 +9,7 @@ use leptos_router::hooks::use_location;
 pub fn Topbar() -> impl IntoView {
     let loc = use_location();
     let unread = use_unread_signal();
+    let tweaks = use_tweaks();
 
     let crumb = move || {
         let p = loc.pathname.get();
@@ -40,6 +42,19 @@ pub fn Topbar() -> impl IntoView {
                 <span>"搜索模块、单号或记录…"</span>
                 <kbd>"⌘K"</kbd>
             </div>
+            <button
+                class="icon-btn"
+                title=move || if tweaks.get().theme == Theme::Dark { "切到浅色" } else { "切到深色" }
+                on:click=move |_| tweaks.update(|v: &mut TweakState| {
+                    v.theme = if v.theme == Theme::Dark { Theme::Light } else { Theme::Dark };
+                })
+            >
+                {move || if tweaks.get().theme == Theme::Dark {
+                    view! { <Icon kind=IconKind::Sun size=16/> }
+                } else {
+                    view! { <Icon kind=IconKind::Moon size=16/> }
+                }}
+            </button>
             <a class="icon-btn" href="/notifications" title="通知">
                 <Icon kind=IconKind::Bell size=16/>
                 {move || (unread.get() > 0).then(|| view! { <span class="dot"></span> })}

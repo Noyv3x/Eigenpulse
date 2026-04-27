@@ -81,10 +81,14 @@ The bus exposes itself to other crates as `dyn NotifyBusTrait` (defined in `crat
 
 ### Frontend conventions
 
-- All design tokens are in `assets/styles.css` (844 lines, **byte-for-byte from the design bundle** — do not modify defensively; preserve the look). Density is via `data-density="compact|comfortable"` on the root, theme via `data-theme="light|dark"`.
-- `crates/ui/src/` has the shared Leptos components (`Kpi`, `Card`, `Tag`, `Tabs`, `PageHead`, `SectionLabel`, `ChartBars`, `Donut`, `Ring`, `Heatmap`, `Sidebar`, `Topbar`, `TweaksPanel`, `Icon`). String props use `#[prop(into, optional)] Option<String>` so call sites can write `title="…"` without `.to_string()` or `Some(…)`.
+- All design tokens are in `assets/styles.css` (~840 lines, originally byte-for-byte from the design bundle). The bar for editing is: **preserve visual outcomes, not bytes**. So:
+  - **Don't** rename CSS variables, consolidate rules, retune values, or restructure cascade layers speculatively — design CSS interacts in non-obvious ways.
+  - **Do** delete rules whose selectors no longer match any rendered element (true dead code is a pure subtraction, zero visual risk).
+  - Density is via `data-density="compact|comfortable"` on the root, theme via `data-theme="light|dark"`.
+- `crates/ui/src/` has the shared Leptos components (`Kpi`, `Card`, `Tag`, `Tabs`, `PageHead`, `SectionLabel`, `ChartBars`, `Donut`, `Ring`, `Heatmap`, `Sidebar`, `Topbar`, `Icon`). String props use `#[prop(into, optional)] Option<String>` so call sites can write `title="…"` without `.to_string()` or `Some(…)`.
 - `crates/ui/src/sidebar.rs::NAV` is **hardcoded** static; this is intentional because hydrate-side has no `ModuleRegistry`. New modules require a new `NAV` entry in addition to the registry registration.
-- Anti-FOUC: `assets/theme-init.js` is inlined in `<head>` to set `data-theme` before paint; `crates/ui/src/tweaks.rs::provide_tweak_state` then takes over with a deduped Effect (compares `prev` to skip no-op writes).
+- Theme + density toggles: theme is a one-click Sun/Moon button in the `Topbar`; density is a segmented control on the `/settings` `CFG-UI · 外观` card. Both write to the shared `RwSignal<TweakState>` provided by `provide_tweak_state` in `<App/>`.
+- Anti-FOUC: `assets/theme-init.js` is inlined in `<head>` to set `data-theme` / `data-density` from cookie/localStorage before first paint. `crates/ui/src/tweaks.rs::provide_tweak_state` then runs two `Effect`s on hydrate: (1) a one-shot post-mount **restore** that reads localStorage (or falls back to the `<html>` attrs theme-init.js wrote) and `s.set()`s the signal so reactive views re-evaluate against the persisted state — without this the SSR-default value would clobber the user's choice on every page load; (2) a **persist** effect that writes signal changes back to localStorage / cookie / `<html>`, deduped against `prev` to skip no-op writes.
 
 ### IDs and the `seq` table
 
