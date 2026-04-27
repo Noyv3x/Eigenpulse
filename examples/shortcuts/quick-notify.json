@@ -1,0 +1,114 @@
+{
+  "name": "Eigenpulse · 推送通知",
+  "icon_glyph": "bell.badge.fill",
+  "icon_tint": "rose",
+  "description": "Prompt for title/body/severity, POST to /api/v1/notify, fan out to all enabled channels.",
+  "endpoint": {
+    "method": "POST",
+    "url": "{EP_BASE}/api/v1/notify",
+    "scope_required": "notify:write",
+    "headers": {
+      "Authorization": "Bearer {EP_TOKEN}",
+      "Content-Type": "application/json"
+    }
+  },
+  "config": {
+    "EP_BASE":  "http://192.168.1.50:3000",
+    "EP_TOKEN": "ep_pat_REPLACE_ME"
+  },
+  "steps": [
+    {
+      "n": 1,
+      "action": "Comment",
+      "text": "PAT must have scope `notify:write` (or `*`). The notification is persisted to `notification` table AND broadcast to every enabled channel whose min_severity allows it."
+    },
+    {
+      "n": 2,
+      "action": "Text",
+      "bind": "EP_BASE",
+      "value": "http://192.168.1.50:3000"
+    },
+    {
+      "n": 3,
+      "action": "Text",
+      "bind": "EP_TOKEN",
+      "value": "ep_pat_REPLACE_ME"
+    },
+    {
+      "n": 4,
+      "action": "Ask for Input",
+      "bind": "Title",
+      "input_type": "Text",
+      "prompt": "标题"
+    },
+    {
+      "n": 5,
+      "action": "Ask for Input",
+      "bind": "Body",
+      "input_type": "Text",
+      "prompt": "正文 (可空)",
+      "allow_multiline": true
+    },
+    {
+      "n": 6,
+      "action": "Choose from Menu",
+      "bind": "Severity",
+      "prompt": "严重度",
+      "items": [
+        { "label": "Info · 一般",   "value": "info" },
+        { "label": "Warn · 警告",   "value": "warn" },
+        { "label": "Crit · 严重",   "value": "crit" }
+      ],
+      "default": "info"
+    },
+    {
+      "n": 7,
+      "action": "Dictionary",
+      "bind": "Payload",
+      "value": {
+        "title":    "{{Title}}",
+        "body":     "{{Body}}",
+        "severity": "{{Severity}}"
+      }
+    },
+    {
+      "n": 8,
+      "action": "Get Contents of URL",
+      "bind": "Response",
+      "method": "POST",
+      "url": "{{EP_BASE}}/api/v1/notify",
+      "headers": {
+        "Authorization": "Bearer {{EP_TOKEN}}",
+        "Content-Type":  "application/json"
+      },
+      "request_body": "{{Payload}}"
+    },
+    {
+      "n": 9,
+      "action": "Get Dictionary Value",
+      "bind": "NotifId",
+      "from": "{{Response}}",
+      "key": "id"
+    },
+    {
+      "n": 10,
+      "action": "Show Notification",
+      "title": "已发送 · #{{NotifId}}",
+      "body": "{{Severity}} · {{Title}}"
+    }
+  ],
+  "request_body_schema": {
+    "title":    "string, required",
+    "body":     "string, optional",
+    "severity": "string, one of info/warn/crit (default: info)",
+    "module":   "string, optional source module code (e.g. FIN, FIT, LRN)",
+    "link":     "string, optional in-app path (e.g. /finance)",
+    "doc_ref":  "string, optional related doc id (e.g. FIN-24091)"
+  },
+  "response_shape": { "id": 42 },
+  "side_effects": [
+    "Inserts a row in `notification` (visible in Topbar bell + /notifications).",
+    "Broadcasts via SSE so any open browser tab updates the unread count live.",
+    "Iterates `notify_channel` rows; for each enabled one whose min_severity allows the level, sends through the matching notifier (smtp / bark / telegram / discord) and logs the attempt to `notify_delivery`."
+  ]
+}

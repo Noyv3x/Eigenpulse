@@ -1,0 +1,153 @@
+{
+  "name": "Eigenpulse · 记一笔",
+  "icon_glyph": "creditcard.fill",
+  "icon_tint": "amber",
+  "description": "Prompt for amount/merchant/category, POST to /api/v1/fin/txn, show the new doc id.",
+  "endpoint": {
+    "method": "POST",
+    "url": "{EP_BASE}/api/v1/fin/txn",
+    "scope_required": "fin:write",
+    "headers": {
+      "Authorization": "Bearer {EP_TOKEN}",
+      "Content-Type": "application/json"
+    }
+  },
+  "config": {
+    "EP_BASE":  "http://192.168.1.50:3000",
+    "EP_TOKEN": "ep_pat_REPLACE_ME"
+  },
+  "steps": [
+    {
+      "n": 1,
+      "action": "Comment",
+      "text": "Set your instance URL and PAT (created at /settings/security with scope fin:write). Edit these once; everything else uses Magic Variables."
+    },
+    {
+      "n": 2,
+      "action": "Text",
+      "bind": "EP_BASE",
+      "value": "http://192.168.1.50:3000"
+    },
+    {
+      "n": 3,
+      "action": "Text",
+      "bind": "EP_TOKEN",
+      "value": "ep_pat_REPLACE_ME"
+    },
+    {
+      "n": 4,
+      "action": "Ask for Input",
+      "bind": "Amount",
+      "input_type": "Number",
+      "prompt": "金额 (¥) — 支出留正数，下一步选标签",
+      "default": "0"
+    },
+    {
+      "n": 5,
+      "action": "Ask for Input",
+      "bind": "Merchant",
+      "input_type": "Text",
+      "prompt": "商户 / 摘要"
+    },
+    {
+      "n": 6,
+      "action": "Choose from Menu",
+      "bind": "Tag",
+      "prompt": "类型",
+      "items": [
+        { "label": "支出 (exp)",  "value": "exp" },
+        { "label": "收入 (inc)",  "value": "inc" },
+        { "label": "转账 (tfr)",  "value": "tfr" }
+      ]
+    },
+    {
+      "n": 7,
+      "action": "Choose from Menu",
+      "bind": "Category",
+      "prompt": "类别",
+      "items": [
+        { "label": "餐饮 F&B",   "value": "F&B" },
+        { "label": "交通 TRN",   "value": "TRN" },
+        { "label": "健身 HLT",   "value": "HLT" },
+        { "label": "学习 EDU",   "value": "EDU" },
+        { "label": "居家 HSE",   "value": "HSE" },
+        { "label": "其他 OTH",   "value": "OTH" },
+        { "label": "收入 INC",   "value": "INC" },
+        { "label": "转账 TFR",   "value": "TFR" }
+      ]
+    },
+    {
+      "n": 8,
+      "action": "Choose from Menu",
+      "bind": "Account",
+      "prompt": "账户",
+      "items": [
+        { "label": "招商主卡 ACC-01", "value": "ACC-01" },
+        { "label": "余额宝 ACC-02",   "value": "ACC-02" },
+        { "label": "投资 ACC-03",     "value": "ACC-03" },
+        { "label": "现金 ACC-04",     "value": "ACC-04" }
+      ]
+    },
+    {
+      "n": 9,
+      "action": "Calculate",
+      "bind": "SignedAmount",
+      "expression": "if Tag == 'exp' then -Amount else Amount",
+      "note": "Shortcuts has no inline ternary; recreate this with: Get Variable Tag → If 'is exp' → Calculate Amount × -1 → Otherwise → Amount."
+    },
+    {
+      "n": 10,
+      "action": "Dictionary",
+      "bind": "Body",
+      "value": {
+        "merchant":      "{{Merchant}}",
+        "category_code": "{{Category}}",
+        "account_code":  "{{Account}}",
+        "amount":        "{{SignedAmount}}",
+        "tag":           "{{Tag}}"
+      }
+    },
+    {
+      "n": 11,
+      "action": "Get Contents of URL",
+      "bind": "Response",
+      "method": "POST",
+      "url": "{{EP_BASE}}/api/v1/fin/txn",
+      "headers": {
+        "Authorization": "Bearer {{EP_TOKEN}}",
+        "Content-Type":  "application/json"
+      },
+      "request_body": "{{Body}}"
+    },
+    {
+      "n": 12,
+      "action": "Get Dictionary Value",
+      "bind": "DocId",
+      "from": "{{Response}}",
+      "key": "doc_id"
+    },
+    {
+      "n": 13,
+      "action": "Show Notification",
+      "title": "已记账 · {{DocId}}",
+      "body":  "{{Merchant}} · ¥{{SignedAmount}}"
+    }
+  ],
+  "request_body_schema": {
+    "merchant":      "string, required",
+    "category_code": "string, one of F&B/TRN/HLT/EDU/HSE/OTH/INC/TFR",
+    "account_code":  "string, one of ACC-01/02/03/04",
+    "amount":        "number; negative = expense, positive = income",
+    "tag":           "string, one of exp/inc/tfr",
+    "note":          "string, optional",
+    "linked_doc_id": "string, optional (e.g. FIT-S-0412 to cross-link)",
+    "occurred_at":   "integer unix seconds, optional (defaults to server now)"
+  },
+  "response_shape": { "doc_id": "FIN-26092" },
+  "side_effects": [
+    "Inserts a fin_txn row.",
+    "Adjusts the chosen account's balance (atomic with the insert).",
+    "Writes an activity row visible on Dashboard / Today.",
+    "If amount < -500.0, dispatches a Warn-level notification via NotifyBus."
+  ]
+}
