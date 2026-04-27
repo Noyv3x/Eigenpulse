@@ -1,5 +1,9 @@
+pub mod model;
+pub mod server_fns;
 pub mod view;
 
+pub use model::*;
+pub use server_fns::*;
 pub use view::LearningView;
 
 #[cfg(feature = "ssr")]

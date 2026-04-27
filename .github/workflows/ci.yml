@@ -1,0 +1,94 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  # Fast feedback — exits within ~3 min on a warm cache.
+  check:
+    name: cargo check (ssr + hydrate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check
+      - name: cargo check --workspace
+        run: cargo check --workspace --locked
+      - name: cargo check -p eigenpulse --features ssr
+        run: cargo check -p eigenpulse --features ssr --no-default-features --locked
+      - name: cargo check -p ep-app-client (wasm32, hydrate)
+        run: cargo check -p ep-app-client --target wasm32-unknown-unknown --features hydrate --no-default-features --locked
+
+  # End-to-end smoke against the SSR binary. Builds full leptos site
+  # (SSR binary + wasm hydrate bundle), runs leptos-postbuild to stage
+  # the `_bg.wasm` alias the in-browser hydrate loader expects, then
+  # the smoke test spawns the binary and walks login -> dashboard ->
+  # PAT 401 paths.
+  smoke:
+    name: cargo leptos build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: smoke
+      - name: Install cargo-leptos
+        run: cargo install cargo-leptos --locked --version 0.3.6
+      - name: Cargo Leptos build (release)
+        run: cargo leptos build --release
+      - name: Stage wasm aliases
+        run: ./scripts/leptos-postbuild.sh
+      - name: Smoke test
+        run: cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
+
+  # Verify the Dockerfile actually produces a runnable image. Single
+  # platform (linux/amd64, the GitHub runner native arch) — multi-arch
+  # is exercised manually via `docker buildx --platform=...,linux/arm64`.
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: eigenpulse:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Probe healthz
+        run: |
+          docker run -d --name ep-ci -p 3000:3000 \
+            -e EP_SECRET="$(openssl rand -hex 64)" \
+            -e EP_ADMIN_PASSWORD='ci-test-pw' \
+            eigenpulse:ci
+          for i in $(seq 1 20); do
+            if curl -fsS -m 2 http://127.0.0.1:3000/healthz > /dev/null; then
+              echo "healthz OK on attempt $i"
+              docker rm -f ep-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "healthz never came up"
+          docker logs ep-ci || true
+          docker rm -f ep-ci
+          exit 1

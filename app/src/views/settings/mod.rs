@@ -1,15 +1,9 @@
 pub mod notifications;
 pub mod security;
 
-/// Map any `Display` error (sqlx, anyhow, str, …) into a `ServerFnError`.
-/// Shared by the `#[server]` fns in `notifications.rs` and `security.rs`.
-///
-/// Compiled on **both** SSR and hydrate — the `#[cfg(not(feature = "ssr"))]`
-/// stub branch of every server fn calls this with a literal "ssr-only", so
-/// gating the helper itself behind `feature = "ssr"` would break hydrate.
-pub fn server_err<E: std::fmt::Display>(e: E) -> leptos::server_fn::ServerFnError {
-    leptos::server_fn::ServerFnError::ServerError(e.to_string())
-}
+// `server_err` lives in `ep_core` now — single source for both `app` views and
+// module crates. Re-export so existing `super::server_err` paths still resolve.
+pub use ep_core::server_err;
 
 use ep_ui::{Card, PageHead, StatRow};
 use leptos::prelude::*;
