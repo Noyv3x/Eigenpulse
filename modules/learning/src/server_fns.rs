@@ -114,8 +114,15 @@ pub async fn delete_book(doc_id: String) -> Result<(), ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
+        let mut tx = st.db.begin().await.map_err(server_err)?;
         sqlx::query("DELETE FROM lrn_book WHERE doc_id = ?1")
-            .bind(&doc_id).execute(&st.db).await.map_err(server_err)?;
+            .bind(&doc_id).execute(&mut *tx).await.map_err(server_err)?;
+        // add_book wrote a matching `activity` row; clear it so Today /
+        // Activity Journal don't keep dangling references after the book
+        // is gone (mirrors finance::delete_txn / fitness::delete_workout).
+        sqlx::query("DELETE FROM activity WHERE module = 'LRN' AND doc_id = ?1")
+            .bind(&doc_id).execute(&mut *tx).await.map_err(server_err)?;
+        tx.commit().await.map_err(server_err)?;
         Ok(())
     }
     #[cfg(not(feature = "ssr"))]
@@ -155,8 +162,12 @@ pub async fn delete_note(doc_id: String) -> Result<(), ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
+        let mut tx = st.db.begin().await.map_err(server_err)?;
         sqlx::query("DELETE FROM lrn_note WHERE doc_id = ?1")
-            .bind(&doc_id).execute(&st.db).await.map_err(server_err)?;
+            .bind(&doc_id).execute(&mut *tx).await.map_err(server_err)?;
+        sqlx::query("DELETE FROM activity WHERE module = 'LRN' AND doc_id = ?1")
+            .bind(&doc_id).execute(&mut *tx).await.map_err(server_err)?;
+        tx.commit().await.map_err(server_err)?;
         Ok(())
     }
     #[cfg(not(feature = "ssr"))]
