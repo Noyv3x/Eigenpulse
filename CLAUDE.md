@@ -110,6 +110,7 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - `cargo-leptos` is installed and invoked in the build stage; the runtime stage only contains the `eigenpulse` binary + `target/site/`.
 - `LEPTOS_WASM_OPT_VERSION=version_129` is set in the Dockerfile because cargo-leptos 0.3.6's default `version_123` has no aarch64 prebuilt and hangs on `--platform linux/arm64` builds.
 - **`scripts/leptos-postbuild.sh` is mandatory after every `cargo leptos build`**: cargo-leptos 0.3.6 publishes the wasm artifact as `<name>.wasm` while wasm-bindgen's `.js` loader and Leptos's `<HydrationScripts/>` both fetch `<name>_bg.wasm`. The script `cp`s the file under both names; without it every page silently degrades to its SSR snapshot (no Tweaks toggle, no ActionForm refetch, no SSE counter). The Dockerfile invokes it automatically; `cargo leptos watch` users have to re-run it after each rebuild (cargo-leptos has no post-build hook in 0.3.6).
+- **Wrap inline `{move || option.map(view!)}` in a stable wrapper element** when the conditional view sits next to an `<ActionForm>` (or any sibling that mutates DOM during hydrate). tachys 0.1.9's text-node walker panics with `failed_to_cast_text_node` if the placeholder neighbour shifts. See `app/src/views/settings/{notifications,security}.rs` for `<span class="error-slot">…</span>` and `<div class="new-token-slot">…</div>` examples; the wrapper itself never moves, so the walker keeps its anchor.
 
 ## Secret hygiene in server fns
 

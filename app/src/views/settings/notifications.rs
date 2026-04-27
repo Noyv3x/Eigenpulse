@@ -179,17 +179,25 @@ pub fn NotificationChannelsView() -> impl IntoView {
                         <button class="btn primary" type="submit">
                             <Icon kind=IconKind::Plus size=14/>"添加"
                         </button>
-                        {move || create.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{e.to_string()}</span>
-                        })}
+                        // Wrapper element keeps a stable DOM neighbour for the
+                        // text-node hydrate walker; without it, tachys 0.1.9
+                        // panics with `failed_to_cast_text_node` when a sibling
+                        // <ActionForm> rewrites the slot. See docs/follow-ups.md #26.
+                        <span class="error-slot">
+                            {move || create.value().get().and_then(|r| r.err()).map(|e| view! {
+                                <span class="tag rose">{e.to_string()}</span>
+                            })}
+                        </span>
                     </div>
                 </ActionForm>
             </Card>
 
-            {move || test_msg.get().map(|r| match r {
-                Ok(_) => view! { <p style="margin:12px 0;color:var(--primary-ink)" class="mono">"✓ 测试通道发送成功"</p> }.into_any(),
-                Err(e) => view! { <p style="margin:12px 0;color:var(--rose-ink)" class="mono">"✕ 测试失败 · " {e.to_string()}</p> }.into_any(),
-            })}
+            <div class="test-notice-slot">
+                {move || test_msg.get().map(|r| match r {
+                    Ok(_) => view! { <p style="margin:12px 0;color:var(--primary-ink)" class="mono">"✓ 测试通道发送成功"</p> }.into_any(),
+                    Err(e) => view! { <p style="margin:12px 0;color:var(--rose-ink)" class="mono">"✕ 测试失败 · " {e.to_string()}</p> }.into_any(),
+                })}
+            </div>
 
             <div style="margin-top:24px"></div>
 
@@ -235,16 +243,18 @@ pub fn NotificationChannelsView() -> impl IntoView {
                                                     </ActionForm>
                                                 </td>
                                                 <td class="num">
-                                                    <ActionForm action=test attr:style="display:inline;margin-right:6px">
-                                                        <input type="hidden" name="id" value=id/>
-                                                        <button class="btn sm" type="submit">"测试"</button>
-                                                    </ActionForm>
-                                                    <ActionForm action=delete attr:style="display:inline">
-                                                        <input type="hidden" name="id" value=id/>
-                                                        <button class="btn sm" type="submit"
-                                                                style="color:var(--rose-ink)"
-                                                                onclick="return confirm('删除该通道？')">"删除"</button>
-                                                    </ActionForm>
+                                                    <span class="row-actions-slot">
+                                                        <ActionForm action=test attr:style="display:inline;margin-right:6px">
+                                                            <input type="hidden" name="id" value=id/>
+                                                            <button class="btn sm" type="submit">"测试"</button>
+                                                        </ActionForm>
+                                                        <ActionForm action=delete attr:style="display:inline">
+                                                            <input type="hidden" name="id" value=id/>
+                                                            <button class="btn sm" type="submit"
+                                                                    style="color:var(--rose-ink)"
+                                                                    onclick="return confirm('删除该通道？')">"删除"</button>
+                                                        </ActionForm>
+                                                    </span>
                                                 </td>
                                             </tr>
                                         }

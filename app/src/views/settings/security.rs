@@ -178,20 +178,27 @@ pub fn PatView() -> impl IntoView {
                         <button class="btn primary" type="submit">
                             <Icon kind=IconKind::Plus size=14/>"生成"
                         </button>
-                        {move || generate.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{e.to_string()}</span>
-                        })}
+                        // See docs/follow-ups.md #26 — sibling <ActionForm> rewrites
+                        // the slot in hydrate, breaking text-node walking unless
+                        // the conditional view is anchored in a stable wrapper.
+                        <span class="error-slot">
+                            {move || generate.value().get().and_then(|r| r.err()).map(|e| view! {
+                                <span class="tag rose">{e.to_string()}</span>
+                            })}
+                        </span>
                     </div>
                 </ActionForm>
 
-                {move || new_token().map(|t| view! {
-                    <div style="margin-top:14px;padding:14px;border:1px solid var(--primary);border-radius:10px;background:var(--primary-soft)">
-                        <div class="mono" style="font-size:11px;color:var(--primary-ink);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">
-                            "✓ Token · 仅展示一次，请妥善保存"
+                <div class="new-token-slot">
+                    {move || new_token().map(|t| view! {
+                        <div style="margin-top:14px;padding:14px;border:1px solid var(--primary);border-radius:10px;background:var(--primary-soft)">
+                            <div class="mono" style="font-size:11px;color:var(--primary-ink);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">
+                                "✓ Token · 仅展示一次，请妥善保存"
+                            </div>
+                            <code class="mono" style="font-size:13px;word-break:break-all;color:var(--ink)">{t}</code>
                         </div>
-                        <code class="mono" style="font-size:13px;word-break:break-all;color:var(--ink)">{t}</code>
-                    </div>
-                })}
+                    })}
+                </div>
             </Card>
 
             <div style="margin-top:24px"></div>
@@ -240,14 +247,16 @@ pub fn PatView() -> impl IntoView {
                                                 <td class="mono dim" style="font-size:11px">{expires}</td>
                                                 <td><Tag tone=status_tone>{status_label}</Tag></td>
                                                 <td class="num">
-                                                    {(!revoked).then(|| view! {
-                                                        <ActionForm action=revoke attr:style="display:inline">
-                                                            <input type="hidden" name="id" value=id/>
-                                                            <button class="btn sm" type="submit"
-                                                                    style="color:var(--rose-ink)"
-                                                                    onclick="return confirm('撤销该 token？')">"撤销"</button>
-                                                        </ActionForm>
-                                                    })}
+                                                    <span class="row-actions-slot">
+                                                        {(!revoked).then(|| view! {
+                                                            <ActionForm action=revoke attr:style="display:inline">
+                                                                <input type="hidden" name="id" value=id/>
+                                                                <button class="btn sm" type="submit"
+                                                                        style="color:var(--rose-ink)"
+                                                                        onclick="return confirm('撤销该 token？')">"撤销"</button>
+                                                            </ActionForm>
+                                                        })}
+                                                    </span>
                                                 </td>
                                             </tr>
                                         }
