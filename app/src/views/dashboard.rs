@@ -1,4 +1,4 @@
-use ep_core::{fmt_int, IconKind};
+use ep_core::{fmt_int, fmt_ts_hm, IconKind};
 use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, SectionLabel, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -48,13 +48,9 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             "SELECT occurred_at, module, doc_id, summary, link_doc, amount
                FROM activity ORDER BY occurred_at DESC LIMIT 12"
         ).fetch_all(pool).await.map_err(internal)?;
-        let recent = rows.into_iter().map(|r| {
-            let dt = time::OffsetDateTime::from_unix_timestamp(r.0).ok();
-            let time_s = dt.map(|d| format!("{:02}:{:02}", d.hour(), d.minute())).unwrap_or_default();
-            ActivityRow {
-                time: time_s,
-                module: r.1, doc_id: r.2, summary: r.3, link_doc: r.4, amount: r.5,
-            }
+        let recent = rows.into_iter().map(|r| ActivityRow {
+            time: fmt_ts_hm(Some(r.0)),
+            module: r.1, doc_id: r.2, summary: r.3, link_doc: r.4, amount: r.5,
         }).collect();
 
         Ok(DashboardData { today_count_done: 2, today_count_total: 8, savings, budget_pct, budget_remain, recent })

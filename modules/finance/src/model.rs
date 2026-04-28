@@ -1,5 +1,31 @@
 use serde::{Deserialize, Serialize};
 
+/// Wire form for a transaction's `tag` column. The DB column stays TEXT
+/// (Txn::tag is `String`) so no `sqlx::Type` impl is needed; this enum is the
+/// single source of truth for the `exp | inc | tfr` set, used by add_txn
+/// validation, the row-decorator class, and the server-side sign convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tag {
+    Exp,
+    Inc,
+    Tfr,
+}
+
+impl Tag {
+    pub const fn as_str(&self) -> &'static str {
+        match self { Self::Exp => "exp", Self::Inc => "inc", Self::Tfr => "tfr" }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "exp" => Some(Self::Exp),
+            "inc" => Some(Self::Inc),
+            "tfr" => Some(Self::Tfr),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub code: String,
@@ -28,18 +54,6 @@ pub struct Txn {
     pub tag: String,
     pub note: Option<String>,
     pub linked_doc_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewTxn {
-    pub merchant: String,
-    pub category_code: String,
-    pub account_code: String,
-    pub amount: f64,
-    pub tag: String,
-    pub note: Option<String>,
-    pub linked_doc_id: Option<String>,
-    pub occurred_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

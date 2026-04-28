@@ -52,3 +52,18 @@ pub fn fmt_ts_minute(ts: Option<i64>) -> String {
         .map(|d| format!("{:02}-{:02} {:02}:{:02}", d.month() as u8, d.day(), d.hour(), d.minute()))
         .unwrap_or_else(|| "—".into())
 }
+
+/// Format an `Option<unix_seconds>` as `MM-DD`. Empty string for None / invalid
+/// (callers that need an em-dash placeholder use `fmt_ts_date`).
+pub fn fmt_ts_md(ts: Option<i64>) -> String {
+    ts.and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
+        .map(|d| format!("{:02}-{:02}", d.month() as u8, d.day()))
+        .unwrap_or_default()
+}
+
+/// Format an `Option<unix_seconds>` as `HH:MM`. Empty string for None / invalid.
+pub fn fmt_ts_hm(ts: Option<i64>) -> String {
+    ts.and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
+        .map(|d| format!("{:02}:{:02}", d.hour(), d.minute()))
+        .unwrap_or_default()
+}

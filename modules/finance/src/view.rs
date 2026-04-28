@@ -1,6 +1,7 @@
+use crate::model::{Account, Category, Tag, Txn};
 use crate::server_fns::*;
-use ep_core::{fmt_int, fmt_money, IconKind, Tone};
-use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, Tabs, TabSpec, Tag};
+use ep_core::{fmt_int, fmt_money, fmt_ts_hm, fmt_ts_md, IconKind, Tone};
+use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, Tabs, TabSpec, Tag as UiTag};
 use ep_ui::kpi::Direction;
 use leptos::prelude::*;
 
@@ -8,35 +9,55 @@ use leptos::prelude::*;
 pub fn FinanceView() -> impl IntoView {
     let active = RwSignal::new(String::from("ledger"));
     let ledger = Resource::new(|| (), |_| async { load_ledger().await });
+    let add = ServerAction::<AddTxn>::new();
+    let delete = ServerAction::<DeleteTxn>::new();
+    let merchant_filter = RwSignal::new(String::new());
+    let category_filter = RwSignal::new(String::new());
+
+    // Refetch the ledger after any add / delete completes. The mount-guard
+    // (`prev.is_some()`) keeps the first run silent so we don't double-fetch
+    // before the user has actually done anything.
+    Effect::new(move |prev: Option<()>| {
+        add.version().get();
+        delete.version().get();
+        if prev.is_some() {
+            ledger.refetch();
+        }
+    });
 
     view! {
         <div class="view">
             <PageHead
-                code="FIN-01".to_string()
-                module="FINANCE · 财务管理".to_string()
-                title="Finance".to_string()
+                code="FIN-01"
+                module="FINANCE · 财务管理"
+                title="Finance"
                 title_cn="财务管理"
                 sub="账户、预算、收支、投资。支持跨模块关联与自动分类。"
                 actions=view! {
-                    <>
-                        <button class="btn"><Icon kind=IconKind::Filter size=14/>"筛选"</button>
-                        <button class="btn"><Icon kind=IconKind::Export size=14/>"导出"</button>
-                        <button class="btn primary"><Icon kind=IconKind::Plus size=14/>"记一笔"</button>
-                    </>
+                    <a class="btn primary" href="#fin-new-merchant">
+                        <Icon kind=IconKind::Plus size=14/>"记一笔"
+                    </a>
                 }.into_any()
             />
 
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">"loading…"</div> }>
                 {move || ledger.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">"加载失败 · " {e.to_string()}</div></div> }.into_any(),
-                    Ok(data) => render_ledger(data, active).into_any(),
+                    Ok(data) => render_ledger(data, active, add, delete, merchant_filter, category_filter).into_any(),
                 })}
             </Suspense>
         </div>
     }
 }
 
-fn render_ledger(data: LedgerData, active: RwSignal<String>) -> impl IntoView {
+fn render_ledger(
+    data: LedgerData,
+    active: RwSignal<String>,
+    add: ServerAction<AddTxn>,
+    delete: ServerAction<DeleteTxn>,
+    merchant_filter: RwSignal<String>,
+    category_filter: RwSignal<String>,
+) -> impl IntoView {
     let bud_pct = if data.month.budget_total > 0.0 {
         (data.month.budget_used / data.month.budget_total * 100.0).round() as u32
     } else { 0 };
@@ -77,7 +98,10 @@ fn render_ledger(data: LedgerData, active: RwSignal<String>) -> impl IntoView {
             "budget" => render_budget(&data_for_budget).into_any(),
             "accounts" => render_accounts(&data_for_accounts).into_any(),
             "reports" => render_reports().into_any(),
-            _ => render_ledger_tab(&data_for_ledger).into_any(),
+            _ => view! {
+                {render_new_txn_form(add, data_for_ledger.categories.clone(), data_for_ledger.accounts.clone())}
+                {render_ledger_tab(&data_for_ledger, delete, merchant_filter, category_filter)}
+            }.into_any(),
         }}
     }
 }
@@ -90,7 +114,7 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
                     <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">"净资产 / NET WORTH"</span>
-                    <Tag tone=Tone::Green dot=true>"健康"</Tag>
+                    <UiTag tone=Tone::Green dot=true>"健康"</UiTag>
                 </div>
                 <div class="mono" style="font-size:32px;font-weight:600;letter-spacing:-0.02em;line-height:1.1">
                     "¥" {fmt_money(m.balance)}
@@ -121,14 +145,123 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
     }
 }
 
-fn render_ledger_tab(d: &LedgerData) -> impl IntoView {
+const INPUT_STYLE: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
+const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
+const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
+
+fn render_new_txn_form(
+    add: ServerAction<AddTxn>,
+    categories: Vec<Category>,
+    accounts: Vec<Account>,
+) -> impl IntoView {
+    view! {
+        <Card title="记一笔" code="FIN-NEW" sub="新建交易 · 自动生成 FIN-NNNNN 单号 · 标签自动定号位">
+            <ActionForm action=add attr:class="vstack" attr:style="gap:10px">
+                <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"商户 / 描述"</span>
+                        <input id="fin-new-merchant" name="merchant" required
+                               placeholder="盒马 · 生鲜" style=INPUT_STYLE/>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"金额 (¥)"</span>
+                        <input name="amount" type="number" step="0.01" min="0.01" required
+                               placeholder="42.00" style=INPUT_STYLE_MONO/>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"标签"</span>
+                        <select name="tag" style=INPUT_STYLE>
+                            <option value=Tag::Exp.as_str() selected="selected">"支出 · exp"</option>
+                            <option value=Tag::Inc.as_str()>"收入 · inc"</option>
+                            <option value=Tag::Tfr.as_str()>"转账 · tfr"</option>
+                        </select>
+                    </label>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"类别"</span>
+                        <select name="category_code" style=INPUT_STYLE>
+                            {categories.into_iter().enumerate().map(|(i, c)| {
+                                let code = c.code.clone();
+                                let label = format!("{} {}", c.name, c.code);
+                                view! { <option value=code selected=(i == 0)>{label}</option> }
+                            }).collect_view()}
+                        </select>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"账户"</span>
+                        <select name="account_code" style=INPUT_STYLE>
+                            {accounts.into_iter().enumerate().map(|(i, a)| {
+                                let code = a.code.clone();
+                                let label = format!("{} · {}", a.code, a.name);
+                                view! { <option value=code selected=(i == 0)>{label}</option> }
+                            }).collect_view()}
+                        </select>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"关联单号 (可选)"</span>
+                        <input name="linked_doc_id" placeholder="FIT-S-0412 / LRN-B-014"
+                               style=INPUT_STYLE_MONO/>
+                    </label>
+                </div>
+                <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"备注 (可选)"</span>
+                        <input name="note" placeholder="…" style=INPUT_STYLE/>
+                    </label>
+                    <span class="error-slot" style="align-self:center">
+                        {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
+                            <span class="tag rose">{e.to_string()}</span>
+                        })}
+                    </span>
+                    <button class="btn primary" type="submit" style="align-self:center">
+                        <Icon kind=IconKind::Plus size=14/>"记录"
+                    </button>
+                </div>
+            </ActionForm>
+        </Card>
+    }
+}
+
+fn render_ledger_tab(
+    d: &LedgerData,
+    delete: ServerAction<DeleteTxn>,
+    merchant_filter: RwSignal<String>,
+    category_filter: RwSignal<String>,
+) -> impl IntoView {
     let txns = d.txns.clone();
     let cat_summary = d.category_summary.clone();
+    let cat_options = d.categories.clone();
+    let total_count = txns.len();
+    // Computed once per render of this tab. The parent re-runs render_ledger_tab
+    // whenever the resource refetches (add / delete), so the export link picks
+    // up new rows automatically — no reactive attribute needed.
+    let export_href = csv_data_uri(&txns);
+
     view! {
-        <div class="grid-2">
+        <div class="grid-2" style="margin-top:20px">
             <Card title="交易明细"
                   code="FIN-LGR-01"
-                  sub=format!("共 {} 笔 · 本月", txns.len())>
+                  sub=format!("共 {} 笔 · 本月 · 支持商户搜索 / 类别筛选", total_count)>
+                <div class="hstack" style="gap:10px;margin-bottom:12px">
+                    <input type="text" placeholder="搜索商户 / 描述…"
+                           prop:value=move || merchant_filter.get()
+                           on:input=move |ev| merchant_filter.set(event_target_value(&ev))
+                           style=format!("flex:1;{}", INPUT_STYLE)/>
+                    <select prop:value=move || category_filter.get()
+                            on:change=move |ev| category_filter.set(event_target_value(&ev))
+                            style=INPUT_STYLE>
+                        <option value="">"全部类别"</option>
+                        {cat_options.into_iter().map(|c| {
+                            let code = c.code.clone();
+                            let label = format!("{} {}", c.name, c.code);
+                            view! { <option value=code>{label}</option> }
+                        }).collect_view()}
+                    </select>
+                    <a class="btn" download="finance-export.csv" href=export_href>
+                        <Icon kind=IconKind::Export size=14/>"导出"
+                    </a>
+                </div>
                 <div class="scroll-x">
                     <table class="tbl">
                         <thead>
@@ -140,47 +273,22 @@ fn render_ledger_tab(d: &LedgerData) -> impl IntoView {
                                 <th style="width:80px">"账户"</th>
                                 <th class="num" style="width:110px">"金额"</th>
                                 <th style="width:80px">"关联"</th>
+                                <th class="num" style="width:64px">"操作"</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {txns.into_iter().map(|t| {
-                                let dt = time::OffsetDateTime::from_unix_timestamp(t.occurred_at).ok();
-                                let date = dt.map(|d| format!("{:02}-{:02}", d.month() as u8, d.day())).unwrap_or_default();
-                                let time_ = dt.map(|d| format!("{:02}:{:02}", d.hour(), d.minute())).unwrap_or_default();
-                                let cls_amt = if t.amount > 0.0 { "num amt-pos" } else { "num amt-neg" };
-                                let txind = match t.tag.as_str() { "inc" => "txind inc", "tfr" => "txind tfr", _ => "txind exp" };
-                                let amount_text = if t.amount > 0.0 {
-                                    format!("+¥{}", fmt_money(t.amount))
-                                } else {
-                                    format!("−¥{}", fmt_money(t.amount.abs()))
-                                };
-                                let link = t.linked_doc_id.clone();
-                                let cat_tone = match t.category_code.as_str() {
-                                    "INC" => Tone::Green,
-                                    "TFR" => Tone::Blue,
-                                    _ => Tone::None,
-                                };
-                                let cat_label = t.category_code.clone();
-                                view! {
-                                    <tr>
-                                        <td class="mono dim">{date}<div style="font-size:10px;color:var(--ink-4)">{time_}</div></td>
-                                        <td class="doc">{t.doc_id.clone()}</td>
-                                        <td>
-                                            <span class=txind></span>
-                                            {t.merchant.clone()}
-                                        </td>
-                                        <td><Tag tone=cat_tone>{cat_label}</Tag></td>
-                                        <td class="mono dim">{t.account_code.clone()}</td>
-                                        <td class=cls_amt>{amount_text}</td>
-                                        <td class="mono dim">
-                                            {match link {
-                                                Some(l) => view! { <span><Icon kind=IconKind::Link size=10/> " " {l}</span> }.into_any(),
-                                                None => view! { <span>"—"</span> }.into_any(),
-                                            }}
-                                        </td>
-                                    </tr>
-                                }
-                            }).collect_view()}
+                            {move || {
+                                let mq = merchant_filter.get().to_lowercase();
+                                let cq = category_filter.get();
+                                txns.iter()
+                                    .filter(|t| {
+                                        (mq.is_empty() || t.merchant.to_lowercase().contains(&mq))
+                                        && (cq.is_empty() || t.category_code == cq)
+                                    })
+                                    .cloned()
+                                    .map(|t| render_txn_row(t, delete))
+                                    .collect_view()
+                            }}
                         </tbody>
                     </table>
                 </div>
@@ -208,7 +316,7 @@ fn render_ledger_tab(d: &LedgerData) -> impl IntoView {
                     </div>
                 </Card>
 
-                <Card title="智能建议" code="FIN-AI-01" sub="基于近 30 天数据">
+                <Card title="智能建议" code="FIN-AI-01" sub="基于近 30 天数据 · 演示文案">
                     <div class="vstack" style="gap:10px">
                         <div class="list-row">
                             <div class="icon-tile"><Icon kind=IconKind::Sparkle size=14/></div>
@@ -235,6 +343,59 @@ fn render_ledger_tab(d: &LedgerData) -> impl IntoView {
                 </Card>
             </div>
         </div>
+    }
+}
+
+fn render_txn_row(t: Txn, delete: ServerAction<DeleteTxn>) -> impl IntoView {
+    let date = fmt_ts_md(Some(t.occurred_at));
+    let time_ = fmt_ts_hm(Some(t.occurred_at));
+    let cls_amt = if t.amount > 0.0 { "num amt-pos" } else { "num amt-neg" };
+    let txind = match Tag::parse(&t.tag) {
+        Some(Tag::Inc) => "txind inc",
+        Some(Tag::Tfr) => "txind tfr",
+        _ => "txind exp",
+    };
+    let amount_text = if t.amount > 0.0 {
+        format!("+¥{}", fmt_money(t.amount))
+    } else {
+        format!("−¥{}", fmt_money(t.amount.abs()))
+    };
+    let link = t.linked_doc_id.clone();
+    let cat_tone = match t.category_code.as_str() {
+        "INC" => Tone::Green,
+        "TFR" => Tone::Blue,
+        _ => Tone::None,
+    };
+    let cat_label = t.category_code.clone();
+    let doc_id = t.doc_id.clone();
+    view! {
+        <tr>
+            <td class="mono dim">{date}<div style="font-size:10px;color:var(--ink-4)">{time_}</div></td>
+            <td class="doc">{t.doc_id.clone()}</td>
+            <td>
+                <span class=txind></span>
+                {t.merchant.clone()}
+            </td>
+            <td><UiTag tone=cat_tone>{cat_label}</UiTag></td>
+            <td class="mono dim">{t.account_code.clone()}</td>
+            <td class=cls_amt>{amount_text}</td>
+            <td class="mono dim">
+                {match link {
+                    Some(l) => view! { <span><Icon kind=IconKind::Link size=10/> " " {l}</span> }.into_any(),
+                    None => view! { <span>"—"</span> }.into_any(),
+                }}
+            </td>
+            <td class="num">
+                <span class="row-actions-slot">
+                    <ActionForm action=delete attr:style="display:inline">
+                        <input type="hidden" name="doc_id" value=doc_id/>
+                        <button class="btn sm" type="submit"
+                                style="color:var(--rose-ink)"
+                                onclick="return confirm('删除该笔交易？账户余额会同步回滚。')">"删除"</button>
+                    </ActionForm>
+                </span>
+            </td>
+        </tr>
     }
 }
 
@@ -291,7 +452,7 @@ fn render_accounts(d: &LedgerData) -> impl IntoView {
                             "¥" {fmt_money(a.balance)}
                         </div>
                         <div class="hstack" style="margin-top:10px;gap:10px">
-                            <Tag tone=tone>{a.r#type.clone()}</Tag>
+                            <UiTag tone=tone>{a.r#type.clone()}</UiTag>
                             <span class="mono dim" style="font-size:10.5px">"最近活动 04-22"</span>
                         </div>
                         <div style="margin-top:14px">
@@ -317,3 +478,52 @@ fn render_reports() -> impl IntoView {
     }
 }
 
+// CSV export — pure-Rust so the same code path runs on SSR (initial href is
+// rendered as part of the page) and hydrate (refreshed reactively when the
+// resource refetches).
+fn csv_data_uri(txns: &[Txn]) -> String {
+    let mut csv = String::from("doc_id,occurred_at,merchant,category,account,amount,tag,note,linked_doc_id\n");
+    for t in txns {
+        let occurred = time::OffsetDateTime::from_unix_timestamp(t.occurred_at)
+            .ok()
+            .and_then(|d| d.format(&time::format_description::well_known::Rfc3339).ok())
+            .unwrap_or_default();
+        csv.push_str(&format!(
+            "{},{},{},{},{},{:.2},{},{},{}\n",
+            t.doc_id,
+            occurred,
+            csv_escape(&t.merchant),
+            t.category_code,
+            t.account_code,
+            t.amount,
+            t.tag,
+            csv_escape(t.note.as_deref().unwrap_or("")),
+            t.linked_doc_id.as_deref().unwrap_or(""),
+        ));
+    }
+    format!("data:text/csv;charset=utf-8,{}", percent_encode(&csv))
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push_str(&format!("{:02X}", b));
+            }
+        }
+    }
+    out
+}

@@ -95,17 +95,46 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
 }
 
 #[server(AddTxn, "/api/_internal/fin", "Url", "add_txn")]
-pub async fn add_txn(input: NewTxn) -> Result<Txn, ServerFnError> {
+pub async fn add_txn(
+    merchant: String,
+    category_code: String,
+    account_code: String,
+    amount: f64,
+    tag: String,
+    note: String,
+    linked_doc_id: String,
+) -> Result<Txn, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let state: ep_core::AppState = expect_context();
-        let pool = &state.db;
 
-        if input.merchant.trim().is_empty() {
+        let merchant = merchant.trim().to_string();
+        if merchant.is_empty() {
             return Err(ServerFnError::Args("merchant is required".into()));
         }
-        let occurred = input.occurred_at.unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp());
+        let tag_kind = match crate::model::Tag::parse(&tag) {
+            Some(k) => k,
+            None => return Err(ServerFnError::Args(format!("tag must be exp/inc/tfr, got '{tag}'"))),
+        };
+        if category_code.trim().is_empty() {
+            return Err(ServerFnError::Args("category_code is required".into()));
+        }
+        if account_code.trim().is_empty() {
+            return Err(ServerFnError::Args("account_code is required".into()));
+        }
+        // Form contract: positive amount, `tag` carries the sign (matches the
+        // seed convention). `/api/v1/fin/txn` is a *separate* code path that
+        // accepts pre-signed amounts — don't conflate the two.
+        if !amount.is_finite() || amount < 0.005 {
+            return Err(ServerFnError::Args("amount must be a positive number".into()));
+        }
+        let amount = if tag_kind == crate::model::Tag::Exp { -amount } else { amount };
+        let note_opt = if note.trim().is_empty() { None } else { Some(note.clone()) };
+        let linked_opt = if linked_doc_id.trim().is_empty() { None } else { Some(linked_doc_id.clone()) };
+
+        let state: ep_core::AppState = expect_context();
+        let pool = &state.db;
+        let occurred = time::OffsetDateTime::now_utc().unix_timestamp();
 
         let mut tx = pool.begin().await.map_err(internal)?;
         let doc_id = ep_core::next_doc_id(&mut tx, "FIN", ep_core::DocIdShape::YearSerial5)
@@ -114,42 +143,41 @@ pub async fn add_txn(input: NewTxn) -> Result<Txn, ServerFnError> {
             "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         )
-        .bind(&doc_id).bind(occurred).bind(&input.merchant).bind(&input.category_code)
-        .bind(&input.account_code).bind(input.amount).bind(&input.tag)
-        .bind(&input.note).bind(&input.linked_doc_id)
+        .bind(&doc_id).bind(occurred).bind(&merchant).bind(&category_code)
+        .bind(&account_code).bind(amount).bind(&tag)
+        .bind(&note_opt).bind(&linked_opt)
         .execute(&mut *tx).await.map_err(internal)?;
 
         sqlx::query(
             "UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2"
-        ).bind(input.amount).bind(&input.account_code).execute(&mut *tx).await.map_err(internal)?;
+        ).bind(amount).bind(&account_code).execute(&mut *tx).await.map_err(internal)?;
 
         sqlx::query(
             "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc)
              VALUES (?1, 'FIN', ?2, ?3, ?4, ?5)"
-        ).bind(occurred).bind(&doc_id).bind(&input.merchant).bind(input.amount).bind(&input.linked_doc_id)
+        ).bind(occurred).bind(&doc_id).bind(&merchant).bind(amount).bind(&linked_opt)
          .execute(&mut *tx).await.map_err(internal)?;
 
-        if let Some(link) = &input.linked_doc_id {
+        if let Some(link) = &linked_opt {
             sqlx::query("INSERT OR IGNORE INTO module_link (source_doc, target_doc, kind) VALUES (?1, ?2, 'ref')")
                 .bind(&doc_id).bind(link).execute(&mut *tx).await.map_err(internal)?;
         }
 
         tx.commit().await.map_err(internal)?;
 
-        // Fire-and-forget: notify on large expenses (> ¥500).
-        if input.amount < -500.0 {
-            let n = ep_core::NotifyMessage::warn(format!("大额支出 · {}", input.merchant))
+        if amount < -500.0 {
+            let n = ep_core::NotifyMessage::warn(format!("大额支出 · {merchant}"))
                 .module("FIN")
-                .body(format!("¥{:.2} ({})", input.amount.abs(), input.category_code))
+                .body(format!("¥{:.2} ({})", amount.abs(), category_code))
                 .doc_ref(doc_id.clone())
                 .link("/finance");
             let _ = state.notify.dispatch(n).await;
         }
 
         Ok(Txn {
-            doc_id, occurred_at: occurred, merchant: input.merchant,
-            category_code: input.category_code, account_code: input.account_code,
-            amount: input.amount, tag: input.tag, note: input.note, linked_doc_id: input.linked_doc_id,
+            doc_id, occurred_at: occurred, merchant,
+            category_code, account_code,
+            amount, tag, note: note_opt, linked_doc_id: linked_opt,
         })
     }
     #[cfg(not(feature = "ssr"))]

@@ -1,5 +1,5 @@
 use axum::{extract::State, Json};
-use ep_core::AppState;
+use ep_core::{fmt_ts_hm, AppState};
 use serde::Serialize;
 
 use crate::errors::ApiError;
@@ -30,10 +30,11 @@ pub async fn handler(State(state): State<AppState>) -> Result<Json<TodayResp>, A
     )
     .fetch_all(&state.db)
     .await?;
-    let items = rows.into_iter().map(|(ts, module, doc_id, summary, _link)| {
-        let dt = time::OffsetDateTime::from_unix_timestamp(ts).ok();
-        let time_s = dt.map(|d| format!("{:02}:{:02}", d.hour(), d.minute())).unwrap_or_default();
-        TodayItemDto { time: time_s, state: "pending".into(), text: format!("{} · {}", module, summary), doc_ref: doc_id }
+    let items = rows.into_iter().map(|(ts, module, doc_id, summary, _link)| TodayItemDto {
+        time: fmt_ts_hm(Some(ts)),
+        state: "pending".into(),
+        text: format!("{} · {}", module, summary),
+        doc_ref: doc_id,
     }).collect();
     Ok(Json(TodayResp { date, items }))
 }
