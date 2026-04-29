@@ -32,4 +32,18 @@ pub struct LearningData {
     pub books: Vec<Book>,
     pub notes: Vec<Note>,
     pub courses: Vec<Course>,
+    pub summary: LearningSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LearningSummary {
+    pub notes_30d: u32,
+    pub books_done: u32,
+    pub books_reading: u32,
+    pub books_todo: u32,
+    /// Mean progress across non-archived courses, 0..1.
+    pub courses_avg_progress: f32,
+    /// 28-day note density: 4 weeks × 7 days, oldest week first, value 0..4.
+    /// Feeds directly into `<Heatmap>`.
+    pub note_heatmap_28d: Vec<u8>,
 }

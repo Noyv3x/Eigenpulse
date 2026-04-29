@@ -1,4 +1,5 @@
 use crate::model::*;
+#[cfg(feature = "ssr")]
 use ep_core::server_err;
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -24,8 +25,63 @@ pub async fn load_learning() -> Result<LearningData, ServerFnError> {
             "SELECT doc_id, name, provider, progress, due_on, tone FROM lrn_course WHERE archived = 0 ORDER BY due_on"
         ).fetch_all(&st.db);
 
-        let (books, notes, courses) =
-            tokio::try_join!(books_q, notes_q, courses_q).map_err(server_err)?;
+        // Summary aggregates run alongside the detail queries on the same try_join.
+        let notes_30d_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM lrn_note
+              WHERE updated_at >= unixepoch('now','localtime','-30 days','utc')"
+        ).fetch_one(&st.db);
+        // (status, COUNT) — we'll fan out into reading/done/todo client-side.
+        let book_status_q = sqlx::query_as::<_, (String, i64)>(
+            "SELECT status, COUNT(*) FROM lrn_book GROUP BY status"
+        ).fetch_all(&st.db);
+        let courses_avg_q = sqlx::query_scalar::<_, Option<f64>>(
+            "SELECT AVG(progress) FROM lrn_course WHERE archived = 0"
+        ).fetch_one(&st.db);
+        // 28-day note density: integer day distance between each note's
+        // local date and today's local date. The `'start of day'` modifier
+        // on BOTH sides is load-bearing — without it, `julianday(...)`
+        // preserves the sub-day fractional, so a 02:00 note and a 22:00
+        // prior-day note both round to the same integer JD even though
+        // they're on different local calendar days. With `'start of day'`
+        // both anchor to local 00:00 and the diff is whole-day-aligned.
+        let heatmap_q = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT CAST(julianday('now','localtime','start of day')
+                         - julianday(updated_at,'unixepoch','localtime','start of day') AS INTEGER) AS days_ago,
+                    COUNT(*)
+               FROM lrn_note
+              WHERE updated_at >= unixepoch('now','localtime','-28 days','utc')
+              GROUP BY days_ago"
+        ).fetch_all(&st.db);
+
+        let (books, notes, courses, notes_30d, book_status, courses_avg, heatmap_rows) =
+            tokio::try_join!(books_q, notes_q, courses_q,
+                             notes_30d_q, book_status_q, courses_avg_q, heatmap_q)
+                .map_err(server_err)?;
+
+        let mut books_done = 0u32;
+        let mut books_reading = 0u32;
+        let mut books_todo = 0u32;
+        for (status, count) in &book_status {
+            match status.as_str() {
+                "done" => books_done = *count as u32,
+                "reading" => books_reading = *count as u32,
+                "todo" => books_todo = *count as u32,
+                _ => {}
+            }
+        }
+
+        // 28-day note density: index 0 = 27-days-ago, index 27 = today, with
+        // the count clamped to 0..4 so it fits the Heatmap component's
+        // intensity scale.
+        let mut note_heatmap_28d = vec![0u8; 28];
+        for (days_ago, count) in heatmap_rows {
+            if (0..28).contains(&days_ago) {
+                let idx = (27 - days_ago) as usize;
+                // count is COUNT(*) so always ≥ 0; capping at 4 lands in the
+                // Heatmap component's 0..=4 intensity scale.
+                note_heatmap_28d[idx] = count.min(4) as u8;
+            }
+        }
 
         Ok(LearningData {
             books: books.into_iter().map(|r| Book {
@@ -37,6 +93,12 @@ pub async fn load_learning() -> Result<LearningData, ServerFnError> {
             courses: courses.into_iter().map(|r| Course {
                 doc_id: r.0, name: r.1, provider: r.2, progress: r.3, due_on: r.4, tone: r.5
             }).collect(),
+            summary: LearningSummary {
+                notes_30d: notes_30d as u32,
+                books_done, books_reading, books_todo,
+                courses_avg_progress: courses_avg.unwrap_or(0.0) as f32,
+                note_heatmap_28d,
+            },
         })
     }
     #[cfg(not(feature = "ssr"))]

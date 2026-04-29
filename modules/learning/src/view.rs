@@ -1,7 +1,7 @@
 use crate::model::*;
 use crate::server_fns::*;
 use ep_core::IconKind;
-use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, Ring, RowDeleteAction, Tag};
+use ep_ui::{Card, Heatmap, Icon, Kpi, kpi::Direction, PageHead, Ring, RowDeleteAction, Tag};
 use leptos::prelude::*;
 
 #[component]
@@ -29,39 +29,75 @@ pub fn LearningView() -> impl IntoView {
                 module="LEARNING · 学习管理"
                 title="Learning"
                 title_cn="学习管理"
-                sub="课程、书籍、笔记与 Anki 复习。以每周 14 小时为基准。"
+                sub="课程进度 · 书籍状态 · 笔记 28 天热度。所有数字来自 lrn_* 表实时聚合。"
             />
 
-            <div class="module-banner">
-                <div class="module-glyph lrn mono">"LRN"</div>
-                <div style="flex:1">
-                    <div class="hstack" style="margin-bottom:6px;gap:8px">
-                        <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">"本周学习 / WEEKLY STUDY"</span>
-                        <Tag tone=ep_core::Tone::Blue dot=true>"进行中"</Tag>
-                    </div>
-                    <div style="font-size:22px;font-weight:600;letter-spacing:-0.01em">
-                        "12.4 " <span class="mono dim" style="font-size:14px;font-weight:500">"/ 14 小时"</span>
-                    </div>
-                </div>
-                <div style="text-align:center">
-                    <Ring pct=89 size=80 thick=6 children_text="12.4h".to_string()/>
-                </div>
-            </div>
-
-            <div class="kpi-grid">
-                <Kpi code="LRN-K01" label="本周时长"   value="12.4".to_string() unit="h".to_string() delta="目标 14h · 89%".to_string() dir=Direction::Up/>
-                <Kpi code="LRN-K02" label="待复习卡片" value="60".to_string()                       delta="-18 vs 昨日".to_string()    dir=Direction::Down/>
-                <Kpi code="LRN-K03" label="笔记总数"   value="221".to_string()                      delta="+3 本周".to_string()        dir=Direction::Up/>
-                <Kpi code="LRN-K04" label="专注时段"   value="2h 40m".to_string()                   delta="平均 · 日".to_string()      dir=Direction::Flat/>
-            </div>
-
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">"loading…"</div> }>
+            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">"loading…"</div> }>
                 {move || data.get().map(|res| match res {
-                    Err(e) => view! { <p>"加载失败 · " {e.to_string()}</p> }.into_any(),
-                    Ok(d) => render_body(d, add_book, cycle, del_book, add_note, del_note).into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">"加载失败 · " {e.to_string()}</div></div> }.into_any(),
+                    Ok(d) => render_learning(d, add_book, cycle, del_book, add_note, del_note).into_any(),
                 })}
             </Suspense>
         </div>
+    }
+}
+
+fn render_learning(
+    d: LearningData,
+    add_book: ServerAction<AddBook>,
+    cycle: ServerAction<CycleBookStatus>,
+    del_book: ServerAction<DeleteBook>,
+    add_note: ServerAction<AddNote>,
+    del_note: ServerAction<DeleteNote>,
+) -> impl IntoView {
+    let s = d.summary.clone();
+    let progress_pct = (s.courses_avg_progress * 100.0).round() as u32;
+    let books_total = s.books_done + s.books_reading + s.books_todo;
+    let banner_text = format!("{} 个课程进行中 · 平均进度 {}%", d.courses.len(), progress_pct);
+    let heatmap_total: u32 = s.note_heatmap_28d.iter().map(|c| *c as u32).sum();
+    let heatmap_data = s.note_heatmap_28d;
+    view! {
+        <div class="module-banner">
+            <div class="module-glyph lrn mono">"LRN"</div>
+            <div style="flex:1">
+                <div class="hstack" style="margin-bottom:6px;gap:8px">
+                    <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"学习状态 / STATUS"</span>
+                    <Tag tone=ep_core::Tone::Blue dot=true>{format!("近 30 天 {} 笔记", s.notes_30d)}</Tag>
+                </div>
+                <div style="font-size:22px;font-weight:600;letter-spacing:-0.01em">
+                    {banner_text}
+                </div>
+                <div class="hstack" style="gap:16px;margin-top:8px;font-size:12.5px;color:var(--ink-3)">
+                    <span class="mono">{format!("在读 {} · 已完成 {} · 待读 {} · 共 {}",
+                                              s.books_reading, s.books_done, s.books_todo, books_total)}</span>
+                </div>
+            </div>
+            <div style="text-align:center">
+                <Ring pct=progress_pct size=80 thick=6 children_text=format!("{}%", progress_pct)/>
+                <div class="mono dim" style="font-size:10px;margin-top:6px;text-transform:uppercase;letter-spacing:0.06em">"课程均值"</div>
+            </div>
+        </div>
+
+        <div class="kpi-grid">
+            <Kpi code="LRN-K01" label="近 30 天笔记" value=format!("{}", s.notes_30d)
+                 unit="条".to_string()
+                 delta=format!("28 天热力 {} 条", heatmap_total) dir=Direction::Up/>
+            <Kpi code="LRN-K02" label="课程进度"
+                 value=format!("{}", progress_pct) unit="%".to_string()
+                 delta=format!("{} 个课程", d.courses.len()) dir=Direction::Flat/>
+            <Kpi code="LRN-K03" label="在读书籍" value=format!("{}", s.books_reading)
+                 delta=format!("已完成 {}", s.books_done) dir=Direction::Flat/>
+            <Kpi code="LRN-K04" label="待读队列" value=format!("{}", s.books_todo)
+                 delta=format!("共 {} 本", books_total) dir=Direction::Flat/>
+        </div>
+
+        <Card title="笔记热度" code="LRN-HEAT-01" sub="近 28 天 · 单元格深度按当日笔记条数 (0..4) 归一化">
+            <Heatmap data=heatmap_data/>
+        </Card>
+
+        <div style="margin-top:20px"></div>
+
+        {render_body(d, add_book, cycle, del_book, add_note, del_note)}
     }
 }
 
