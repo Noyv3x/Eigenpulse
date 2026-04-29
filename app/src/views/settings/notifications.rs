@@ -1,5 +1,5 @@
 use ep_core::IconKind;
-use ep_ui::{Card, Icon, PageHead, Tag};
+use ep_ui::{Card, Icon, PageHead, RowDeleteAction, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -248,12 +248,8 @@ pub fn NotificationChannelsView() -> impl IntoView {
                                                             <input type="hidden" name="id" value=id/>
                                                             <button class="btn sm" type="submit">"测试"</button>
                                                         </ActionForm>
-                                                        <ActionForm action=delete attr:style="display:inline">
-                                                            <input type="hidden" name="id" value=id/>
-                                                            <button class="btn sm" type="submit"
-                                                                    style="color:var(--rose-ink)"
-                                                                    onclick="return confirm('删除该通道？')">"删除"</button>
-                                                        </ActionForm>
+                                                        <RowDeleteAction action=delete value=id.to_string()
+                                                                         field="id" confirm="删除该通道？"/>
                                                     </span>
                                                 </td>
                                             </tr>

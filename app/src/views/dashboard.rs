@@ -1,4 +1,9 @@
-use ep_core::{fmt_int, fmt_ts_hm, IconKind};
+use ep_core::{fmt_int, IconKind};
+// `fmt_ts_hm` is consumed only inside the `#[cfg(feature = "ssr")]` body
+// of `load_dashboard`; importing it at module scope would warn on the
+// wasm32 hydrate target where the body is replaced by an `ssr-only` stub.
+#[cfg(feature = "ssr")]
+use ep_core::fmt_ts_hm;
 use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, SectionLabel, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;

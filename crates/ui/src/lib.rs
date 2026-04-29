@@ -15,6 +15,7 @@ pub mod heatmap;
 pub mod sidebar;
 pub mod topbar;
 pub mod notifications;
+pub mod row_action;
 pub mod stat;
 
 pub use icon::Icon;
@@ -32,4 +33,5 @@ pub use sidebar::Sidebar;
 pub use topbar::Topbar;
 pub use tweaks::{TweakState, Theme, Density, provide_tweak_state, use_tweaks};
 pub use notifications::{NotificationsBellPopover, provide_unread_signal, use_unread_signal};
+pub use row_action::RowDeleteAction;
 pub use stat::StatRow;

@@ -1,7 +1,7 @@
 use crate::model::*;
 use crate::server_fns::*;
 use ep_core::IconKind;
-use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, Ring, Tag};
+use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, Ring, RowDeleteAction, Tag};
 use leptos::prelude::*;
 
 #[component]
@@ -129,14 +129,8 @@ fn render_body(
                                         </ActionForm>
                                     </td>
                                     <td class="num">
-                                        <span class="row-actions-slot">
-                                            <ActionForm action=del_book attr:style="display:inline">
-                                                <input type="hidden" name="doc_id" value=doc2/>
-                                                <button class="btn sm" type="submit"
-                                                        style="color:var(--rose-ink)"
-                                                        onclick="return confirm('删除？')">"×"</button>
-                                            </ActionForm>
-                                        </span>
+                                        <RowDeleteAction action=del_book value=doc2
+                                                         confirm="删除该书？" label="×"/>
                                     </td>
                                 </tr>
                             }
@@ -172,14 +166,8 @@ fn render_body(
                                     <div class="title">{n.title}</div>
                                     <div class="meta mono dim">{when}</div>
                                 </div>
-                                <span class="row-actions-slot">
-                                    <ActionForm action=del_note attr:style="display:inline">
-                                        <input type="hidden" name="doc_id" value=doc/>
-                                        <button class="btn sm" type="submit"
-                                                style="color:var(--rose-ink)"
-                                                onclick="return confirm('删除？')">"×"</button>
-                                    </ActionForm>
-                                </span>
+                                <RowDeleteAction action=del_note value=doc
+                                                 confirm="删除该笔记？" label="×"/>
                             </div>
                         }
                     }).collect_view()}

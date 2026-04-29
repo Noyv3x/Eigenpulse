@@ -1,7 +1,7 @@
 use crate::model::Workout;
 use crate::server_fns::*;
 use ep_core::{IconKind, Tone};
-use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, Ring, StatRow, Tag};
+use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, Ring, RowDeleteAction, StatRow, Tag};
 use leptos::prelude::*;
 
 #[component]
@@ -175,14 +175,7 @@ fn render_workouts(rows: Vec<Workout>, delete: ServerAction<DeleteWorkout>) -> i
                             <td class="num">{w.load_text.unwrap_or_default()}</td>
                             <td><Tag tone=strain_tone>{strain_label}</Tag></td>
                             <td class="num">
-                                <span class="row-actions-slot">
-                                    <ActionForm action=delete attr:style="display:inline">
-                                        <input type="hidden" name="doc_id" value=doc/>
-                                        <button class="btn sm" type="submit"
-                                                style="color:var(--rose-ink)"
-                                                onclick="return confirm('删除该训练？')">"删除"</button>
-                                    </ActionForm>
-                                </span>
+                                <RowDeleteAction action=delete value=doc confirm="删除该训练？"/>
                             </td>
                         </tr>
                     }

@@ -1,7 +1,7 @@
 use crate::model::{Account, Category, Tag, Txn};
 use crate::server_fns::*;
 use ep_core::{fmt_int, fmt_money, fmt_ts_hm, fmt_ts_md, IconKind, Tone};
-use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, Tabs, TabSpec, Tag as UiTag};
+use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, RowDeleteAction, Tabs, TabSpec, Tag as UiTag};
 use ep_ui::kpi::Direction;
 use leptos::prelude::*;
 
@@ -184,7 +184,7 @@ fn render_new_txn_form(
                             {categories.into_iter().enumerate().map(|(i, c)| {
                                 let code = c.code.clone();
                                 let label = format!("{} {}", c.name, c.code);
-                                view! { <option value=code selected=(i == 0)>{label}</option> }
+                                view! { <option value=code selected={i == 0}>{label}</option> }
                             }).collect_view()}
                         </select>
                     </label>
@@ -194,7 +194,7 @@ fn render_new_txn_form(
                             {accounts.into_iter().enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
                                 let label = format!("{} · {}", a.code, a.name);
-                                view! { <option value=code selected=(i == 0)>{label}</option> }
+                                view! { <option value=code selected={i == 0}>{label}</option> }
                             }).collect_view()}
                         </select>
                     </label>
@@ -386,14 +386,8 @@ fn render_txn_row(t: Txn, delete: ServerAction<DeleteTxn>) -> impl IntoView {
                 }}
             </td>
             <td class="num">
-                <span class="row-actions-slot">
-                    <ActionForm action=delete attr:style="display:inline">
-                        <input type="hidden" name="doc_id" value=doc_id/>
-                        <button class="btn sm" type="submit"
-                                style="color:var(--rose-ink)"
-                                onclick="return confirm('删除该笔交易？账户余额会同步回滚。')">"删除"</button>
-                    </ActionForm>
-                </span>
+                <RowDeleteAction action=delete value=doc_id
+                                 confirm="删除该笔交易？账户余额会同步回滚。"/>
             </td>
         </tr>
     }

@@ -157,6 +157,8 @@ Rules:
 - **Don't** put `PRAGMA journal_mode/synchronous/foreign_keys` in a migration `.sql`. SQLite forbids these inside transactions and sqlx wraps every migration in one. Already configured in `pool.rs::open_pool`.
 - **Don't** add `[lib] crate-type = ["rlib"]` alone to the `app` crate; cargo-leptos 0.3.x needs `["cdylib", "rlib"]` to find the hydration target. Likewise the `[package.metadata.leptos]` keys `env`, `watch`, `reload-port`, `lib-package` are silently ignored — leave them out so you don't get false confidence.
 - **Don't** call `Document::set_cookie` in web-sys; it's `HtmlDocument::set_cookie` (cast via `dyn_into::<web_sys::HtmlDocument>()`).
+- **Don't** put a `move ||`-returning attribute (`href=move ||`, `class=move ||`, …) on a child element passed through a prop typed as `Option<AnyView>`. The closure is captured statically when the AnyView is constructed and never re-fires on signal updates; the SSR snapshot value sticks. Symptom: a Resource feeds a `<a href=move || ledger.get()…>` on `PageHead actions=`, the table inside `<Suspense>` fills in fine, but the anchor's href stays at the SSR fallback even after hydrate. Move the reactive node into the same `<Suspense>` boundary that already re-renders when the data lands (parent re-render = fresh closure = current value), or pre-resolve to a non-reactive `String` before passing.
+- **Don't** import `ep_core::fmt_ts_*` (or any helper used only inside a `#[server]`'s `#[cfg(feature = "ssr")]` body) at module scope. The hydrate-target compile sees the import but not the use, and warns. Gate the `use` with `#[cfg(feature = "ssr")]` next to it. (Pattern in `app/src/views/dashboard.rs`.)
 
 ## Plan reference
 

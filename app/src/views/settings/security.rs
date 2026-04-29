@@ -1,5 +1,5 @@
 use ep_core::IconKind;
-use ep_ui::{Card, Icon, PageHead, Tag};
+use ep_ui::{Card, Icon, PageHead, RowDeleteAction, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,47 @@ pub async fn revoke_pat(id: i64) -> Result<(), ServerFnError> {
     { Err(server_err("ssr-only")) }
 }
 
+#[server(ChangePassword, "/api/_internal/cfg", "Url", "change_password")]
+pub async fn change_password(
+    current: String,
+    new: String,
+    confirm: String,
+) -> Result<(), ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        if new != confirm {
+            return Err(ServerFnError::Args("两次输入的新密码不一致".into()));
+        }
+        if new.chars().count() < 6 {
+            return Err(ServerFnError::Args("新密码至少 6 个字符".into()));
+        }
+        if new == current {
+            return Err(ServerFnError::Args("新密码与当前密码相同".into()));
+        }
+        let st: ep_core::AppState = expect_context();
+        let (current_hash,): (String,) = sqlx::query_as("SELECT password_hash FROM app_user WHERE id = 1")
+            .fetch_one(&st.db).await.map_err(server_err)?;
+        let ok = ep_auth::verify_password_async(current, current_hash)
+            .await.map_err(server_err)?;
+        if !ok {
+            return Err(ServerFnError::Args("当前密码错误".into()));
+        }
+        let new_hash = ep_auth::hash_password_async(new).await.map_err(server_err)?;
+        // UPDATE + session purge in one tx so a pre-rotation cookie can never
+        // outlive the new credential. Includes the caller's own cookie — the
+        // sub-text on the Card warns the user that re-login is required.
+        let mut tx = st.db.begin().await.map_err(server_err)?;
+        sqlx::query("UPDATE app_user SET password_hash = ?1 WHERE id = 1")
+            .bind(&new_hash).execute(&mut *tx).await.map_err(server_err)?;
+        ep_auth::purge_all_sessions(&mut *tx).await.map_err(server_err)?;
+        tx.commit().await.map_err(server_err)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "ssr"))]
+    { Err(server_err("ssr-only")) }
+}
+
 const ALL_SCOPES: &[(&str, &str)] = &[
     ("fin:read",     "FIN · 只读"),
     ("fin:write",    "FIN · 写入"),
@@ -129,6 +170,7 @@ pub fn PatView() -> impl IntoView {
     let pats = Resource::new(|| (), |_| async { list_pats().await });
     let generate = ServerAction::<GeneratePat>::new();
     let revoke = ServerAction::<RevokePat>::new();
+    let change = ServerAction::<ChangePassword>::new();
 
     Effect::new(move |prev: Option<()>| {
         generate.version().get();
@@ -144,11 +186,55 @@ pub fn PatView() -> impl IntoView {
         <div class="view">
             <PageHead
                 code="CFG-SEC-01"
-                module="SETTINGS · API 安全"
-                title="Personal Access Tokens"
-                title_cn="开放 API 鉴权"
-                sub="生成 ep_pat_… token 用于 /api/v1/* 调用。token 仅创建时展示一次。"
+                module="SETTINGS · 安全"
+                title="Security"
+                title_cn="账户安全 · API"
+                sub="修改登录密码，管理 /api/v1/* 的 Personal Access Tokens。"
             />
+
+            <Card title="修改密码" code="CFG-SEC-PWD"
+                  sub="提交后所有会话（含本设备）都会失效，需要重新登录。">
+                <ActionForm action=change attr:class="vstack" attr:style="gap:10px">
+                    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"当前密码"</span>
+                            <input name="current" type="password" required autocomplete="current-password"
+                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"新密码 (≥ 6)"</span>
+                            <input name="new" type="password" required minlength="6" autocomplete="new-password"
+                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"确认新密码"</span>
+                            <input name="confirm" type="password" required minlength="6" autocomplete="new-password"
+                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                        </label>
+                    </div>
+                    <div class="hstack" style="gap:8px;align-items:center">
+                        <button class="btn primary" type="submit">
+                            <Icon kind=IconKind::Check size=14/>"修改密码"
+                        </button>
+                        <span class="error-slot">
+                            {move || match change.value().get() {
+                                Some(Ok(_)) => view! {
+                                    <span class="tag green">
+                                        "✓ 已修改 · 所有会话已失效，"
+                                        <a href="/login" style="color:inherit;text-decoration:underline">"重新登录"</a>
+                                    </span>
+                                }.into_any(),
+                                Some(Err(e)) => view! {
+                                    <span class="tag rose">{e.to_string()}</span>
+                                }.into_any(),
+                                None => ().into_any(),
+                            }}
+                        </span>
+                    </div>
+                </ActionForm>
+            </Card>
+
+            <div style="margin-top:24px"></div>
 
             <Card title="生成新 Token" code="CFG-SEC-NEW">
                 <ActionForm action=generate attr:class="vstack" attr:style="gap:10px">
@@ -247,16 +333,10 @@ pub fn PatView() -> impl IntoView {
                                                 <td class="mono dim" style="font-size:11px">{expires}</td>
                                                 <td><Tag tone=status_tone>{status_label}</Tag></td>
                                                 <td class="num">
-                                                    <span class="row-actions-slot">
-                                                        {(!revoked).then(|| view! {
-                                                            <ActionForm action=revoke attr:style="display:inline">
-                                                                <input type="hidden" name="id" value=id/>
-                                                                <button class="btn sm" type="submit"
-                                                                        style="color:var(--rose-ink)"
-                                                                        onclick="return confirm('撤销该 token？')">"撤销"</button>
-                                                            </ActionForm>
-                                                        })}
-                                                    </span>
+                                                    {(!revoked).then(|| view! {
+                                                        <RowDeleteAction action=revoke value=id.to_string()
+                                                                         field="id" confirm="撤销该 token？" label="撤销"/>
+                                                    })}
                                                 </td>
                                             </tr>
                                         }
