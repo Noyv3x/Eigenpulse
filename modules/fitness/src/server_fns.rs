@@ -85,20 +85,34 @@ async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx:
         .map(|w| w.split("-W").nth(1).map(|n| format!("W{}", n)).unwrap_or_else(|| w.clone()))
         .collect();
 
-    let this_week_count: u32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM fit_workout
-          WHERE occurred_at >= unixepoch('now','localtime','weekday 0','-7 days','utc')"
-    ).fetch_one(pool).await?;
+    // Week boundary = local Monday 00:00 of the week containing today.
+    // Matches the Mon-start convention used by `strftime('%Y-W%W', …)`
+    // in the weekly_load aggregator above so the two are coherent.
+    //
+    // Modifier order matters: '-6 days' shifts back six full days first;
+    // 'weekday 1' then advances forward to the next Monday, which (for
+    // any starting weekday) lands on the Monday of the calling week;
+    // 'start of day' anchors at local 00:00 (without it the boundary
+    // drifts by the time-of-day fractional); 'utc' converts the
+    // local-Monday-00:00 string to a UTC unix epoch for comparison
+    // against `occurred_at`. The earlier `'weekday 0','-7 days'` form
+    // was Sun-start AND kept the time-of-day, off by both axes.
+    const WEEK_START_MONDAY: &str =
+        "unixepoch('now','localtime','-6 days','weekday 1','start of day','utc')";
 
-    let aerobic_min_this_week: u32 = sqlx::query_scalar(
+    let this_week_count: u32 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM fit_workout WHERE occurred_at >= {WEEK_START_MONDAY}"
+    )).fetch_one(pool).await?;
+
+    let aerobic_min_this_week: u32 = sqlx::query_scalar(&format!(
         "SELECT COALESCE(SUM(duration_m), 0) FROM fit_workout
-          WHERE occurred_at >= unixepoch('now','localtime','weekday 0','-7 days','utc')
+          WHERE occurred_at >= {WEEK_START_MONDAY}
             AND (lower(kind) LIKE '%cardio%'
                  OR lower(kind) LIKE '%有氧%'
                  OR lower(kind) LIKE '%跑%'
                  OR lower(kind) LIKE '%骑%'
                  OR lower(kind) LIKE '%游%')"
-    ).fetch_one(pool).await?;
+    )).fetch_one(pool).await?;
 
     let avg_duration_min: u32 = sqlx::query_scalar(
         "SELECT COALESCE(CAST(AVG(duration_m) AS INTEGER), 0) FROM fit_workout
@@ -192,6 +206,35 @@ mod streak_tests {
     fn duplicate_workouts_same_day_count_once() {
         let dates = [2_460_000, 2_460_000, 2_459_999];
         assert_eq!(compute_streak(2_460_000, &dates), 2);
+    }
+
+    /// Pins the week-start invariant. The `'-6 days','weekday 1','start
+    /// of day'` chain must always land on Monday 00:00 of the week
+    /// containing the input date — for every weekday Mon–Sun and across
+    /// any month boundary. The earlier `'weekday 0','-7 days'` form was
+    /// Sun-start (off by 1) AND preserved the time-of-day fractional
+    /// (drifted by hours).
+    #[tokio::test(flavor = "current_thread")]
+    async fn week_start_anchors_to_local_monday_zero_zero() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        // Probe seven consecutive days; all should resolve to the same
+        // Monday at 00:00:00.
+        let week_anchors: Vec<String> = sqlx::query_scalar(
+            "WITH d(s) AS (VALUES
+                ('2026-04-27 03:00:00'),
+                ('2026-04-28 14:00:00'),
+                ('2026-04-29 09:30:00'),
+                ('2026-04-30 23:59:00'),
+                ('2026-05-01 00:01:00'),
+                ('2026-05-02 12:00:00'),
+                ('2026-05-03 23:00:00')
+             )
+             SELECT datetime(s,'-6 days','weekday 1','start of day') FROM d"
+        ).fetch_all(&pool).await.unwrap();
+        for a in &week_anchors {
+            assert_eq!(a, "2026-04-27 00:00:00",
+                       "expected Monday 2026-04-27 00:00:00, got {a}");
+        }
     }
 
     /// Pins the `'start of day'` modifier on the streak's day-bucketing
