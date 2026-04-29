@@ -33,3 +33,38 @@ pub async fn hash_password_async(plain: String) -> anyhow::Result<String> {
 pub async fn verify_password_async(plain: String, encoded: String) -> anyhow::Result<bool> {
     tokio::task::spawn_blocking(move || verify_password(&plain, &encoded)).await?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_verify_sync_roundtrip() {
+        let h = hash_password("hunter2_test").unwrap();
+        assert!(verify_password("hunter2_test", &h).unwrap());
+        assert!(!verify_password("wrong", &h).unwrap());
+    }
+
+    #[test]
+    fn hash_produces_distinct_outputs_for_same_input() {
+        // SaltString::generate(OsRng) means two hashes of the same plaintext
+        // must differ (otherwise we have a salt collision or a bug).
+        let a = hash_password("same-plain").unwrap();
+        let b = hash_password("same-plain").unwrap();
+        assert_ne!(a, b, "same plaintext must produce different hashes (random salt)");
+        assert!(verify_password("same-plain", &a).unwrap());
+        assert!(verify_password("same-plain", &b).unwrap());
+    }
+
+    #[test]
+    fn verify_rejects_garbage_hash() {
+        assert!(verify_password("anything", "not-a-real-hash").is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_verify_async_roundtrip() {
+        let h = hash_password_async("test1234".into()).await.unwrap();
+        assert!(verify_password_async("test1234".into(), h.clone()).await.unwrap());
+        assert!(!verify_password_async("nope".into(), h).await.unwrap());
+    }
+}

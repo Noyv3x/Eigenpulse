@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ssr")]
 use super::server_err;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

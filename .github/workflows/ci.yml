@@ -30,6 +30,28 @@ jobs:
       - name: cargo check -p ep-app-client (wasm32, hydrate)
         run: cargo check -p ep-app-client --target wasm32-unknown-unknown --features hydrate --no-default-features --locked
 
+  # Unit tests across the workspace (excludes app/tests/smoke.rs which
+  # the `smoke` job below runs separately because it needs cargo-leptos).
+  # All tests assume `--features ssr` since the only test-bearing modules
+  # (auth/argon, auth/session, core/fmt, app/views/today) are all
+  # ssr-gated.
+  unit-tests:
+    name: cargo test --lib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+      - name: cargo test --lib --features ssr (workspace)
+        run: |
+          cargo test -p ep-core --lib --locked
+          cargo test -p ep-auth --lib --features ssr --no-default-features --locked
+          cargo test -p ep-finance --lib --features ssr --no-default-features --locked
+          cargo test -p ep-fitness --lib --features ssr --no-default-features --locked
+          cargo test -p eigenpulse --lib --features ssr --no-default-features --locked
+
   # End-to-end smoke against the SSR binary. Builds full leptos site
   # (SSR binary + wasm hydrate bundle), runs leptos-postbuild to stage
   # the `_bg.wasm` alias the in-browser hydrate loader expects, then

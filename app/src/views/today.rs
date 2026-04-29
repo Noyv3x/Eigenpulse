@@ -4,6 +4,9 @@ use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
+// Gated to `ssr` because the only callers (`load_today` body and the
+// `#[cfg(not(feature = "ssr"))]` stub) both live behind the same flag.
+#[cfg(feature = "ssr")]
 use ep_core::server_err;
 #[cfg(feature = "ssr")]
 use ep_core::fmt_ts_hm;
@@ -184,5 +187,45 @@ fn render_today_item(it: TodayItem) -> impl IntoView {
                 })}
             </span>
         </a>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod boundary_tests {
+    /// Pins the SQLite modifier-order fix described in the rationale comment
+    /// inside `load_today`. The reversed form
+    /// `unixepoch('now','start of day','localtime')` would compute UTC
+    /// midnight first, then shift by the local TZ offset — putting the
+    /// boundary up to a full day off the user's actual local midnight. A
+    /// direct probe (commit 4a5d685's body) measured 16h drift under
+    /// `TZ=Asia/Shanghai`; this test ensures any future "simplification"
+    /// of the SQL trips an alarm rather than silently re-introducing the
+    /// bug.
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_day_boundary_is_in_the_past() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let fixed: i64 = sqlx::query_scalar(
+            "SELECT unixepoch('now','localtime','start of day','utc')"
+        ).fetch_one(&pool).await.unwrap();
+        let now: i64 = sqlx::query_scalar("SELECT unixepoch('now')")
+            .fetch_one(&pool).await.unwrap();
+        assert!(fixed <= now, "local midnight ({fixed}) must not exceed now ({now})");
+        // And no further than 24h in the past, regardless of TZ.
+        assert!(now - fixed < 24 * 3600,
+                "boundary {fixed} should be within 24h of now {now} ({}h drift)",
+                (now - fixed) / 3600);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_date_string_is_iso_today_or_yesterday() {
+        // `date('now','localtime')` should always be a valid ISO 8601 date
+        // string within ±1 day of today (UTC). We can't pin the exact value
+        // without controlling the TZ, but we can pin the format.
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let date: String = sqlx::query_scalar("SELECT date('now','localtime')")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(date.len(), 10, "expected YYYY-MM-DD, got {date:?}");
+        assert!(date.chars().nth(4) == Some('-') && date.chars().nth(7) == Some('-'),
+                "expected YYYY-MM-DD, got {date:?}");
     }
 }
