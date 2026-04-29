@@ -4,7 +4,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, SameSite, SignedCookieJar};
-use ep_auth::{verify_password, login_create_session, COOKIE_NAME, logout_destroy_session};
+use ep_auth::{login_create_session, COOKIE_NAME, logout_destroy_session};
 use ep_core::AppState;
 use serde::Deserialize;
 use time::Duration;
@@ -74,8 +74,7 @@ pub async fn submit(
     let Some((user_id, hash)) = row else {
         return Redirect::temporary("/login?error=1").into_response();
     };
-    let password = input.password.clone();
-    let ok = tokio::task::spawn_blocking(move || verify_password(&password, &hash).unwrap_or(false))
+    let ok = ep_auth::verify_password_async(input.password.clone(), hash)
         .await
         .unwrap_or(false);
     if !ok { return Redirect::temporary("/login?error=1").into_response(); }

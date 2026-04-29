@@ -12,7 +12,7 @@ pub async fn bootstrap_admin(pool: &SqlitePool) -> anyhow::Result<()> {
             "EP_ADMIN_PASSWORD env var is required for first boot to create the OWNER account"
         )
     })?;
-    if password.len() < 6 {
+    if password.chars().count() < 6 {
         anyhow::bail!("EP_ADMIN_PASSWORD must be at least 6 characters");
     }
     let hash = crate::hash_password(&password)?;

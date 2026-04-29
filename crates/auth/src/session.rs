@@ -51,6 +51,22 @@ pub async fn logout_destroy_session(pool: &SqlitePool, token: &str) -> anyhow::R
     Ok(())
 }
 
+/// Forcibly invalidate every cookie session in the DB (including the caller's
+/// own). Used by password rotation paths — both the in-app
+/// `/settings/security` change-password server fn and the
+/// `crates/auth/examples/reset_password.rs` recovery CLI — to guarantee a
+/// pre-rotation cookie can't outlive the new credential. Generic over
+/// `SqliteExecutor` so callers in a transaction can pass `&mut *tx`.
+pub async fn purge_all_sessions<'e, E>(executor: E) -> sqlx::Result<u64>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let result = sqlx::query("DELETE FROM session")
+        .execute(executor)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn lookup_session(pool: &SqlitePool, token: &str) -> anyhow::Result<Option<(Session, AuthUser)>> {
     let row: Option<(String, i64, i64, i64, String, String, String)> = sqlx::query_as(
         "SELECT s.token, s.user_id, s.expires_at, s.last_seen, u.handle, u.name, u.role

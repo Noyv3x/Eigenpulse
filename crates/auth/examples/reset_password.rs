@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     if updated == 0 {
         anyhow::bail!("no row with id=1 in app_user — has the app ever been bootstrapped?");
     }
-    sqlx::query("DELETE FROM session").execute(&mut *tx).await?;
+    ep_auth::purge_all_sessions(&mut *tx).await?;
     tx.commit().await?;
     eprintln!("password updated; all sessions invalidated");
     Ok(())

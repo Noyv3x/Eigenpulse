@@ -21,3 +21,15 @@ pub fn verify_password(plain: &str, encoded: &str) -> anyhow::Result<bool> {
         .map_err(|e| anyhow::anyhow!("argon2 parse failed: {e}"))?;
     Ok(hasher().verify_password(plain.as_bytes(), &parsed).is_ok())
 }
+
+/// Async wrapper for `hash_password` that bounces the ~150 ms Argon2id
+/// computation onto the blocking pool. Use from server fns / axum handlers
+/// so the leptos runtime / tower worker isn't parked.
+pub async fn hash_password_async(plain: String) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || hash_password(&plain)).await?
+}
+
+/// Async wrapper for `verify_password`. Same rationale as `hash_password_async`.
+pub async fn verify_password_async(plain: String, encoded: String) -> anyhow::Result<bool> {
+    tokio::task::spawn_blocking(move || verify_password(&plain, &encoded)).await?
+}

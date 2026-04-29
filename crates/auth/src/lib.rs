@@ -10,9 +10,9 @@ pub mod pat;
 pub mod bootstrap;
 
 #[cfg(feature = "ssr")]
-pub use argon::{hash_password, verify_password};
+pub use argon::{hash_password, hash_password_async, verify_password, verify_password_async};
 #[cfg(feature = "ssr")]
-pub use session::{Session, AuthUser, COOKIE_NAME, login_create_session, logout_destroy_session, lookup_session};
+pub use session::{Session, AuthUser, COOKIE_NAME, login_create_session, logout_destroy_session, lookup_session, purge_all_sessions};
 #[cfg(feature = "ssr")]
 pub use middleware::{require_session, require_user_for_server_fn};
 #[cfg(feature = "ssr")]
