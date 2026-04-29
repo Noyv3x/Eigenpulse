@@ -596,16 +596,17 @@ body {
   font-size: 13px;
   cursor: pointer;
   transition: background 0.15s;
+  color: inherit;
+  text-decoration: none;
 }
 .today-item:hover { background: var(--bg-2); }
 .today-item .time { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .today-item .mark { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); justify-self: center; }
-.today-item.done .mark { background: var(--ink-4); }
-.today-item.done .text { color: var(--ink-3); text-decoration: line-through; text-decoration-color: var(--ink-4); }
-.today-item.pending .mark { background: var(--amber); }
-.today-item.blocked .mark { background: var(--rose); }
 .today-item .text { font-size: 13px; }
+.today-item .text-module { margin-right: 6px; }
+.today-item .text-amount { margin-left: 8px; }
 .today-item .ref { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4); }
+.today-item .ref-link { margin-left: 6px; color: var(--ink-3); }
 
 /* --- Donut (CSS) --- */
 .donut {
