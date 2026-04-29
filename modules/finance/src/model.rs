@@ -57,6 +57,15 @@ pub struct Txn {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetEntry {
+    pub category_code: String,
+    pub amount: f64,
+    /// Magnitude of expenses in this category for the budget's period
+    /// (matched on `period = 'YYYY-MM'`).
+    pub used: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategorySummary {
     pub code: String,
     pub name: String,

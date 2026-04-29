@@ -10,6 +10,9 @@ pub struct LedgerData {
     pub txns: Vec<Txn>,
     pub category_summary: Vec<CategorySummary>,
     pub month: MonthSummary,
+    /// Per-category budget entries for the current period (joined with
+    /// month-to-date expenses). Drives the rule-based suggestions card.
+    pub budgets: Vec<BudgetEntry>,
 }
 
 #[server(LoadLedger, "/api/_internal/fin", "Url", "load_ledger")]
@@ -52,9 +55,24 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         let budget_q = sqlx::query_scalar::<_, f64>(
             "SELECT COALESCE(SUM(amount),0) FROM fin_budget WHERE period = strftime('%Y-%m','now')"
         ).fetch_one(pool);
+        // Per-category budget vs MTD usage, used by `suggestions::compute_suggestions`.
+        type BudgetRow = (String, f64, f64);
+        let budgets_q = sqlx::query_as::<_, BudgetRow>(
+            // COALESCE'd default is `0.0`, not `0` — sqlx decodes the column
+            // type from the literal and a bare `0` registers as INTEGER,
+            // mismatching `f64` on the Rust side.
+            "SELECT b.category_code, b.amount,
+                    COALESCE((SELECT SUM(-t.amount) FROM fin_txn t
+                               WHERE t.category_code = b.category_code
+                                 AND t.amount < 0
+                                 AND t.occurred_at >= unixepoch('now','start of month')), 0.0) AS used
+               FROM fin_budget b
+              WHERE b.period = strftime('%Y-%m','now')
+              ORDER BY b.category_code"
+        ).fetch_all(pool);
 
-        let (accounts, categories, txns_rows, cat_rows, income, expense, budget_total) =
-            tokio::try_join!(accounts_q, categories_q, txns_q, cat_sum_q, income_q, expense_q, budget_q)
+        let (accounts, categories, txns_rows, cat_rows, income, expense, budget_total, budget_rows) =
+            tokio::try_join!(accounts_q, categories_q, txns_q, cat_sum_q, income_q, expense_q, budget_q, budgets_q)
                 .map_err(internal)?;
 
         let accounts = accounts.into_iter()
@@ -82,8 +100,12 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
 
         let balance: f64 = accounts.iter().map(|a| a.balance).sum();
 
+        let budgets: Vec<BudgetEntry> = budget_rows.into_iter()
+            .map(|(category_code, amount, used)| BudgetEntry { category_code, amount, used })
+            .collect();
+
         Ok(LedgerData {
-            accounts, categories, txns, category_summary,
+            accounts, categories, txns, category_summary, budgets,
             month: MonthSummary {
                 income, expense, savings: income - expense, balance,
                 balance_delta: 1284.50, budget_used: expense, budget_total,

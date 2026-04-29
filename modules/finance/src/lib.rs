@@ -1,5 +1,6 @@
 pub mod model;
 pub mod server_fns;
+pub mod suggestions;
 pub mod view;
 
 #[cfg(feature = "ssr")]

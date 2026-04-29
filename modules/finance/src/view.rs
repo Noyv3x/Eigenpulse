@@ -237,6 +237,9 @@ fn render_ledger_tab(
     // whenever the resource refetches (add / delete), so the export link picks
     // up new rows automatically — no reactive attribute needed.
     let export_href = csv_data_uri(&txns);
+    // Same lifetime story for AI suggestions: compute now while we still
+    // hold `&d`, hand the owned `Vec<Suggestion>` to the view macro.
+    let suggestions = crate::suggestions::compute_suggestions(d);
 
     view! {
         <div class="grid-2" style="margin-top:20px">
@@ -316,34 +319,45 @@ fn render_ledger_tab(
                     </div>
                 </Card>
 
-                <Card title="智能建议" code="FIN-AI-01" sub="基于近 30 天数据 · 演示文案">
+                <Card title="智能建议" code="FIN-AI-01" sub="基于本月预算 + 近 30 天交易 · 规则驱动">
                     <div class="vstack" style="gap:10px">
-                        <div class="list-row">
-                            <div class="icon-tile"><Icon kind=IconKind::Sparkle size=14/></div>
-                            <div>
-                                <div class="title">"餐饮超预算 8%"</div>
-                                <div class="meta">"建议本周在家用餐 3 次，预计节省 ¥240"</div>
-                            </div>
-                        </div>
-                        <div class="list-row">
-                            <div class="icon-tile"><Icon kind=IconKind::Link size=14/></div>
-                            <div>
-                                <div class="title">"健身装备 · 可关联"</div>
-                                <div class="meta">"FIN-24084 已链接到 FIT-G-007 装备库"</div>
-                            </div>
-                        </div>
-                        <div class="list-row">
-                            <div class="icon-tile"><Icon kind=IconKind::Coin size=14/></div>
-                            <div>
-                                <div class="title">"可定投 ¥3,000"</div>
-                                <div class="meta">"余额宝 → ETF 组合，建议分批"</div>
-                            </div>
-                        </div>
+                        {render_suggestions(suggestions)}
                     </div>
                 </Card>
             </div>
         </div>
     }
+}
+
+fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoView {
+    if items.is_empty() {
+        return view! { <p class="muted">"未识别可行动建议 · 数据健康"</p> }.into_any();
+    }
+    // Wrap each row in an anchor when the rule provided a link target so the
+    // suggestion is one click instead of a "look at this" toast. Inline
+    // anchor styles are reset by `.list-row` in styles.css.
+    view! {
+        {items.into_iter().map(|s| match s.link {
+            Some(href) => view! {
+                <a class="list-row list-row-link" href=href>
+                    <div class="icon-tile"><Icon kind=s.icon size=14/></div>
+                    <div>
+                        <div class="title">{s.title}</div>
+                        <div class="meta">{s.meta}</div>
+                    </div>
+                </a>
+            }.into_any(),
+            None => view! {
+                <div class="list-row">
+                    <div class="icon-tile"><Icon kind=s.icon size=14/></div>
+                    <div>
+                        <div class="title">{s.title}</div>
+                        <div class="meta">{s.meta}</div>
+                    </div>
+                </div>
+            }.into_any(),
+        }).collect_view()}
+    }.into_any()
 }
 
 fn render_txn_row(t: Txn, delete: ServerAction<DeleteTxn>) -> impl IntoView {
