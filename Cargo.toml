@@ -89,6 +89,24 @@ ep-fitness    = { path = "modules/fitness" }
 ep-learning   = { path = "modules/learning" }
 ep-marketplace = { path = "modules/mod_marketplace" }
 
+[profile.dev]
+# Keep `panic!` backtraces with file:line, drop variable/type DWARF entries —
+# saves roughly half the link memory and disk footprint while still giving
+# useful crash output. If you need to step through Rust source in lldb, flip
+# this to `2` locally.
+debug = "line-tables-only"
+# Splits debug info into separate files instead of bloating each .o, so the
+# linker doesn't have to slurp it all into RAM.
+split-debuginfo = "unpacked"
+
+# Third-party crates: zero debug info. They're not your code; if you really
+# need to step into one, override per-package or temporarily flip the global
+# setting above. This is the single biggest knob — the workspace pulls in
+# axum / sqlx / lettre / reqwest / leptos which together account for >80% of
+# the link work.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto           = "thin"
 codegen-units = 1

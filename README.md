@@ -66,6 +66,14 @@ Eigenpulse/
 rustup target add wasm32-unknown-unknown
 cargo install cargo-leptos --locked
 
+# `.cargo/config.toml` pins the `mold` linker for Linux-GNU targets — much
+# lower RAM (~3x) and faster on this multi-crate workspace. Required on
+# Linux dev hosts. macOS / Windows targets aren't matched and use their
+# default linker, so this is a Linux-only prerequisite.
+sudo apt install mold        # Debian/Ubuntu
+# brew install mold           # ← do NOT — mold has no macOS support; on Mac
+                              #   the config doesn't activate, no install needed
+
 export EP_ADMIN_PASSWORD='dev-password'
 export EP_SECRET="$(openssl rand -hex 64)"
 mkdir -p data

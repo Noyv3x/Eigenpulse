@@ -1,8 +1,12 @@
 # syntax=docker/dockerfile:1.7-labs
 ########## chef ##########
 FROM --platform=$BUILDPLATFORM rust:1-bookworm AS chef
+# `mold` is required because `.cargo/config.toml` pins `-fuse-ld=mold` for
+# Linux-GNU targets — without it BFD `ld` peaks > 8 GB RSS on a release link
+# of this workspace. Bookworm ships mold 1.10.x in main, recent enough for
+# both x86_64 and aarch64 host arches.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      pkg-config libssl-dev clang lld ca-certificates \
+      pkg-config libssl-dev clang lld mold ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 RUN cargo install cargo-leptos --locked

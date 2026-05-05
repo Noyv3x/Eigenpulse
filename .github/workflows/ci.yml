@@ -20,6 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # `mold` is pinned by `.cargo/config.toml` for Linux-GNU targets.
+      # ubuntu-latest has it in apt; install before any cargo invocation.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: check
@@ -41,6 +45,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: tests
@@ -65,6 +71,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: smoke
