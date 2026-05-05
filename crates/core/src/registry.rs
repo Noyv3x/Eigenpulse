@@ -1,4 +1,4 @@
-use crate::{AppState, Module, NavEntry, ModuleLink};
+use crate::{AppState, Module, ModuleLink, NavEntry};
 use sqlx::SqlitePool;
 
 pub struct ModuleRegistry {
@@ -6,11 +6,15 @@ pub struct ModuleRegistry {
 }
 
 impl Default for ModuleRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ModuleRegistry {
-    pub const fn new() -> Self { Self { items: Vec::new() } }
+    pub const fn new() -> Self {
+        Self { items: Vec::new() }
+    }
 
     pub fn with(mut self, m: &'static dyn Module) -> Self {
         self.items.push(m);
@@ -29,26 +33,28 @@ impl ModuleRegistry {
         for m in self.iter() {
             for (name, sql) in m.migrations() {
                 let already: Option<i64> = sqlx::query_scalar(
-                    "SELECT 1 FROM _ep_module_migration WHERE module = ?1 AND name = ?2"
+                    "SELECT 1 FROM _ep_module_migration WHERE module = ?1 AND name = ?2",
                 )
                 .bind(m.code())
                 .bind(*name)
                 .fetch_optional(pool)
                 .await?;
-                if already.is_some() { continue; }
+                if already.is_some() {
+                    continue;
+                }
                 let mut tx = pool.begin().await?;
-                // Allow multi-statement sql via execute_many
+                // Allow module migrations to embed multiple top-level statements.
                 for stmt in split_sql(sql) {
-                    if stmt.trim().is_empty() { continue; }
+                    if stmt.trim().is_empty() {
+                        continue;
+                    }
                     sqlx::query(&stmt).execute(&mut *tx).await?;
                 }
-                sqlx::query(
-                    "INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)"
-                )
-                .bind(m.code())
-                .bind(*name)
-                .execute(&mut *tx)
-                .await?;
+                sqlx::query("INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)")
+                    .bind(m.code())
+                    .bind(*name)
+                    .execute(&mut *tx)
+                    .await?;
                 tx.commit().await?;
                 tracing::info!(module = m.code(), name = name, "applied module migration");
             }
@@ -94,7 +100,10 @@ impl ModuleRegistry {
     }
 
     pub fn all_scopes(&self) -> Vec<&'static str> {
-        let mut out: Vec<&'static str> = self.iter().flat_map(|m| m.open_api_scopes().iter().copied()).collect();
+        let mut out: Vec<&'static str> = self
+            .iter()
+            .flat_map(|m| m.open_api_scopes().iter().copied())
+            .collect();
         out.sort();
         out.dedup();
         out
@@ -109,19 +118,161 @@ fn route_path(code: &str) -> String {
 }
 
 fn split_sql(sql: &str) -> Vec<String> {
-    // Naive splitter: split on `;` not inside single-quoted string. Sufficient for migration SQL we author.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+        BacktickQuoted,
+        BracketQuoted,
+        LineComment,
+        BlockComment,
+    }
+
     let mut out = Vec::new();
     let mut buf = String::new();
-    let mut in_quote = false;
-    for ch in sql.chars() {
-        if ch == '\'' { in_quote = !in_quote; }
-        if ch == ';' && !in_quote {
-            out.push(buf.trim().to_string());
-            buf.clear();
-        } else {
-            buf.push(ch);
+    let mut chars = sql.chars().peekable();
+    let mut state = State::Normal;
+
+    while let Some(ch) = chars.next() {
+        match state {
+            State::Normal => match ch {
+                ';' => {
+                    let stmt = buf.trim();
+                    if !stmt.is_empty() {
+                        out.push(stmt.to_string());
+                    }
+                    buf.clear();
+                }
+                '\'' => {
+                    state = State::SingleQuoted;
+                    buf.push(ch);
+                }
+                '"' => {
+                    state = State::DoubleQuoted;
+                    buf.push(ch);
+                }
+                '`' => {
+                    state = State::BacktickQuoted;
+                    buf.push(ch);
+                }
+                '[' => {
+                    state = State::BracketQuoted;
+                    buf.push(ch);
+                }
+                '-' if chars.peek() == Some(&'-') => {
+                    state = State::LineComment;
+                    buf.push(ch);
+                    buf.push(chars.next().expect("peeked line-comment marker"));
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    state = State::BlockComment;
+                    buf.push(ch);
+                    buf.push(chars.next().expect("peeked block-comment marker"));
+                }
+                _ => buf.push(ch),
+            },
+            State::SingleQuoted => {
+                buf.push(ch);
+                if ch == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        buf.push(chars.next().expect("peeked escaped quote"));
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::DoubleQuoted => {
+                buf.push(ch);
+                if ch == '"' {
+                    if chars.peek() == Some(&'"') {
+                        buf.push(chars.next().expect("peeked escaped double quote"));
+                    } else {
+                        state = State::Normal;
+                    }
+                }
+            }
+            State::BacktickQuoted => {
+                buf.push(ch);
+                if ch == '`' {
+                    state = State::Normal;
+                }
+            }
+            State::BracketQuoted => {
+                buf.push(ch);
+                if ch == ']' {
+                    state = State::Normal;
+                }
+            }
+            State::LineComment => {
+                buf.push(ch);
+                if ch == '\n' {
+                    state = State::Normal;
+                }
+            }
+            State::BlockComment => {
+                buf.push(ch);
+                if ch == '*' && chars.peek() == Some(&'/') {
+                    buf.push(chars.next().expect("peeked block-comment close"));
+                    state = State::Normal;
+                }
+            }
         }
     }
-    if !buf.trim().is_empty() { out.push(buf.trim().to_string()); }
+
+    let stmt = buf.trim();
+    if !stmt.is_empty() {
+        out.push(stmt.to_string());
+    }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_sql_splits_top_level_semicolons() {
+        assert_eq!(
+            split_sql("CREATE TABLE a(id INTEGER); INSERT INTO a VALUES (1);"),
+            vec!["CREATE TABLE a(id INTEGER)", "INSERT INTO a VALUES (1)"]
+        );
+    }
+
+    #[test]
+    fn split_sql_ignores_semicolons_inside_string_literals() {
+        assert_eq!(
+            split_sql("INSERT INTO a VALUES ('one;two', 'it''s ok; still string'); SELECT 1;"),
+            vec![
+                "INSERT INTO a VALUES ('one;two', 'it''s ok; still string')",
+                "SELECT 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn split_sql_ignores_semicolons_inside_comments() {
+        assert_eq!(
+            split_sql(
+                "-- seed; comment\nINSERT INTO a VALUES (1); /* note; still comment */ SELECT 2;"
+            ),
+            vec![
+                "-- seed; comment\nINSERT INTO a VALUES (1)",
+                "/* note; still comment */ SELECT 2"
+            ]
+        );
+    }
+
+    #[test]
+    fn split_sql_ignores_semicolons_inside_quoted_identifiers() {
+        assert_eq!(
+            split_sql(r#"CREATE TABLE "semi;colon"([x;y] TEXT, `z;w` TEXT);"#),
+            vec![r#"CREATE TABLE "semi;colon"([x;y] TEXT, `z;w` TEXT)"#]
+        );
+    }
+
+    #[test]
+    fn split_sql_skips_empty_statements() {
+        assert_eq!(split_sql(";; SELECT 1; ;"), vec!["SELECT 1"]);
+    }
 }

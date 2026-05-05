@@ -490,14 +490,18 @@ fn render_reports() -> impl IntoView {
 // rendered as part of the page) and hydrate (refreshed reactively when the
 // resource refetches).
 fn csv_data_uri(txns: &[Txn]) -> String {
-    let mut csv = String::from("doc_id,occurred_at,merchant,category,account,amount,tag,note,linked_doc_id\n");
+    use std::fmt::Write as _;
+
+    let mut csv = String::with_capacity(80 + txns.len() * 96);
+    csv.push_str("doc_id,occurred_at,merchant,category,account,amount,tag,note,linked_doc_id\n");
     for t in txns {
         let occurred = time::OffsetDateTime::from_unix_timestamp(t.occurred_at)
             .ok()
             .and_then(|d| d.format(&time::format_description::well_known::Rfc3339).ok())
             .unwrap_or_default();
-        csv.push_str(&format!(
-            "{},{},{},{},{},{:.2},{},{},{}\n",
+        let _ = writeln!(
+            csv,
+            "{},{},{},{},{},{:.2},{},{},{}",
             t.doc_id,
             occurred,
             csv_escape(&t.merchant),
@@ -507,20 +511,36 @@ fn csv_data_uri(txns: &[Txn]) -> String {
             t.tag,
             csv_escape(t.note.as_deref().unwrap_or("")),
             t.linked_doc_id.as_deref().unwrap_or(""),
-        ));
+        );
     }
-    format!("data:text/csv;charset=utf-8,{}", percent_encode(&csv))
+    let encoded = percent_encode(&csv);
+    let mut uri = String::with_capacity("data:text/csv;charset=utf-8,".len() + encoded.len());
+    uri.push_str("data:text/csv;charset=utf-8,");
+    uri.push_str(&encoded);
+    uri
 }
 
 fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
+    if !s.bytes().any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r')) {
+        return s.to_string();
     }
+
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        if ch == '"' {
+            out.push_str("\"\"");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn percent_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -529,9 +549,53 @@ fn percent_encode(s: &str) -> String {
             }
             _ => {
                 out.push('%');
-                out.push_str(&format!("{:02X}", b));
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
             }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_escape_leaves_plain_fields_unquoted() {
+        assert_eq!(csv_escape("Blue Bottle"), "Blue Bottle");
+    }
+
+    #[test]
+    fn csv_escape_quotes_and_doubles_inner_quotes() {
+        assert_eq!(csv_escape("a,\"b\"\n"), "\"a,\"\"b\"\"\n\"");
+    }
+
+    #[test]
+    fn percent_encode_keeps_unreserved_and_encodes_utf8() {
+        assert_eq!(percent_encode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(percent_encode("工资, ok"), "%E5%B7%A5%E8%B5%84%2C%20ok");
+    }
+
+    #[test]
+    fn csv_data_uri_contains_encoded_header_and_rows() {
+        let txns = [Txn {
+            doc_id: "FIN-1".into(),
+            occurred_at: 0,
+            merchant: "a,b".into(),
+            category_code: "F&B".into(),
+            account_code: "ACC-01".into(),
+            amount: -12.3,
+            tag: "exp".into(),
+            note: Some("x\"y".into()),
+            linked_doc_id: Some("FIT-1".into()),
+        }];
+
+        let uri = csv_data_uri(&txns);
+
+        assert!(uri.starts_with("data:text/csv;charset=utf-8,doc_id%2Coccurred_at"));
+        assert!(uri.contains("FIN-1%2C1970-01-01T00%3A00%3A00Z"));
+        assert!(uri.contains("%22a%2Cb%22"));
+        assert!(uri.contains("-12.30%2Cexp%2C%22x%22%22y%22%2CFIT-1"));
+    }
 }
