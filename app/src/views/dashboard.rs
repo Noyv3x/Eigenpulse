@@ -1,9 +1,10 @@
 use ep_core::{fmt_int, IconKind};
-// `fmt_ts_hm` is consumed only inside the `#[cfg(feature = "ssr")]` body
-// of `load_dashboard`; importing it at module scope would warn on the
-// wasm32 hydrate target where the body is replaced by an `ssr-only` stub.
+// `fmt_ts_hm` and `server_err` are consumed only inside the
+// `#[cfg(feature = "ssr")]` body of `load_dashboard`; importing them at
+// module scope would warn on the wasm32 hydrate target where the body is
+// replaced by an `ssr-only` stub.
 #[cfg(feature = "ssr")]
-use ep_core::fmt_ts_hm;
+use ep_core::{fmt_ts_hm, server_err};
 use ep_ui::{Card, Icon, Kpi, kpi::Direction, PageHead, SectionLabel, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -37,22 +38,22 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
         let state: ep_core::AppState = expect_context();
         let pool = &state.db;
         let income: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount),0) FROM fin_txn WHERE amount > 0 AND tag='inc' AND occurred_at >= unixepoch('now','start of month')"
-        ).fetch_one(pool).await.map_err(internal)?;
+            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn WHERE amount > 0 AND tag='inc' AND occurred_at >= unixepoch('now','start of month')"
+        ).fetch_one(pool).await.map_err(server_err)?;
         let expense: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(-amount),0) FROM fin_txn WHERE amount < 0 AND occurred_at >= unixepoch('now','start of month')"
-        ).fetch_one(pool).await.map_err(internal)?;
+            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn WHERE amount < 0 AND occurred_at >= unixepoch('now','start of month')"
+        ).fetch_one(pool).await.map_err(server_err)?;
         let savings = income - expense;
         let budget_total: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount),0) FROM fin_budget WHERE period = strftime('%Y-%m','now')"
-        ).fetch_one(pool).await.map_err(internal)?;
+            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_budget WHERE period = strftime('%Y-%m','now')"
+        ).fetch_one(pool).await.map_err(server_err)?;
         let budget_pct = if budget_total > 0.0 { (expense / budget_total * 100.0).round() as u32 } else { 0 };
         let budget_remain = (budget_total - expense).max(0.0);
 
         let rows: Vec<(i64, String, String, String, Option<String>, Option<f64>)> = sqlx::query_as(
             "SELECT occurred_at, module, doc_id, summary, link_doc, amount
                FROM activity ORDER BY occurred_at DESC LIMIT 12"
-        ).fetch_all(pool).await.map_err(internal)?;
+        ).fetch_all(pool).await.map_err(server_err)?;
         let recent = rows.into_iter().map(|r| ActivityRow {
             time: fmt_ts_hm(Some(r.0)),
             module: r.1, doc_id: r.2, summary: r.3, link_doc: r.4, amount: r.5,
@@ -63,9 +64,6 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
     #[cfg(not(feature = "ssr"))]
     { Err(ServerFnError::ServerError("ssr-only".into())) }
 }
-
-#[cfg(feature = "ssr")]
-fn internal<E: std::fmt::Display>(e: E) -> ServerFnError { ServerFnError::ServerError(e.to_string()) }
 
 #[component]
 pub fn DashboardView() -> impl IntoView {

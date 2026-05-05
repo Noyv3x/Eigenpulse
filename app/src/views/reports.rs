@@ -1,6 +1,6 @@
 use ep_core::IconKind;
 use ep_core::{fmt_int, fmt_money};
-use ep_finance::model::{Account, CategorySummary};
+use ep_finance::model::{Account, CategorySummary, MonthBucket};
 use ep_ui::{Card, ChartBars, Icon, Kpi, kpi::Direction, PageHead, Ring, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -27,14 +27,6 @@ pub struct ReportsData {
     pub year_savings_rate: f32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MonthBucket {
-    pub period: String,        // "YYYY-MM"
-    pub income: f64,
-    pub expense: f64,
-    pub net: f64,
-}
-
 #[server(LoadReports, "/api/_internal/rpt", "Url", "load_reports")]
 pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
     #[cfg(feature = "ssr")]
@@ -50,8 +42,8 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         type MonthRow = (String, f64, f64);
         let months_q = sqlx::query_as::<_, MonthRow>(
             "SELECT strftime('%Y-%m', occurred_at, 'unixepoch', 'localtime') AS period,
-                    COALESCE(SUM(CASE WHEN tag='inc' AND amount > 0 THEN amount ELSE 0 END), 0) AS income,
-                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS expense
+                    COALESCE(SUM(CASE WHEN tag='inc' AND amount > 0 THEN amount ELSE 0.0 END), 0.0) AS income,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0.0 END), 0.0) AS expense
                FROM fin_txn
               WHERE occurred_at >= unixepoch('now','localtime','start of month','-11 months','utc')
               GROUP BY period
@@ -80,11 +72,11 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         ).fetch_all(pool);
 
         let year_income_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(amount),0) FROM fin_txn
+            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn
               WHERE amount > 0 AND tag = 'inc' AND occurred_at >= unixepoch('now','localtime','start of year','utc')"
         ).fetch_one(pool);
         let year_expense_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(-amount),0) FROM fin_txn
+            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
               WHERE amount < 0 AND occurred_at >= unixepoch('now','localtime','start of year','utc')"
         ).fetch_one(pool);
 
@@ -207,11 +199,10 @@ fn render_month_trend(d: &ReportsData) -> impl IntoView {
         .collect();
     let income_data: Vec<f64> = d.months.iter().map(|m| m.income).collect();
     let expense_data: Vec<f64> = d.months.iter().map(|m| m.expense).collect();
-    let net_data: Vec<f64> = d.months.iter().map(|m| m.net).collect();
-    let last_period = d.months.last().map(|m| m.period.clone()).unwrap_or_default();
     let (last_in, last_out, last_net) = d.months.last()
         .map(|m| (m.income, m.expense, m.net))
         .unwrap_or((0.0, 0.0, 0.0));
+    let net_strip = ep_finance::view::render_net_strip(&d.months);
     view! {
         <Card title="月度趋势" code="RPT-MTH-01"
               sub=format!("{} 月 · 本月 ¥{} 净结余 · 收入 ¥{} / 支出 ¥{}",
@@ -223,11 +214,11 @@ fn render_month_trend(d: &ReportsData) -> impl IntoView {
                 </div>
                 <div>
                     <div class="mono dim chart-row-label">"支出 · EXPENSE"</div>
-                    <ChartBars data=expense_data labels=labels.clone()/>
+                    <ChartBars data=expense_data labels=labels/>
                 </div>
                 <div>
-                    <div class="mono dim chart-row-label">{format!("净结余 · NET ({last_period})")}</div>
-                    <ChartBars data=net_data labels=labels/>
+                    <div class="mono dim chart-row-label">"净结余 · NET (绿=盈余 / 玫=透支)"</div>
+                    {net_strip}
                 </div>
             </div>
         </Card>

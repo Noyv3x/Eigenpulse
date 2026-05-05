@@ -4,8 +4,6 @@ pub mod suggestions;
 pub mod view;
 
 #[cfg(feature = "ssr")]
-pub mod widgets;
-#[cfg(feature = "ssr")]
 pub mod api;
 
 pub use model::*;
@@ -48,10 +46,10 @@ mod ssr_module {
             &["fin:read", "fin:write"]
         }
 
-        fn dashboard_widgets(&self) -> &'static [ep_core::DashboardWidget] {
-            super::widgets::WIDGETS
-        }
-
+        // No `dashboard_widgets` override: the global Dashboard already
+        // renders FIN-K01 / FIN-K02 directly via its `load_dashboard` server
+        // fn (see `app/src/views/dashboard.rs`). A second widget pipeline
+        // here would either be unused or double-render.
         fn links(&self) -> &'static [ModuleLink] {
             &[
                 ModuleLink { source: "FIN", target: "DSH", kind: "totals-feed" },

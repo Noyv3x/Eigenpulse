@@ -121,12 +121,23 @@ mod tests {
                 },
             ],
             category_summary: vec![],
-            month: MonthSummary { income: 0.0, expense: 0.0, savings: 0.0, balance: 0.0,
-                                  balance_delta: 0.0, budget_used: 0.0, budget_total: 0.0 },
+            month: MonthSummary {
+                income: 0.0, expense: 0.0, savings: 0.0, balance: 0.0,
+                balance_delta: 0.0, budget_total: 0.0,
+                savings_rate: 0.0, emergency_months: 0.0,
+                liquid_balance: 0.0,
+                days_elapsed: 1, avg_expense_3m: 0.0,
+                total_txn_count: 0, period: "2026-05".into(),
+            },
             budgets: vec![
                 BudgetEntry { category_code: "F&B".into(), amount: 3_200.0, used: 2_900.0 }, // 90% — over threshold
                 BudgetEntry { category_code: "HLT".into(), amount: 1_200.0, used: 600.0  }, // 50% — fine
             ],
+            account_stats: vec![
+                AccountStats { last_seen_at: None, history_14d: vec![0.0; 14] },
+                AccountStats { last_seen_at: None, history_14d: vec![0.0; 14] },
+            ],
+            months_12: Vec::new(),
         }
     }
 
