@@ -147,6 +147,7 @@ Rules:
 - **Never** edit `migrations/0001_init.sql` or `modules/*/migrations/00*_*.sql` once committed. To fix a schema, add a new `00N_<reason>.sql` next to it.
 - Connection-level PRAGMAs (`journal_mode = WAL`, `synchronous = NORMAL`, `foreign_keys = ON`) belong in `crates/db/src/pool.rs::open_pool` via `SqliteConnectOptions` — they cannot live inside a migration file because sqlx wraps each one in a transaction and SQLite rejects those PRAGMAs mid-transaction.
 - Module migrations are run idempotently by `ModuleRegistry::run_migrations()` against the `_ep_module_migration` ledger (filename-keyed; **no checksum**), so adding `002_*.sql` to a module crate is the canonical evolution path. Do not edit applied module SQL either — the ledger only tracks which name has been applied, but mutating the SQL after the fact will leave existing databases out of sync without warning.
+- `ALTER TABLE … ADD COLUMN` in SQLite forbids non-constant `DEFAULT` (e.g. `DEFAULT (unixepoch())` → `Cannot add a column with non-constant default`). Constraint applies even though `CREATE TABLE … DEFAULT (unixepoch())` is fine — the difference is that ADD COLUMN must back-fill existing rows, and SQLite refuses to do so with an expression. Pattern: declare `DEFAULT 0` (or `''` / `NULL`) on the ADD COLUMN, then in the **same migration file** issue `UPDATE <table> SET <col> = unixepoch() WHERE <col> = 0` to back-fill. New `CREATE TABLE` statements may keep `DEFAULT (unixepoch())` — only ADD COLUMN is restricted.
 
 ## Things I keep getting wrong (avoid these)
 

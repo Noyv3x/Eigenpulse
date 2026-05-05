@@ -26,6 +26,18 @@ impl Tag {
     }
 }
 
+/// Allowed values for `fin_account.type`. Single source of truth so the
+/// validation in account CRUD and the dropdown in the management UI stay
+/// in sync. `Other` is the catch-all; do not add new values without the UI.
+pub const ACCOUNT_TYPES: &[&str] = &[
+    "Checking", "Savings", "Cash", "Investment", "Credit", "Other",
+];
+
+/// Allowed values for the optional `tone` column on accounts/categories.
+/// Empty string is also accepted (rendered as no-tone). Mirrors the visual
+/// `Tone` enum in `ep_core`, which already has `from_str`/`class` helpers.
+pub const TONES: &[&str] = &["green", "amber", "rose", "blue", "violet"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub code: String,
@@ -33,6 +45,8 @@ pub struct Account {
     pub r#type: String,
     pub tone: String,
     pub balance: f64,
+    pub archived: bool,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +55,8 @@ pub struct Category {
     pub name: String,
     pub tone: String,
     pub sort_order: i64,
+    pub archived: bool,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

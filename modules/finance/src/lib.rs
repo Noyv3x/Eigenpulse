@@ -29,7 +29,10 @@ mod ssr_module {
         fn version(&self) -> &'static str { "0.1.0" }
 
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[("001_finance", include_str!("../migrations/001_finance.sql"))]
+            &[
+                ("001_finance",      include_str!("../migrations/001_finance.sql")),
+                ("002_finance_crud", include_str!("../migrations/002_finance_crud.sql")),
+            ]
         }
 
         fn routes(&self, _state: AppState) -> axum::Router<AppState> {
@@ -55,6 +58,10 @@ mod ssr_module {
                 ModuleLink { source: "FIN", target: "DSH", kind: "totals-feed" },
                 ModuleLink { source: "FIN", target: "FIT", kind: "doc-ref" },
                 ModuleLink { source: "FIN", target: "LRN", kind: "doc-ref" },
+                // Transfer pairs are intra-FIN edges in module_link
+                // (kind='tfr-pair'); document the kind here for module-graph
+                // viz. Runtime is unaffected.
+                ModuleLink { source: "FIN", target: "FIN", kind: "tfr-pair" },
             ]
         }
     }

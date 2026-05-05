@@ -38,3 +38,12 @@ axum       = { workspace = true, optional = true }
 tokio      = { workspace = true, optional = true }
 sqlx       = { workspace = true, optional = true }
 tracing    = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Integration tests in tests/crud.rs spin up an in-memory SQLite pool and
+# call the SSR-side `*_inner` helpers directly. sqlx + tokio are needed for
+# the test harness itself; the helpers' transitive deps are pulled in via
+# the `ssr` feature on this crate when the test is invoked with
+# `cargo test -p ep-finance --features ssr --test crud`.
+sqlx       = { workspace = true }
+tokio      = { workspace = true, features = ["macros", "rt"] }

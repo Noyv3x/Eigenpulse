@@ -1,4 +1,4 @@
-use crate::model::{Account, AccountStats, Category, MonthBucket, Tag, Txn};
+use crate::model::{Account, AccountStats, Category, MonthBucket, Tag, Txn, ACCOUNT_TYPES, TONES};
 use crate::server_fns::*;
 use ep_core::{fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, IconKind, Tone};
 use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, RowDeleteAction, Tabs, TabSpec, Tag as UiTag};
@@ -13,21 +13,36 @@ pub fn FinanceView() -> impl IntoView {
     let delete = ServerAction::<DeleteTxn>::new();
     let set_budget = ServerAction::<SetBudget>::new();
     let import_budgets = ServerAction::<ImportBudgetsFrom>::new();
+    let create_account = ServerAction::<CreateAccount>::new();
+    let update_account = ServerAction::<UpdateAccount>::new();
+    let archive_account = ServerAction::<ArchiveAccount>::new();
+    let create_category = ServerAction::<CreateCategory>::new();
+    let update_category = ServerAction::<UpdateCategory>::new();
+    let archive_category = ServerAction::<ArchiveCategory>::new();
+    let update_txn = ServerAction::<UpdateTxn>::new();
+    let add_transfer = ServerAction::<AddTransfer>::new();
     let merchant_filter = RwSignal::new(String::new());
     let category_filter = RwSignal::new(String::new());
     let date_from_filter = RwSignal::new(String::new());
     let date_to_filter = RwSignal::new(String::new());
 
-    // Refetch only when an action's version actually changed since last
-    // tick. ServerAction::version() ticks on both submit AND response, so
-    // a naive `prev.is_some()` guard would refetch twice per submission.
-    Effect::new(move |prev: Option<(usize, usize, usize, usize)>| {
-        let cur = (
+    // Refetch when any action's version ticks. We compare per-element via a
+    // fixed-size array so the closure stays Send + 'static.
+    Effect::new(move |prev: Option<[usize; 12]>| {
+        let cur = [
             add.version().get(),
             delete.version().get(),
             set_budget.version().get(),
             import_budgets.version().get(),
-        );
+            create_account.version().get(),
+            update_account.version().get(),
+            archive_account.version().get(),
+            create_category.version().get(),
+            update_category.version().get(),
+            archive_category.version().get(),
+            update_txn.version().get(),
+            add_transfer.version().get(),
+        ];
         if prev.map_or(false, |p| p != cur) {
             ledger.refetch();
         }
@@ -54,6 +69,9 @@ pub fn FinanceView() -> impl IntoView {
                     Err(e) => view! { <div class="card"><div class="card-body">"加载失败 · " {e.to_string()}</div></div> }.into_any(),
                     Ok(data) => render_ledger(
                         data, active, add, delete, set_budget, import_budgets,
+                        create_account, update_account, archive_account,
+                        create_category, update_category, archive_category,
+                        update_txn, add_transfer,
                         merchant_filter, category_filter, date_from_filter, date_to_filter,
                     ).into_any(),
                 })}
@@ -70,6 +88,14 @@ fn render_ledger(
     delete: ServerAction<DeleteTxn>,
     set_budget: ServerAction<SetBudget>,
     import_budgets: ServerAction<ImportBudgetsFrom>,
+    create_account: ServerAction<CreateAccount>,
+    update_account: ServerAction<UpdateAccount>,
+    archive_account: ServerAction<ArchiveAccount>,
+    create_category: ServerAction<CreateCategory>,
+    update_category: ServerAction<UpdateCategory>,
+    archive_category: ServerAction<ArchiveCategory>,
+    update_txn: ServerAction<UpdateTxn>,
+    add_transfer: ServerAction<AddTransfer>,
     merchant_filter: RwSignal<String>,
     category_filter: RwSignal<String>,
     date_from_filter: RwSignal<String>,
@@ -104,8 +130,14 @@ fn render_ledger(
     // Tab badge reflects visible rows (LIMIT 50, not month-scoped); the
     // month aggregate goes in the card sub-label.
     let txns_count = data.txns.len() as u32;
-    let accounts_count = data.accounts.len() as u32;
+    // load_ledger now ships archived accounts too (for the management Card
+    // unarchive affordance) — count only active for the tab badge.
+    let accounts_count = data.accounts.iter().filter(|a| !a.archived).count() as u32;
     let budgets_count = data.budgets.len() as u32;
+    // Categories badge counts only active rows — archived ones still ship
+    // (so historical txns can pick up their tone) but they don't drive the
+    // count.
+    let categories_count = data.categories.iter().filter(|c| !c.archived).count() as u32;
 
     let banner = render_banner(&data);
     // Pre-compute attribute strings — the `view!` macro rejects bare if/else
@@ -150,16 +182,18 @@ fn render_ledger(
         TabSpec::new("ledger", "总账 / Ledger").with_count(txns_count),
         TabSpec::new("budget", "预算 / Budget").with_count(budgets_count),
         TabSpec::new("accounts", "账户 / Accounts").with_count(accounts_count),
+        TabSpec::new("categories", "类别 / Categories").with_count(categories_count),
         TabSpec::new("reports", "报表 / Reports"),
     ];
 
-    // Share the loaded LedgerData across all four tab branches by Arc
-    // instead of deep-cloning per branch. (Arc, not Rc — Leptos's reactive
-    // closures require Send.) Each tab closure clones a cheap handle.
+    // Share the loaded LedgerData across every tab branch by Arc instead of
+    // deep-cloning per branch. (Arc, not Rc — Leptos's reactive closures
+    // require Send.) Each tab closure clones a cheap handle.
     let data = std::sync::Arc::new(data);
     let data_for_ledger = data.clone();
     let data_for_budget = data.clone();
     let data_for_accounts = data.clone();
+    let data_for_categories = data.clone();
     let data_for_reports = data;
 
     view! {
@@ -168,11 +202,13 @@ fn render_ledger(
         <Tabs tabs=tabs active=active/>
         {move || match active.get().as_str() {
             "budget" => render_budget(&data_for_budget, set_budget, import_budgets).into_any(),
-            "accounts" => render_accounts(&data_for_accounts).into_any(),
+            "accounts" => render_accounts(&data_for_accounts, create_account, update_account, archive_account).into_any(),
+            "categories" => render_categories(&data_for_categories, create_category, update_category, archive_category).into_any(),
             "reports" => render_reports(&data_for_reports).into_any(),
             _ => view! {
                 {render_new_txn_form(add, data_for_ledger.categories.clone(), data_for_ledger.accounts.clone())}
-                {render_ledger_tab(&data_for_ledger, delete, merchant_filter, category_filter, date_from_filter, date_to_filter)}
+                {render_transfer_form(add_transfer, data_for_ledger.accounts.clone())}
+                {render_ledger_tab(&data_for_ledger, delete, update_txn, merchant_filter, category_filter, date_from_filter, date_to_filter)}
             }.into_any(),
         }}
     }
@@ -256,7 +292,6 @@ fn render_new_txn_form(
                         <select name="tag" style=INPUT_STYLE>
                             <option value=Tag::Exp.as_str() selected="selected">"支出 · exp"</option>
                             <option value=Tag::Inc.as_str()>"收入 · inc"</option>
-                            <option value=Tag::Tfr.as_str()>"转账 · tfr"</option>
                         </select>
                     </label>
                 </div>
@@ -264,7 +299,7 @@ fn render_new_txn_form(
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>"类别"</span>
                         <select name="category_code" style=INPUT_STYLE>
-                            {categories.into_iter().enumerate().map(|(i, c)| {
+                            {categories.into_iter().filter(|c| !c.archived).enumerate().map(|(i, c)| {
                                 let code = c.code.clone();
                                 let label = format!("{} {}", c.name, c.code);
                                 view! { <option value=code selected={i == 0}>{label}</option> }
@@ -274,7 +309,7 @@ fn render_new_txn_form(
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>"账户"</span>
                         <select name="account_code" style=INPUT_STYLE>
-                            {accounts.into_iter().enumerate().map(|(i, a)| {
+                            {accounts.into_iter().filter(|a| !a.archived).enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
                                 let label = format!("{} · {}", a.code, a.name);
                                 view! { <option value=code selected={i == 0}>{label}</option> }
@@ -287,10 +322,15 @@ fn render_new_txn_form(
                                style=INPUT_STYLE_MONO/>
                     </label>
                 </div>
-                <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
+                <div style="display:grid;grid-template-columns:2fr 2fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>"备注 (可选)"</span>
                         <input name="note" placeholder="…" style=INPUT_STYLE/>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"日期 (可选 · 默认今天)"</span>
+                        <input name="occurred_at" type="date" style=INPUT_STYLE_MONO
+                               title="留空 = 当前时间"/>
                     </label>
                     <span class="error-slot" style="align-self:center">
                         {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
@@ -306,9 +346,72 @@ fn render_new_txn_form(
     }
 }
 
+/// 转账 Card; submits to `add_transfer` (writes the paired ±amount rows).
+fn render_transfer_form(
+    add_transfer: ServerAction<AddTransfer>,
+    accounts: Vec<Account>,
+) -> impl IntoView {
+    let active_accounts: Vec<Account> = accounts.into_iter().filter(|a| !a.archived).collect();
+    let from_accounts = active_accounts.clone();
+    let to_accounts = active_accounts;
+    view! {
+        <Card title="转账" code="FIN-TFR-NEW" sub="账户间互转 · 自动生成两笔配对记录">
+            <ActionForm action=add_transfer attr:class="vstack" attr:style="gap:10px">
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"从账户"</span>
+                        <select name="from_account" style=INPUT_STYLE>
+                            {from_accounts.into_iter().enumerate().map(|(i, a)| {
+                                let code = a.code.clone();
+                                let label = format!("{} · {}", a.code, a.name);
+                                view! { <option value=code selected={i == 0}>{label}</option> }
+                            }).collect_view()}
+                        </select>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"到账户"</span>
+                        <select name="to_account" style=INPUT_STYLE>
+                            {to_accounts.into_iter().enumerate().map(|(i, a)| {
+                                let code = a.code.clone();
+                                let label = format!("{} · {}", a.code, a.name);
+                                view! { <option value=code selected={i == 1}>{label}</option> }
+                            }).collect_view()}
+                        </select>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"金额 (¥)"</span>
+                        <input name="amount" type="number" step="0.01" min="0.01" required
+                               placeholder="500.00" style=INPUT_STYLE_MONO/>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"日期 (可选)"</span>
+                        <input name="occurred_at" type="date" style=INPUT_STYLE_MONO
+                               title="留空 = 当前时间"/>
+                    </label>
+                </div>
+                <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>"备注 (可选)"</span>
+                        <input name="note" placeholder="月初分配 · 储蓄" style=INPUT_STYLE/>
+                    </label>
+                    <span class="error-slot" style="align-self:center">
+                        {move || add_transfer.value().get().and_then(|r| r.err()).map(|e| view! {
+                            <span class="tag rose">{e.to_string()}</span>
+                        })}
+                    </span>
+                    <button class="btn primary" type="submit" style="align-self:center">
+                        <Icon kind=IconKind::Arrow size=14/>"转账"
+                    </button>
+                </div>
+            </ActionForm>
+        </Card>
+    }
+}
+
 fn render_ledger_tab(
     d: &LedgerData,
     delete: ServerAction<DeleteTxn>,
+    update_txn: ServerAction<UpdateTxn>,
     merchant_filter: RwSignal<String>,
     category_filter: RwSignal<String>,
     date_from_filter: RwSignal<String>,
@@ -317,6 +420,7 @@ fn render_ledger_tab(
     let txns = d.txns.clone();
     let cat_summary = d.category_summary.clone();
     let cat_options = d.categories.clone();
+    let acc_options = d.accounts.clone();
     let cat_lookup: std::collections::HashMap<String, Category> = d.categories.iter()
         .map(|c| (c.code.clone(), c.clone()))
         .collect();
@@ -350,7 +454,7 @@ fn render_ledger_tab(
                             on:change=move |ev| category_filter.set(event_target_value(&ev))
                             style=INPUT_STYLE>
                         <option value="">"全部类别"</option>
-                        {cat_options.into_iter().map(|c| {
+                        {cat_options.iter().cloned().map(|c| {
                             let code = c.code.clone();
                             let label = format!("{} {}", c.name, c.code);
                             view! { <option value=code>{label}</option> }
@@ -381,7 +485,7 @@ fn render_ledger_tab(
                                 <th style="width:80px">"账户"</th>
                                 <th class="num" style="width:110px">"金额"</th>
                                 <th style="width:80px">"关联"</th>
-                                <th class="num" style="width:64px">"操作"</th>
+                                <th class="num" style="width:120px">"操作"</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -394,6 +498,8 @@ fn render_ledger_tab(
                                 let from_ts = parse_date_floor(&date_from_filter.get());
                                 let to_ts = parse_date_ceiling(&date_to_filter.get());
                                 let cat_lookup = &cat_lookup;
+                                let cat_options = &cat_options;
+                                let acc_options = &acc_options;
                                 txns.iter()
                                     .filter(|t| {
                                         (mq.is_empty() || t.merchant.to_lowercase().contains(&mq))
@@ -402,7 +508,7 @@ fn render_ledger_tab(
                                         && to_ts.map(|to| t.occurred_at <= to).unwrap_or(true)
                                     })
                                     .cloned()
-                                    .map(|t| render_txn_row(t, cat_lookup, delete))
+                                    .map(|t| render_txn_row(t, cat_lookup, cat_options, acc_options, delete, update_txn))
                                     .collect_view()
                             }}
                         </tbody>
@@ -482,7 +588,10 @@ fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoVi
 fn render_txn_row(
     t: Txn,
     cat_lookup: &std::collections::HashMap<String, Category>,
+    cat_options: &[Category],
+    acc_options: &[Account],
     delete: ServerAction<DeleteTxn>,
+    update_txn: ServerAction<UpdateTxn>,
 ) -> impl IntoView {
     let date = fmt_ts_md(Some(t.occurred_at));
     let time_ = fmt_ts_hm(Some(t.occurred_at));
@@ -497,12 +606,132 @@ fn render_txn_row(
     } else {
         format!("−¥{}", fmt_money(t.amount.abs()))
     };
+    let is_tfr = matches!(Tag::parse(&t.tag), Some(Tag::Tfr));
     let link = t.linked_doc_id.clone();
     let cat_tone = cat_lookup.get(&t.category_code)
         .map(|c| Tone::from_str(&c.tone))
         .unwrap_or(Tone::None);
     let cat_label = t.category_code.clone();
     let doc_id = t.doc_id.clone();
+
+    // Category cell renders the "转账" pill on tfr rows so the user sees
+    // why the edit affordance is suppressed; non-tfr rows keep the existing
+    // category Tag (toned via cat_lookup, including archived ones for
+    // historical accuracy — E5).
+    let cat_cell = if is_tfr {
+        view! { <UiTag tone=Tone::Blue>"转账"</UiTag> }.into_any()
+    } else {
+        view! { <UiTag tone=cat_tone>{cat_label}</UiTag> }.into_any()
+    };
+
+    // Per-row editing toggle. The `<For key=…>` keying that would preserve
+    // this signal across refetches isn't applied here (we want filter
+    // chains to keep working with iter().filter()); the current design is
+    // "submit closes the form" so the refetch-then-recreate cycle is
+    // deliberate. The cancel button calls editing.set(false) explicitly.
+    let editing = RwSignal::new(false);
+
+    // Action column varies by tfr-ness — non-tfr gets an inline 编辑
+    // toggle, tfr gets a tooltip-bearing placeholder.
+    let action_cell = if is_tfr {
+        view! {
+            <span class="dim mono"
+                  style="font-size:10.5px"
+                  title="转账记录不可编辑，请删除后重建">"——"</span>
+            <RowDeleteAction action=delete value=doc_id.clone()
+                             confirm="删除该转账？两笔配对记录会同时回滚，余额同步恢复。"/>
+        }.into_any()
+    } else {
+        view! {
+            <button class="btn sm" type="button"
+                    on:click=move |_| editing.update(|v| *v = !*v)>
+                "编辑"
+            </button>
+            <RowDeleteAction action=delete value=doc_id.clone()
+                             confirm="删除该笔交易？账户余额会同步回滚。"/>
+        }.into_any()
+    };
+
+    // Pre-baked prefilled values for the edit form. All clones live on the
+    // owned `t` we received by value, so they survive the closure capture.
+    let edit_doc_id = t.doc_id.clone();
+    let edit_merchant = t.merchant.clone();
+    let edit_amount_str = format!("{:.2}", t.amount.abs());
+    let edit_account = t.account_code.clone();
+    let edit_category = t.category_code.clone();
+    let edit_note = t.note.clone().unwrap_or_default();
+    let edit_link = t.linked_doc_id.clone().unwrap_or_default();
+    let edit_date = fmt_ts_yyyymmdd(t.occurred_at);
+    let cat_opts = cat_options.to_vec();
+    let acc_opts = acc_options.to_vec();
+    // Edit dropdowns hide archived rows (the row's existing code stays
+    // selected via the value=, but you can't re-pick an archived one).
+    let cat_opts_active: Vec<Category> = cat_opts.iter().filter(|c| !c.archived).cloned().collect();
+    let acc_opts_active: Vec<Account> = acc_opts.iter().filter(|a| !a.archived).cloned().collect();
+
+    let edit_form = if is_tfr {
+        view! { <span></span> }.into_any()
+    } else {
+        view! {
+            <ActionForm action=update_txn attr:class="hstack" attr:style="gap:8px;flex-wrap:wrap;padding:10px">
+                <input type="hidden" name="doc_id" value=edit_doc_id/>
+                <label class="vstack" style="gap:2px;flex:2;min-width:140px">
+                    <span class="mono dim" style=FIELD_LABEL>"商户"</span>
+                    <input name="merchant" required value=edit_merchant style=INPUT_STYLE/>
+                </label>
+                <label class="vstack" style="gap:2px;width:110px">
+                    <span class="mono dim" style=FIELD_LABEL>"金额"</span>
+                    <input name="amount" type="number" step="0.01" min="0.01"
+                           value=edit_amount_str style=INPUT_STYLE_MONO/>
+                </label>
+                <label class="vstack" style="gap:2px;width:140px">
+                    <span class="mono dim" style=FIELD_LABEL>"类别"</span>
+                    <select name="category_code" style=INPUT_STYLE>
+                        {cat_opts_active.into_iter().map(|c| {
+                            let selected = c.code == edit_category;
+                            let code = c.code.clone();
+                            let label = format!("{} {}", c.name, c.code);
+                            view! { <option value=code selected=selected>{label}</option> }
+                        }).collect_view()}
+                    </select>
+                </label>
+                <label class="vstack" style="gap:2px;width:140px">
+                    <span class="mono dim" style=FIELD_LABEL>"账户"</span>
+                    <select name="account_code" style=INPUT_STYLE>
+                        {acc_opts_active.into_iter().map(|a| {
+                            let selected = a.code == edit_account;
+                            let code = a.code.clone();
+                            let label = format!("{} · {}", a.code, a.name);
+                            view! { <option value=code selected=selected>{label}</option> }
+                        }).collect_view()}
+                    </select>
+                </label>
+                <label class="vstack" style="gap:2px;width:130px">
+                    <span class="mono dim" style=FIELD_LABEL>"日期"</span>
+                    <input name="occurred_at" type="date" value=edit_date style=INPUT_STYLE_MONO/>
+                </label>
+                <label class="vstack" style="gap:2px;flex:1;min-width:120px">
+                    <span class="mono dim" style=FIELD_LABEL>"备注"</span>
+                    <input name="note" value=edit_note style=INPUT_STYLE/>
+                </label>
+                <label class="vstack" style="gap:2px;width:140px">
+                    <span class="mono dim" style=FIELD_LABEL>"关联单号"</span>
+                    <input name="linked_doc_id" value=edit_link style=INPUT_STYLE_MONO/>
+                </label>
+                <div class="hstack" style="gap:6px;align-items:center">
+                    <button class="btn primary sm" type="submit">"保存"</button>
+                    <button class="btn ghost sm" type="button"
+                            on:click=move |_| editing.set(false)>"取消"</button>
+                    <span class="error-slot">
+                        {move || update_txn.value().get().and_then(|r| r.err()).map(|e| view! {
+                            <span class="tag rose">{e.to_string()}</span>
+                        })}
+                    </span>
+                </div>
+            </ActionForm>
+        }.into_any()
+    };
+
     view! {
         <tr>
             <td class="mono dim">{date}<div style="font-size:10px;color:var(--ink-4)">{time_}</div></td>
@@ -511,7 +740,7 @@ fn render_txn_row(
                 <span class=txind></span>
                 {t.merchant.clone()}
             </td>
-            <td><UiTag tone=cat_tone>{cat_label}</UiTag></td>
+            <td>{cat_cell}</td>
             <td class="mono dim">{t.account_code.clone()}</td>
             <td class=cls_amt>{amount_text}</td>
             <td class="mono dim">
@@ -521,11 +750,27 @@ fn render_txn_row(
                 }}
             </td>
             <td class="num">
-                <RowDeleteAction action=delete value=doc_id
-                                 confirm="删除该笔交易？账户余额会同步回滚。"/>
+                <div class="hstack" style="gap:4px;justify-content:flex-end;align-items:center">
+                    {action_cell}
+                </div>
+            </td>
+        </tr>
+        <tr class="edit-row" style:display=move || if editing.get() { "table-row" } else { "none" }>
+            <td colspan="8" style="background:var(--bg-2);border-top:1px dashed var(--border)">
+                {edit_form}
             </td>
         </tr>
     }
+}
+
+/// Format a unix-second timestamp to `YYYY-MM-DD` (UTC). Used by the inline
+/// edit form's `<input type="date">`. Pure math — `from_unix_timestamp` is
+/// safe on wasm32 (no `now`-style clock dependency).
+fn fmt_ts_yyyymmdd(ts: i64) -> String {
+    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(ts) else {
+        return String::new();
+    };
+    format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day())
 }
 
 fn render_budget(
@@ -655,7 +900,7 @@ fn render_budget(
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>"类别"</span>
                                 <select name="category_code" style=INPUT_STYLE>
-                                    {categories_for_form.into_iter().map(|c| {
+                                    {categories_for_form.into_iter().filter(|c| !c.archived).map(|c| {
                                         let code = c.code.clone();
                                         let label = format!("{} {}", c.name, c.code);
                                         view! { <option value=code>{label}</option> }
@@ -733,34 +978,427 @@ fn parse_period(period: &str) -> Option<(i32, u32)> {
     Some((y, m))
 }
 
-fn render_accounts(d: &LedgerData) -> impl IntoView {
+fn render_accounts(
+    d: &LedgerData,
+    create_account: ServerAction<CreateAccount>,
+    update_account: ServerAction<UpdateAccount>,
+    archive_account: ServerAction<ArchiveAccount>,
+) -> impl IntoView {
+    // load_ledger now ships archived accounts too. Split here so the main
+    // grid stays clean while the management Card still surfaces archived
+    // rows for unarchive (Categories-tab parity).
     let pairs: Vec<(Account, AccountStats)> = d.accounts.iter().cloned()
         .zip(d.account_stats.iter().cloned())
         .collect();
+    let active_pairs: Vec<(Account, AccountStats)> = pairs.iter()
+        .filter(|(a, _)| !a.archived)
+        .cloned()
+        .collect();
+    let archived_accounts: Vec<Account> = pairs.iter()
+        .filter(|(a, _)| a.archived)
+        .map(|(a, _)| a.clone())
+        .collect();
     view! {
-        <div class="grid-3">
-            {pairs.into_iter().map(|(a, s)| {
-                let tone = Tone::from_str(&a.tone);
-                let last_seen = match s.last_seen_at {
-                    Some(ts) => format!("最近活动 {}", fmt_ts_date(Some(ts))),
-                    None => "尚无活动".to_string(),
-                };
-                view! {
-                    <Card title=a.name.clone() code=a.code.clone() sub=a.r#type.clone()>
-                        <div class="mono" style="font-size:24px;font-weight:600;letter-spacing:-0.02em">
-                            "¥" {fmt_money(a.balance)}
-                        </div>
-                        <div class="hstack" style="margin-top:10px;gap:10px">
-                            <UiTag tone=tone>{a.r#type.clone()}</UiTag>
-                            <span class="mono dim" style="font-size:10.5px">{last_seen}</span>
-                        </div>
-                        <div style="margin-top:14px">
-                            <ChartBars data=s.history_14d/>
-                        </div>
-                    </Card>
-                }
+        {render_account_manager(create_account, archived_accounts, archive_account)}
+        <div class="grid-3" style="margin-top:20px">
+            {active_pairs.into_iter().map(|(a, s)| {
+                render_account_card(a, s, update_account, archive_account)
             }).collect_view()}
         </div>
+    }
+}
+
+/// 账户管理 Card — 新建表单 + 已归档子区（带取消归档按钮）。
+fn render_account_manager(
+    create_account: ServerAction<CreateAccount>,
+    archived_accounts: Vec<Account>,
+    archive_account: ServerAction<ArchiveAccount>,
+) -> impl IntoView {
+    let archived_count = archived_accounts.len();
+    let archived_summary = format!("已归档 {} 个账户", archived_count);
+    view! {
+        <Card title="账户管理" code="FIN-ACC-MGR" sub="新建 / 编辑 / 归档 · 余额由交易自动维护">
+            <details>
+                <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+                    <Icon kind=IconKind::Plus size=14/>"新建账户"
+                </summary>
+                <ActionForm action=create_account attr:class="vstack" attr:style="gap:10px;margin-top:12px">
+                    <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr 1fr;gap:10px">
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"code"</span>
+                            <input name="code" required maxlength="16" placeholder="ACC-99"
+                                   pattern="[-A-Z0-9]{2,16}"
+                                   title="2..=16 字符，仅大写字母 / 数字 / 连字符"
+                                   style=INPUT_STYLE_MONO/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"名称"</span>
+                            <input name="name" required maxlength="64" placeholder="招行储蓄"
+                                   style=INPUT_STYLE/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"类型"</span>
+                            <select name="type" style=INPUT_STYLE>
+                                {ACCOUNT_TYPES.iter().enumerate().map(|(i, t)| view! {
+                                    <option value=*t selected={i == 0}>{*t}</option>
+                                }).collect_view()}
+                            </select>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                            <select name="tone" style=INPUT_STYLE>
+                                <option value="" selected="selected">"—"</option>
+                                {TONES.iter().map(|t| view! {
+                                    <option value=*t>{*t}</option>
+                                }).collect_view()}
+                            </select>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"开户余额"</span>
+                            <input name="opening_balance" type="number" step="0.01" value="0"
+                                   style=INPUT_STYLE_MONO/>
+                        </label>
+                    </div>
+                    <div class="hstack" style="gap:10px;align-items:center">
+                        <button class="btn primary" type="submit">
+                            <Icon kind=IconKind::Check size=14/>"创建"
+                        </button>
+                        <span class="error-slot">
+                            {move || create_account.value().get().and_then(|r| r.err()).map(|e| view! {
+                                <span class="tag rose">{e.to_string()}</span>
+                            })}
+                        </span>
+                    </div>
+                </ActionForm>
+            </details>
+            {(archived_count > 0).then(|| view! {
+                <details style="margin-top:12px;padding-top:12px;border-top:1px dashed var(--border)">
+                    <summary class="mono dim" style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:0.06em">
+                        {archived_summary}
+                    </summary>
+                    <div class="vstack" style="gap:8px;margin-top:10px">
+                        {archived_accounts.into_iter().map(|a| render_archived_account_row(a, archive_account)).collect_view()}
+                    </div>
+                </details>
+            })}
+        </Card>
+    }
+}
+
+/// One row in the "已归档" section: code + name + 取消归档 button. Lighter
+/// than the main account card — the user's primary task here is recovering
+/// from an accidental archive, not editing.
+fn render_archived_account_row(
+    a: Account,
+    archive_account: ServerAction<ArchiveAccount>,
+) -> impl IntoView {
+    let confirm_msg = format!("取消归档账户 {}？", a.code);
+    let onclick = format!("return confirm('{}')", confirm_msg);
+    let code_for_form = a.code.clone();
+    let display_code = a.code.clone();
+    let display_name = a.name.clone();
+    let display_type = a.r#type.clone();
+    let balance_text = format!("¥{}", fmt_money(a.balance));
+    view! {
+        <div class="hstack" style="gap:10px;align-items:center;padding:6px 8px;background:var(--bg-2);border-radius:6px">
+            <span class="mono doc" style="min-width:80px">{display_code}</span>
+            <span style="flex:1">{display_name}<span class="mono dim" style="margin-left:6px;font-size:10.5px">{display_type}</span></span>
+            <span class="mono dim" style="font-size:11px">{balance_text}</span>
+            <ActionForm action=archive_account attr:style="display:inline">
+                <input type="hidden" name="code" value=code_for_form/>
+                <input type="hidden" name="archived" value="false"/>
+                <button class="btn sm" type="submit" onclick=onclick>"取消归档"</button>
+            </ActionForm>
+        </div>
+    }
+}
+
+/// Single account card with its inline edit form + archive button.
+fn render_account_card(
+    a: Account,
+    s: AccountStats,
+    update_account: ServerAction<UpdateAccount>,
+    archive_account: ServerAction<ArchiveAccount>,
+) -> impl IntoView {
+    let tone = Tone::from_str(&a.tone);
+    let last_seen = match s.last_seen_at {
+        Some(ts) => format!("最近活动 {}", fmt_ts_date(Some(ts))),
+        None => "尚无活动".to_string(),
+    };
+    let archive_label = if a.archived { "取消归档" } else { "归档" };
+    let archive_target = if a.archived { "false" } else { "true" };
+    // Pre-bake the prefilled values so we never embed a `move ||` closure
+    // inside `value=` (CLAUDE.md "Don't put a `move ||`-returning attribute
+    // on a child element passed through a prop"). render_accounts re-runs
+    // on each ledger refetch — that's a fresh value capture each time.
+    let code = a.code.clone();
+    let name = a.name.clone();
+    let type_str = a.r#type.clone();
+    let tone_str = a.tone.clone();
+    let card_title = a.name.clone();
+    let card_code = a.code.clone();
+    let card_sub = a.r#type.clone();
+    let archive_code = a.code.clone();
+    let confirm_msg = format!(
+        "{} 账户 {}？余额保留，历史交易仍可查询。",
+        if a.archived { "取消归档" } else { "归档" },
+        a.code
+    );
+    let onclick = format!("return confirm('{}')", confirm_msg);
+    view! {
+        <Card title=card_title code=card_code sub=card_sub>
+            <div class="mono" style="font-size:24px;font-weight:600;letter-spacing:-0.02em">
+                "¥" {fmt_money(a.balance)}
+            </div>
+            <div class="hstack" style="margin-top:10px;gap:10px">
+                <UiTag tone=tone>{a.r#type.clone()}</UiTag>
+                <span class="mono dim" style="font-size:10.5px">{last_seen}</span>
+            </div>
+            <div style="margin-top:14px">
+                <ChartBars data=s.history_14d/>
+            </div>
+            <div class="hstack" style="margin-top:12px;gap:6px;flex-wrap:wrap">
+                <details style="flex:1;min-width:0">
+                    <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
+                        <Icon kind=IconKind::Settings size=12/>"编辑"
+                    </summary>
+                    <ActionForm action=update_account attr:class="vstack" attr:style="gap:8px;margin-top:8px">
+                        <input type="hidden" name="code" value=code.clone()/>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"code (不可改)"</span>
+                            <input type="text" disabled value=code.clone()
+                                   title="账户 code 不可修改"
+                                   style=INPUT_STYLE_MONO/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"名称"</span>
+                            <input name="name" required maxlength="64" value=name
+                                   style=INPUT_STYLE/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"类型"</span>
+                            <select name="type" style=INPUT_STYLE>
+                                {ACCOUNT_TYPES.iter().map(|t| {
+                                    let selected = *t == type_str.as_str();
+                                    view! { <option value=*t selected=selected>{*t}</option> }
+                                }).collect_view()}
+                            </select>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                            <select name="tone" style=INPUT_STYLE>
+                                <option value="" selected={tone_str.is_empty()}>"—"</option>
+                                {TONES.iter().map(|t| {
+                                    let selected = *t == tone_str.as_str();
+                                    view! { <option value=*t selected=selected>{*t}</option> }
+                                }).collect_view()}
+                            </select>
+                        </label>
+                        <div class="hstack" style="gap:8px;align-items:center">
+                            <button class="btn primary" type="submit">
+                                <Icon kind=IconKind::Check size=12/>"保存"
+                            </button>
+                            <span class="error-slot">
+                                {move || update_account.value().get().and_then(|r| r.err()).map(|e| view! {
+                                    <span class="tag rose">{e.to_string()}</span>
+                                })}
+                            </span>
+                        </div>
+                    </ActionForm>
+                </details>
+                <ActionForm action=archive_account attr:style="display:inline">
+                    <input type="hidden" name="code" value=archive_code/>
+                    <input type="hidden" name="archived" value=archive_target/>
+                    <button class="btn ghost" type="submit"
+                            style="color:var(--rose-ink)"
+                            onclick=onclick>{archive_label}</button>
+                </ActionForm>
+            </div>
+        </Card>
+    }
+}
+
+fn render_categories(
+    d: &LedgerData,
+    create_category: ServerAction<CreateCategory>,
+    update_category: ServerAction<UpdateCategory>,
+    archive_category: ServerAction<ArchiveCategory>,
+) -> impl IntoView {
+    // Sort by sort_order then code so the management table matches what the
+    // dropdown shows. Cloning is fine — the categories vec is small (≤ ~20).
+    let mut cats = d.categories.clone();
+    cats.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.code.cmp(&b.code)));
+    let usage = d.category_usage.clone();
+    let next_sort = cats.iter().map(|c| c.sort_order).max().unwrap_or(0) + 1;
+    view! {
+        <Card title="分类管理" code="FIN-CAT-MGR" sub="新建 / 编辑 / 归档 · 不可硬删（保留 FK 引用）">
+            <details>
+                <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+                    <Icon kind=IconKind::Plus size=14/>"新建分类"
+                </summary>
+                <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;margin-top:12px">
+                    <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:10px">
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"code"</span>
+                            <input name="code" required maxlength="8" placeholder="EDU"
+                                   pattern="[A-Z&]{1,8}"
+                                   title="1..=8 字符，仅大写字母 / &"
+                                   style=INPUT_STYLE_MONO/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"名称"</span>
+                            <input name="name" required maxlength="32" placeholder="教育"
+                                   style=INPUT_STYLE/>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                            <select name="tone" style=INPUT_STYLE>
+                                <option value="" selected="selected">"—"</option>
+                                {TONES.iter().map(|t| view! {
+                                    <option value=*t>{*t}</option>
+                                }).collect_view()}
+                            </select>
+                        </label>
+                        <label class="vstack" style="gap:4px">
+                            <span class="mono dim" style=FIELD_LABEL>"顺序"</span>
+                            <input name="sort_order" type="number" step="1" min="0"
+                                   value=next_sort.to_string()
+                                   style=INPUT_STYLE_MONO/>
+                        </label>
+                    </div>
+                    <div class="hstack" style="gap:10px;align-items:center">
+                        <button class="btn primary" type="submit">
+                            <Icon kind=IconKind::Check size=14/>"创建"
+                        </button>
+                        <span class="error-slot">
+                            {move || create_category.value().get().and_then(|r| r.err()).map(|e| view! {
+                                <span class="tag rose">{e.to_string()}</span>
+                            })}
+                        </span>
+                    </div>
+                </ActionForm>
+            </details>
+
+            <div class="scroll-x" style="margin-top:14px">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th>"名称"</th>
+                            <th style="width:80px">"code"</th>
+                            <th style="width:80px">"色调"</th>
+                            <th class="num" style="width:64px">"顺序"</th>
+                            <th class="num" style="width:64px">"在用"</th>
+                            <th style="width:64px">"归档"</th>
+                            <th class="num" style="width:220px">"操作"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {cats.into_iter().map(|c| render_category_row(c, &usage, update_category, archive_category)).collect_view()}
+                    </tbody>
+                </table>
+            </div>
+        </Card>
+    }
+}
+
+/// Single row of the category management table. Inline edit lives behind a
+/// per-row `<details>` to dodge text-node walker panics around ActionForm
+/// (CLAUDE.md "Wrap inline `{move || option.map(view!)}`…"). The archived
+/// state is round-tripped as a literal `"true"` / `"false"` hidden field —
+/// leptos URL-encoded codec accepts both.
+fn render_category_row(
+    c: Category,
+    usage: &std::collections::HashMap<String, i64>,
+    update_category: ServerAction<UpdateCategory>,
+    archive_category: ServerAction<ArchiveCategory>,
+) -> impl IntoView {
+    let tone_enum = Tone::from_str(&c.tone);
+    let usage_count = usage.get(&c.code).copied().unwrap_or(0);
+    let row_class = if c.archived { "row-archived" } else { "" };
+    let archive_label = if c.archived { "取消归档" } else { "归档" };
+    let archive_target = if c.archived { "false" } else { "true" };
+    let archived_mark = if c.archived { "✓" } else { "" };
+    let confirm_msg = format!(
+        "{} 分类 {}？",
+        if c.archived { "取消归档" } else { "归档" },
+        c.code
+    );
+    let onclick = format!("return confirm('{}')", confirm_msg);
+    let code = c.code.clone();
+    let name = c.name.clone();
+    let tone_str = c.tone.clone();
+    let sort_order_str = c.sort_order.to_string();
+    let display_name = c.name.clone();
+    let display_code = c.code.clone();
+    let display_tone_label = if c.tone.is_empty() { "—".to_string() } else { c.tone.clone() };
+    let archive_code = c.code.clone();
+    view! {
+        <tr class=row_class>
+            <td>{display_name}</td>
+            <td class="mono">{display_code}</td>
+            <td>
+                <UiTag tone=tone_enum>{display_tone_label}</UiTag>
+            </td>
+            <td class="num mono">{c.sort_order}</td>
+            <td class="num mono">{usage_count}</td>
+            <td class="mono dim">{archived_mark}</td>
+            <td class="num">
+                <div class="hstack" style="gap:6px;justify-content:flex-end;flex-wrap:wrap">
+                    <details>
+                        <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
+                            <Icon kind=IconKind::Settings size=12/>"编辑"
+                        </summary>
+                        <ActionForm action=update_category attr:class="vstack" attr:style="gap:8px;margin-top:8px;min-width:240px">
+                            <input type="hidden" name="code" value=code.clone()/>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>"code (不可改)"</span>
+                                <input type="text" disabled value=code
+                                       title="分类 code 不可修改"
+                                       style=INPUT_STYLE_MONO/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>"名称"</span>
+                                <input name="name" required maxlength="32" value=name
+                                       style=INPUT_STYLE/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                                <select name="tone" style=INPUT_STYLE>
+                                    <option value="" selected={tone_str.is_empty()}>"—"</option>
+                                    {TONES.iter().map(|t| {
+                                        let selected = *t == tone_str.as_str();
+                                        view! { <option value=*t selected=selected>{*t}</option> }
+                                    }).collect_view()}
+                                </select>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>"顺序"</span>
+                                <input name="sort_order" type="number" step="1" min="0"
+                                       value=sort_order_str
+                                       style=INPUT_STYLE_MONO/>
+                            </label>
+                            <div class="hstack" style="gap:8px;align-items:center">
+                                <button class="btn primary" type="submit">
+                                    <Icon kind=IconKind::Check size=12/>"保存"
+                                </button>
+                                <span class="error-slot">
+                                    {move || update_category.value().get().and_then(|r| r.err()).map(|e| view! {
+                                        <span class="tag rose">{e.to_string()}</span>
+                                    })}
+                                </span>
+                            </div>
+                        </ActionForm>
+                    </details>
+                    <ActionForm action=archive_category attr:style="display:inline">
+                        <input type="hidden" name="code" value=archive_code/>
+                        <input type="hidden" name="archived" value=archive_target/>
+                        <button class="btn sm" type="submit"
+                                style="color:var(--rose-ink)"
+                                onclick=onclick>{archive_label}</button>
+                    </ActionForm>
+                </div>
+            </td>
+        </tr>
     }
 }
 

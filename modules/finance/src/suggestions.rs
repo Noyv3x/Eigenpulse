@@ -105,12 +105,12 @@ mod tests {
     fn fixture_data() -> LedgerData {
         LedgerData {
             accounts: vec![
-                Account { code: "ACC-01".into(), name: "招商主卡".into(), r#type: "Checking".into(), tone: "blue".into(), balance: 5_000.0 },
-                Account { code: "ACC-02".into(), name: "余额宝".into(), r#type: "Savings".into(), tone: "green".into(), balance: 22_800.0 },
+                Account { code: "ACC-01".into(), name: "招商主卡".into(), r#type: "Checking".into(), tone: "blue".into(), balance: 5_000.0, archived: false, created_at: 0 },
+                Account { code: "ACC-02".into(), name: "余额宝".into(), r#type: "Savings".into(), tone: "green".into(), balance: 22_800.0, archived: false, created_at: 0 },
             ],
             categories: vec![
-                Category { code: "F&B".into(), name: "餐饮".into(), tone: "amber".into(), sort_order: 1 },
-                Category { code: "HLT".into(), name: "健身".into(), tone: "green".into(), sort_order: 3 },
+                Category { code: "F&B".into(), name: "餐饮".into(), tone: "amber".into(), sort_order: 1, archived: false, created_at: 0 },
+                Category { code: "HLT".into(), name: "健身".into(), tone: "green".into(), sort_order: 3, archived: false, created_at: 0 },
             ],
             txns: vec![
                 Txn {
@@ -138,6 +138,7 @@ mod tests {
                 AccountStats { last_seen_at: None, history_14d: vec![0.0; 14] },
             ],
             months_12: Vec::new(),
+            category_usage: std::collections::HashMap::new(),
         }
     }
 
