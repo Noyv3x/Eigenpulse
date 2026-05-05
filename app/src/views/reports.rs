@@ -40,22 +40,24 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         // bound + the period grouping so the buckets line up with the user's
         // wall clock — same rationale as today.rs.
         type MonthRow = (String, f64, f64);
+        // Every "expense" aggregation filters `tag = 'exp'` so transfer
+        // rows (`tag='tfr'`, from-leg amount<0) don't pollute the totals.
         let months_q = sqlx::query_as::<_, MonthRow>(
             "SELECT strftime('%Y-%m', occurred_at, 'unixepoch', 'localtime') AS period,
                     COALESCE(SUM(CASE WHEN tag='inc' AND amount > 0 THEN amount ELSE 0.0 END), 0.0) AS income,
-                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0.0 END), 0.0) AS expense
+                    COALESCE(SUM(CASE WHEN tag='exp' AND amount < 0 THEN -amount ELSE 0.0 END), 0.0) AS expense
                FROM fin_txn
               WHERE occurred_at >= unixepoch('now','localtime','start of month','-11 months','utc')
               GROUP BY period
               ORDER BY period ASC"
         ).fetch_all(pool);
 
-        // 30-day category share: only expenses (amount < 0).
+        // 30-day category share: only true expenses (tag='exp').
         type CatRow = (String, f64);
         let cat_30d_q = sqlx::query_as::<_, CatRow>(
             "SELECT category_code, SUM(-amount)
                FROM fin_txn
-              WHERE amount < 0 AND occurred_at >= unixepoch('now','-30 days')
+              WHERE tag = 'exp' AND occurred_at >= unixepoch('now','-30 days')
               GROUP BY category_code
               ORDER BY 2 DESC"
         ).fetch_all(pool);
@@ -77,7 +79,7 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         ).fetch_one(pool);
         let year_expense_q = sqlx::query_scalar::<_, f64>(
             "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
-              WHERE amount < 0 AND occurred_at >= unixepoch('now','localtime','start of year','utc')"
+              WHERE tag = 'exp' AND occurred_at >= unixepoch('now','localtime','start of year','utc')"
         ).fetch_one(pool);
 
         // 12 month period labels (oldest → newest), local-tz aware. Built
@@ -124,7 +126,9 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
 
         let acc_total: f64 = acc_rows.iter().map(|r| r.4.max(0.0)).sum();
         let accounts: Vec<Account> = acc_rows.into_iter().map(|(code, name, r#type, tone, balance)| {
-            Account { code, name, r#type, tone, balance }
+            // Reports view scope: only non-archived accounts (WHERE archived = 0)
+            // and `created_at` is not rendered here; safe defaults.
+            Account { code, name, r#type, tone, balance, archived: false, created_at: 0 }
         }).collect();
         let account_pcts: Vec<u32> = accounts.iter().map(|a| {
             if acc_total > 0.0 { (a.balance.max(0.0) / acc_total * 100.0).round() as u32 } else { 0 }

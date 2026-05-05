@@ -41,7 +41,7 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn WHERE amount > 0 AND tag='inc' AND occurred_at >= unixepoch('now','start of month')"
         ).fetch_one(pool).await.map_err(server_err)?;
         let expense: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn WHERE amount < 0 AND occurred_at >= unixepoch('now','start of month')"
+            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn WHERE tag = 'exp' AND occurred_at >= unixepoch('now','start of month')"
         ).fetch_one(pool).await.map_err(server_err)?;
         let savings = income - expense;
         let budget_total: f64 = sqlx::query_scalar(
