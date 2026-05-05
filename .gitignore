@@ -1,5 +1,7 @@
 /target
 /data
+# Hand-rolled DB snapshots (e.g. `cp -a data data.bak.$(date +%H%M%S)`).
+/data.bak.*/
 **/*.rs.bk
 .DS_Store
 node_modules
@@ -10,3 +12,8 @@ secret.key
 .vscode/
 .claude/
 .playwright-mcp/
+# Playwright screenshots dumped at the repo root via browser_take_screenshot
+# (default filename = `page-{ts}.png`; ad-hoc filenames also land here).
+/*.png
+/*.jpg
+/*.jpeg
