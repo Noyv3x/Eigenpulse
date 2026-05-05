@@ -9,9 +9,10 @@ use ep_core::{AppState, NotifyMessage, Severity};
 use serde::{Deserialize, Serialize};
 
 pub fn open_api(_state: AppState) -> Router<AppState> {
+    // axum 0.7 / matchit 0.7 uses `:param`; the `{param}` form is axum 0.8.
     Router::new()
         .route("/txn", post(post_txn).get(list_txn))
-        .route("/txn/{doc_id}", delete(delete_txn))
+        .route("/txn/:doc_id", delete(delete_txn))
 }
 
 #[derive(Debug, Deserialize)]
