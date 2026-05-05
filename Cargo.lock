@@ -926,6 +926,7 @@ dependencies = [
  "leptos_axum",
  "rand 0.8.6",
  "serde",
+ "serde_json",
  "sha2",
  "sqlx",
  "thiserror 2.0.18",

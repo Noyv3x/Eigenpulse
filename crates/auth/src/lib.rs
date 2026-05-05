@@ -24,6 +24,10 @@ pub use bootstrap::bootstrap_admin;
 pub fn unauthorized(message: &str) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
-    let body = format!(r#"{{"error":{{"code":"unauthorized","message":"{}"}}}}"#, message.replace('"', "\\\""));
+    // serde_json escapes both `"` and `\` correctly; the prior hand-rolled
+    // `.replace('"', "\\\"")` missed backslashes.
+    let body = serde_json::json!({
+        "error": { "code": "unauthorized", "message": message }
+    }).to_string();
     (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
