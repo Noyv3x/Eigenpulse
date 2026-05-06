@@ -106,13 +106,13 @@ pub async fn submit(
             Err(e) => return error500(&e.to_string()),
         };
     let Some((user_id, hash, stored_locale)) = row else {
-        return Redirect::temporary("/login?error=1").into_response();
+        return Redirect::to("/login?error=1").into_response();
     };
     let ok = ep_auth::verify_password_async(input.password.clone(), hash)
         .await
         .unwrap_or(false);
     if !ok {
-        return Redirect::temporary("/login?error=1").into_response();
+        return Redirect::to("/login?error=1").into_response();
     }
     let sess = match login_create_session(&state.db, user_id).await {
         Ok(s) => s,

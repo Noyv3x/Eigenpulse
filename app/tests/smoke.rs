@@ -152,13 +152,14 @@ fn full_flow() {
     let body = r.text().unwrap();
     assert!(body.contains("PASSWORD"));
 
-    // POST /login wrong password → 307 back to /login?error=1
+    // POST /login wrong password → 303 back to /login?error=1.
+    // 307 would preserve POST and can create an infinite redirect loop.
     let r = client
         .post(server.url("/login"))
         .form(&[("password", "wrong-pw")])
         .send()
         .unwrap();
-    assert_eq!(r.status(), 307);
+    assert_eq!(r.status(), 303);
     let loc = r.headers().get("location").unwrap().to_str().unwrap();
     assert!(loc.contains("error=1"), "expected ?error=1 in {loc}");
 
