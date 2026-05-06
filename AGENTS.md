@@ -36,9 +36,18 @@ docker buildx build --platform linux/amd64,linux/arm64 -t eigenpulse:0.1.0 .
 
 # Type-check just one crate.
 cargo check -p ep-finance --features ssr
+
+# Unit tests / focused integration tests.
+cargo test -p ep-core --lib
+cargo test -p ep-auth --lib --features ssr --no-default-features
+cargo test -p ep-finance --features ssr --no-default-features --test crud
+
+# Smoke test requires a built Leptos site first.
+cargo leptos build --release && ./scripts/leptos-postbuild.sh
+cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features
 ```
 
-There are **no unit tests yet** — `cargo test` runs no suites. Validation is by `cargo check`, manual smoke (see README §9), and the runtime checklist.
+There are unit tests and a small smoke suite now. CI runs workspace checks, selected `--lib` tests, a full `cargo leptos build --release` followed by `scripts/leptos-postbuild.sh`, the `app/tests/smoke.rs` harness, and a Docker health probe. `modules/finance/tests/crud.rs` is a focused SQLite integration suite and should be run when touching finance CRUD/server helpers.
 
 ## Architecture — the parts that span files
 
@@ -111,9 +120,9 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - Single distroless container, runs as `nonroot` (uid 65532, the upstream `gcr.io/distroless/cc-debian12:nonroot` default). When mounting a host path for `/data`, `chown -R 65532:65532 <path>`.
 - The Dockerfile pins `rust:1-bookworm` (latest stable 1.x) — keep it that way; specific minor pins will break against `time` / `icu_*` / `home`.
 - `EP_SECRET` is **only** the signing key for the `ep_sid` session cookie (`SignedCookieJar` in `crates/auth/src/middleware.rs` and `app/src/login.rs`). Rotating it invalidates all browser sessions; **PATs are unaffected** — `crates/auth/src/pat.rs::hash_token` is a plain unkeyed `sha256(token)` and never reads `EP_SECRET`. Don't suggest rotating `EP_SECRET` as a way to revoke leaked tokens; revoke individual rows in `pat` (set `revoked_at`) instead.
-- `EP_ADMIN_PASSWORD` is read **only** when `app_user` is empty (first boot). After bootstrap the row stays; the env var has no further effect. To rotate, change the row directly (a `/settings/security` UI for this is on the roadmap).
+- `EP_ADMIN_PASSWORD` is read **only** when `app_user` is empty (first boot). After bootstrap the row stays; the env var has no further effect. To rotate, use `/settings/security` (purges all sessions) or the recovery CLI `cargo run -p ep-auth --features ssr --example reset_password`.
 - `cargo-leptos` is installed and invoked in the build stage; the runtime stage only contains the `eigenpulse` binary + `target/site/`.
-- `LEPTOS_WASM_OPT_VERSION=version_129` is set in the Dockerfile because cargo-leptos 0.3.6's default `version_123` has no aarch64 prebuilt and hangs on `--platform linux/arm64` builds.
+- The Dockerfile installs `wasm-opt-shim.sh` as `/usr/local/cargo/bin/wasm-opt-version_123/wasm-opt`. cargo-leptos 0.3.6 always tries to run wasm-opt and its bundled downloader (`version_123`/`129`) has no usable aarch64 path for multi-arch builds; Debian `binaryen` is also too old for current Rust WASM features. The shim no-ops wasm-opt after Rust's own `-Oz` pass.
 - **`scripts/leptos-postbuild.sh` is mandatory after every `cargo leptos build`**: cargo-leptos 0.3.6 publishes the wasm artifact as `<name>.wasm` while wasm-bindgen's `.js` loader and Leptos's `<HydrationScripts/>` both fetch `<name>_bg.wasm`. The script `cp`s the file under both names; without it every page silently degrades to its SSR snapshot (no Tweaks toggle, no ActionForm refetch, no SSE counter). The Dockerfile invokes it automatically; `cargo leptos watch` users have to re-run it after each rebuild (cargo-leptos has no post-build hook in 0.3.6).
 - **Wrap inline `{move || option.map(view!)}` in a stable wrapper element** when the conditional view sits next to an `<ActionForm>` (or any sibling that mutates DOM during hydrate). tachys 0.1.9's text-node walker panics with `failed_to_cast_text_node` if the placeholder neighbour shifts. See `app/src/views/settings/{notifications,security}.rs` for `<span class="error-slot">…</span>` and `<div class="new-token-slot">…</div>` examples; the wrapper itself never moves, so the walker keeps its anchor.
 
@@ -157,7 +166,7 @@ Rules:
 - **Don't** call `Router::new()` without the explicit `Router::<AppState>::new()` turbofish at the workspace root; it'll be inferred as `Router<LeptosOptions>` and `leptos_routes_with_context` will reject `&state`.
 - **Don't** mark cookies `.secure(true)` unconditionally — local HTTP/NAS LAN deployment relies on `EP_COOKIE_SECURE=0` (the default).
 - **Don't** put `PRAGMA journal_mode/synchronous/foreign_keys` in a migration `.sql`. SQLite forbids these inside transactions and sqlx wraps every migration in one. Already configured in `pool.rs::open_pool`.
-- **Don't** add `[lib] crate-type = ["rlib"]` alone to the `app` crate; cargo-leptos 0.3.x needs `["cdylib", "rlib"]` to find the hydration target. Likewise the `[package.metadata.leptos]` keys `env`, `watch`, `reload-port`, `lib-package` are silently ignored — leave them out so you don't get false confidence.
+- **Don't** add `[lib] crate-type = ["rlib"]` alone to the `app` crate; cargo-leptos 0.3.x needs `["cdylib", "rlib"]` to find the hydration target. Keep the active `[package.metadata.leptos]` keys in `app/Cargo.toml` (`output-name`, `site-root`, `site-pkg-dir`, `style-file`, `assets-dir`, `site-addr`, `browserquery`, `bin-*`, `lib-*`) and don't add legacy/ignored keys such as `env`, `watch`, `reload-port`, or `lib-package`.
 - **Don't** call `Document::set_cookie` in web-sys; it's `HtmlDocument::set_cookie` (cast via `dyn_into::<web_sys::HtmlDocument>()`).
 - **Don't** put a `move ||`-returning attribute (`href=move ||`, `class=move ||`, …) on a child element passed through a prop typed as `Option<AnyView>`. The closure is captured statically when the AnyView is constructed and never re-fires on signal updates; the SSR snapshot value sticks. Symptom: a Resource feeds a `<a href=move || ledger.get()…>` on `PageHead actions=`, the table inside `<Suspense>` fills in fine, but the anchor's href stays at the SSR fallback even after hydrate. Move the reactive node into the same `<Suspense>` boundary that already re-renders when the data lands (parent re-render = fresh closure = current value), or pre-resolve to a non-reactive `String` before passing.
 - **Don't** import `ep_core::fmt_ts_*` (or any helper used only inside a `#[server]`'s `#[cfg(feature = "ssr")]` body) at module scope. The hydrate-target compile sees the import but not the use, and warns. Gate the `use` with `#[cfg(feature = "ssr")]` next to it. (Pattern in `app/src/views/dashboard.rs`.)
