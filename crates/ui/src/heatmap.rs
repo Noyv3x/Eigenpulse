@@ -6,7 +6,11 @@ pub fn Heatmap(data: Vec<u8>) -> impl IntoView {
     let cells = data
         .into_iter()
         .map(|lvl| {
-            let cls = if lvl == 0 { "c".to_string() } else { format!("c l{lvl}") };
+            let cls = if lvl == 0 {
+                "c".to_string()
+            } else {
+                format!("c l{lvl}")
+            };
             view! { <div class=cls></div> }
         })
         .collect_view();

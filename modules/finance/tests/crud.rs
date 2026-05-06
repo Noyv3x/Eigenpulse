@@ -55,10 +55,18 @@ async fn make_test_pool() -> anyhow::Result<SqlitePool> {
     //    `apply_module_migrations` call (idempotency check) is a no-op.
     sqlx::query("DELETE FROM fin_txn").execute(&pool).await?;
     sqlx::query("DELETE FROM fin_budget").execute(&pool).await?;
-    sqlx::query("DELETE FROM fin_account").execute(&pool).await?;
-    sqlx::query("DELETE FROM fin_category").execute(&pool).await?;
-    sqlx::query("DELETE FROM activity WHERE module = 'FIN'").execute(&pool).await?;
-    sqlx::query("DELETE FROM seq WHERE module = 'FIN'").execute(&pool).await?;
+    sqlx::query("DELETE FROM fin_account")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM fin_category")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM activity WHERE module = 'FIN'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM seq WHERE module = 'FIN'")
+        .execute(&pool)
+        .await?;
 
     Ok(pool)
 }
@@ -216,12 +224,11 @@ async fn pool_helper_applies_finance_migrations() {
     assert_eq!(row, (1, 1), "expected 002_finance_crud columns to exist");
 
     // Migrations should be ledger'd as applied.
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("ledger");
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
+            .fetch_one(&pool)
+            .await
+            .expect("ledger");
     assert_eq!(n, 2, "expected both finance migrations to be ledgered");
 }
 
@@ -235,12 +242,11 @@ async fn pool_helper_is_idempotent_on_double_apply() {
         .await
         .expect("second apply must be no-op");
     // Still exactly two ledger rows.
-    let n: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'",
-    )
-    .fetch_one(&pool)
-    .await
-    .expect("ledger");
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
+            .fetch_one(&pool)
+            .await
+            .expect("ledger");
     assert_eq!(n, 2);
 }
 
@@ -261,9 +267,16 @@ async fn fixture_helpers_round_trip() {
 #[tokio::test]
 async fn parse_occurred_at_empty_returns_none() {
     let pool = make_test_pool().await.expect("pool");
-    let got = ep_finance::parse_occurred_at(&pool, "").await.expect("empty ok");
-    assert_eq!(got, None, "empty → Ok(None) so caller picks 'now' or 'keep'");
-    let got2 = ep_finance::parse_occurred_at(&pool, "   ").await.expect("ws ok");
+    let got = ep_finance::parse_occurred_at(&pool, "")
+        .await
+        .expect("empty ok");
+    assert_eq!(
+        got, None,
+        "empty → Ok(None) so caller picks 'now' or 'keep'"
+    );
+    let got2 = ep_finance::parse_occurred_at(&pool, "   ")
+        .await
+        .expect("ws ok");
     assert_eq!(got2, None, "all-whitespace also Ok(None)");
 }
 
@@ -416,19 +429,17 @@ async fn add_transfer_creates_pair_and_delete_cascades() {
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
     let occurred_at = 1_700_000_000_i64;
-    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool,
-        "ACC-FROM",
-        "ACC-TO",
-        300.0,
-        None,
-        occurred_at,
-    )
-    .await
-    .expect("transfer ok");
+    let (from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, "ACC-FROM", "ACC-TO", 300.0, None, occurred_at)
+            .await
+            .expect("transfer ok");
 
     // Two fin_txn rows + two symmetric `tfr-pair` link rows, balances move.
-    assert_eq!(count_txns(&pool).await.unwrap(), 2, "transfer creates 2 fin_txn rows");
+    assert_eq!(
+        count_txns(&pool).await.unwrap(),
+        2,
+        "transfer creates 2 fin_txn rows"
+    );
     assert_eq!(
         count_links_by_kind(&pool, "tfr-pair").await.unwrap(),
         2,
@@ -449,7 +460,10 @@ async fn add_transfer_creates_pair_and_delete_cascades() {
     let deleted = ep_finance::delete_txn_inner(&pool, &from_txn.doc_id)
         .await
         .expect("cascade ok");
-    assert!(deleted, "delete_txn_inner returned true for an existing row");
+    assert!(
+        deleted,
+        "delete_txn_inner returned true for an existing row"
+    );
 
     assert_eq!(
         count_txns(&pool).await.unwrap(),
@@ -485,9 +499,10 @@ async fn delete_to_leg_also_cascades() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (_from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool, "ACC-FROM", "ACC-TO", 250.0, None, 1_700_000_000,
-    ).await.expect("transfer ok");
+    let (_from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, "ACC-FROM", "ACC-TO", 250.0, None, 1_700_000_000)
+            .await
+            .expect("transfer ok");
 
     let _ = ep_finance::delete_txn_inner(&pool, &to_txn.doc_id)
         .await
@@ -495,7 +510,10 @@ async fn delete_to_leg_also_cascades() {
 
     assert_eq!(count_txns(&pool).await.unwrap(), 0);
     assert_eq!(count_links_by_kind(&pool, "tfr-pair").await.unwrap(), 0);
-    assert_eq!(fetch_balance(&pool, "ACC-FROM").await.unwrap(), Some(1000.0));
+    assert_eq!(
+        fetch_balance(&pool, "ACC-FROM").await.unwrap(),
+        Some(1000.0)
+    );
     assert_eq!(fetch_balance(&pool, "ACC-TO").await.unwrap(), Some(0.0));
 }
 
@@ -514,42 +532,65 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code,
                               account_code, amount, tag, note, linked_doc_id)
-         VALUES ('FIN-T-EXP', ?1, 'coffee', 'F&B', 'ACC-FROM', -40.0, 'exp', NULL, NULL)"
-    ).bind(now).execute(&pool).await.unwrap();
+         VALUES ('FIN-T-EXP', ?1, 'coffee', 'F&B', 'ACC-FROM', -40.0, 'exp', NULL, NULL)",
+    )
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
     // Transfer ¥500 ACC-FROM → ACC-TO; from-leg is amount=-500 tag='tfr'.
-    let _ = ep_finance::add_transfer_inner(
-        &pool, "ACC-FROM", "ACC-TO", 500.0, None, now,
-    ).await.expect("transfer ok");
+    let _ = ep_finance::add_transfer_inner(&pool, "ACC-FROM", "ACC-TO", 500.0, None, now)
+        .await
+        .expect("transfer ok");
 
     // 1) Month expense — must equal 40 (NOT 540).
     let month_expense: f64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
           WHERE tag = 'exp'
-            AND occurred_at >= unixepoch('now','localtime','start of month','utc')"
-    ).fetch_one(&pool).await.unwrap();
-    assert!((month_expense - 40.0).abs() < 1e-6,
-        "month expense should be 40 (not 540 — transfer not counted), got {month_expense}");
+            AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        (month_expense - 40.0).abs() < 1e-6,
+        "month expense should be 40 (not 540 — transfer not counted), got {month_expense}"
+    );
 
     // 2) Category share — TFR must NOT appear; F&B must show 40.
     let cat_rows: Vec<(String, f64)> = sqlx::query_as(
         "SELECT category_code, SUM(-amount) FROM fin_txn
           WHERE tag = 'exp'
             AND occurred_at >= unixepoch('now','localtime','start of month','utc')
-          GROUP BY category_code"
-    ).fetch_all(&pool).await.unwrap();
-    assert!(!cat_rows.iter().any(|(c, _)| c == "TFR"),
-        "TFR must not appear in category share; rows = {cat_rows:?}");
-    let fb = cat_rows.iter().find(|(c, _)| c == "F&B").map(|(_, v)| *v).unwrap_or(0.0);
+          GROUP BY category_code",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !cat_rows.iter().any(|(c, _)| c == "TFR"),
+        "TFR must not appear in category share; rows = {cat_rows:?}"
+    );
+    let fb = cat_rows
+        .iter()
+        .find(|(c, _)| c == "F&B")
+        .map(|(_, v)| *v)
+        .unwrap_or(0.0);
     assert!((fb - 40.0).abs() < 1e-6, "F&B share should be 40, got {fb}");
 
     // 3) 90-day rolling — also 40, drives `avg_expense_3m` / emergency_months.
     let expense_90d: f64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
           WHERE tag = 'exp'
-            AND occurred_at >= unixepoch('now','localtime','-90 days','utc')"
-    ).fetch_one(&pool).await.unwrap();
-    assert!((expense_90d - 40.0).abs() < 1e-6,
-        "90-day expense should be 40, got {expense_90d}");
+            AND occurred_at >= unixepoch('now','localtime','-90 days','utc')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        (expense_90d - 40.0).abs() < 1e-6,
+        "90-day expense should be 40, got {expense_90d}"
+    );
 
     // 4) Week net — should be -40 (income 0 + true exp -40), NOT -540.
     let week_net: f64 = sqlx::query_scalar(
@@ -558,10 +599,15 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
                      WHEN tag = 'exp' AND amount < 0 THEN amount
                      ELSE 0.0 END), 0.0)
            FROM fin_txn
-          WHERE occurred_at >= unixepoch('now','localtime','-7 days','utc')"
-    ).fetch_one(&pool).await.unwrap();
-    assert!((week_net + 40.0).abs() < 1e-6,
-        "week net should be -40, got {week_net}");
+          WHERE occurred_at >= unixepoch('now','localtime','-7 days','utc')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        (week_net + 40.0).abs() < 1e-6,
+        "week net should be -40, got {week_net}"
+    );
 }
 
 // Single-leg tfr (kind='ref' link, not 'tfr-pair') must not cascade.
@@ -578,20 +624,29 @@ async fn single_leg_tfr_delete_does_not_cascade_unrelated_doc() {
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code,
                               account_code, amount, tag, note, linked_doc_id)
-         VALUES ('FIN-EXP-1', 1, 'pizza', 'F&B', 'ACC-B', -200.0, 'exp', NULL, NULL)"
-    ).execute(&pool).await.unwrap();
+         VALUES ('FIN-EXP-1', 1, 'pizza', 'F&B', 'ACC-B', -200.0, 'exp', NULL, NULL)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Single-leg tfr (escape-hatch via add_txn shape): tag='tfr',
     // linked_doc_id points at FIN-EXP-1, kind='ref' link (NOT 'tfr-pair').
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code,
                               account_code, amount, tag, note, linked_doc_id)
-         VALUES ('FIN-TFR-X', 2, 'tfr leg', 'TFR', 'ACC-A', -100.0, 'tfr', NULL, 'FIN-EXP-1')"
-    ).execute(&pool).await.unwrap();
+         VALUES ('FIN-TFR-X', 2, 'tfr leg', 'TFR', 'ACC-A', -100.0, 'tfr', NULL, 'FIN-EXP-1')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO module_link (source_doc, target_doc, kind)
-         VALUES ('FIN-TFR-X', 'FIN-EXP-1', 'ref')"
-    ).execute(&pool).await.unwrap();
+         VALUES ('FIN-TFR-X', 'FIN-EXP-1', 'ref')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let deleted = ep_finance::delete_txn_inner(&pool, "FIN-TFR-X")
         .await
@@ -599,20 +654,30 @@ async fn single_leg_tfr_delete_does_not_cascade_unrelated_doc() {
     assert!(deleted, "single-leg tfr was deleted");
 
     // The unrelated exp must survive.
-    let exp_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM fin_txn WHERE doc_id = 'FIN-EXP-1'"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(exp_count, 1,
-        "FIN-EXP-1 must NOT be cascade-deleted by single-leg-tfr removal");
+    let exp_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM fin_txn WHERE doc_id = 'FIN-EXP-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        exp_count, 1,
+        "FIN-EXP-1 must NOT be cascade-deleted by single-leg-tfr removal"
+    );
 
     // The 'ref' module_link from FIN-TFR-X to FIN-EXP-1 should be cleaned
     // up as part of the deleted leg's own teardown (kind='ref' from
     // source side), but the target row stays intact.
     let ref_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM module_link
-          WHERE source_doc = 'FIN-TFR-X' OR target_doc = 'FIN-TFR-X'"
-    ).fetch_one(&pool).await.unwrap();
-    assert_eq!(ref_count, 0, "deleted leg's module_link rows should be gone");
+          WHERE source_doc = 'FIN-TFR-X' OR target_doc = 'FIN-TFR-X'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        ref_count, 0,
+        "deleted leg's module_link rows should be gone"
+    );
 }
 
 // Orphan tfr-pair (partner row gone) must reject — we can't reverse the
@@ -625,9 +690,10 @@ async fn delete_rejects_orphan_tfr_pair_link() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool, "ACC-FROM", "ACC-TO", 100.0, None, 1_700_000_000,
-    ).await.expect("transfer ok");
+    let (from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, "ACC-FROM", "ACC-TO", 100.0, None, 1_700_000_000)
+            .await
+            .expect("transfer ok");
     // Post-transfer state: ACC-FROM=900, ACC-TO=100, both rows + 2 tfr-pair
     // links.
 
@@ -635,28 +701,46 @@ async fn delete_rejects_orphan_tfr_pair_link() {
     // tfr-pair links pointing at it AND ACC-TO still carrying its +100.
     sqlx::query("DELETE FROM fin_txn WHERE doc_id = ?1")
         .bind(&to_txn.doc_id)
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // delete_txn_inner must refuse and propagate the error so sqlx
     // rolls back the first-leg delete it had already started.
     let result = ep_finance::delete_txn_inner(&pool, &from_txn.doc_id).await;
-    assert!(result.is_err(),
-        "orphan partner must reject — committing would leave ACC-TO with a phantom balance");
+    assert!(
+        result.is_err(),
+        "orphan partner must reject — committing would leave ACC-TO with a phantom balance"
+    );
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("missing") && msg.contains(&to_txn.doc_id),
-        "error should name the missing partner doc; got: {msg}");
+    assert!(
+        msg.contains("missing") && msg.contains(&to_txn.doc_id),
+        "error should name the missing partner doc; got: {msg}"
+    );
 
     // Tx rolled back: from-leg + its tfr-pair links survive, ACC-FROM still
     // at 900 (transferred-out state), ACC-TO still at 100 (drift state).
     // The drift is preserved untouched, ready for manual repair.
-    assert_eq!(count_txns(&pool).await.unwrap(), 1,
-        "from-leg preserved by rollback");
-    assert_eq!(count_links_by_kind(&pool, "tfr-pair").await.unwrap(), 2,
-        "tfr-pair links preserved by rollback");
-    assert_eq!(fetch_balance(&pool, "ACC-FROM").await.unwrap(), Some(900.0),
-        "ACC-FROM stays at transferred-out balance (rollback)");
-    assert_eq!(fetch_balance(&pool, "ACC-TO").await.unwrap(), Some(100.0),
-        "ACC-TO drift unchanged — operator must repair before retry");
+    assert_eq!(
+        count_txns(&pool).await.unwrap(),
+        1,
+        "from-leg preserved by rollback"
+    );
+    assert_eq!(
+        count_links_by_kind(&pool, "tfr-pair").await.unwrap(),
+        2,
+        "tfr-pair links preserved by rollback"
+    );
+    assert_eq!(
+        fetch_balance(&pool, "ACC-FROM").await.unwrap(),
+        Some(900.0),
+        "ACC-FROM stays at transferred-out balance (rollback)"
+    );
+    assert_eq!(
+        fetch_balance(&pool, "ACC-TO").await.unwrap(),
+        Some(100.0),
+        "ACC-TO drift unchanged — operator must repair before retry"
+    );
 }
 
 // Partner lookup walks both directions; one-direction drift still cascades.
@@ -668,24 +752,33 @@ async fn delete_walks_both_tfr_pair_directions() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool, "ACC-FROM", "ACC-TO", 100.0, None, 1_700_000_000,
-    ).await.expect("transfer ok");
+    let (from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, "ACC-FROM", "ACC-TO", 100.0, None, 1_700_000_000)
+            .await
+            .expect("transfer ok");
 
     // Drift: drop only the OUTGOING link from to-leg (the (to_doc→from_doc)
     // row), preserving the incoming (from_doc→to_doc) row. A naive lookup
     // keyed on `source_doc = to_doc` finds nothing and skips cascade.
     let dropped = sqlx::query(
         "DELETE FROM module_link
-          WHERE source_doc = ?1 AND target_doc = ?2 AND kind = 'tfr-pair'"
+          WHERE source_doc = ?1 AND target_doc = ?2 AND kind = 'tfr-pair'",
     )
     .bind(&to_txn.doc_id)
     .bind(&from_txn.doc_id)
-    .execute(&pool).await.unwrap();
-    assert_eq!(dropped.rows_affected(), 1, "outgoing-from-to-leg link dropped");
-    let surviving: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM module_link WHERE kind = 'tfr-pair'"
-    ).fetch_one(&pool).await.unwrap();
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        dropped.rows_affected(),
+        1,
+        "outgoing-from-to-leg link dropped"
+    );
+    let surviving: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM module_link WHERE kind = 'tfr-pair'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(surviving, 1, "only the from→to direction remains");
 
     // Delete the to-leg. With the bidirectional UNION lookup, partner is
@@ -695,14 +788,26 @@ async fn delete_walks_both_tfr_pair_directions() {
         .expect("delete should still cascade despite one-direction drift");
     assert!(deleted);
 
-    assert_eq!(count_txns(&pool).await.unwrap(), 0,
-        "both legs deleted (cascade walked the surviving incoming link)");
-    assert_eq!(count_links_by_kind(&pool, "tfr-pair").await.unwrap(), 0,
-        "remaining tfr-pair link cleaned up by from-leg's delete_one_leg");
-    assert_eq!(fetch_balance(&pool, "ACC-FROM").await.unwrap(), Some(1000.0),
-        "ACC-FROM reverted via cascade");
-    assert_eq!(fetch_balance(&pool, "ACC-TO").await.unwrap(), Some(0.0),
-        "ACC-TO reverted by direct delete");
+    assert_eq!(
+        count_txns(&pool).await.unwrap(),
+        0,
+        "both legs deleted (cascade walked the surviving incoming link)"
+    );
+    assert_eq!(
+        count_links_by_kind(&pool, "tfr-pair").await.unwrap(),
+        0,
+        "remaining tfr-pair link cleaned up by from-leg's delete_one_leg"
+    );
+    assert_eq!(
+        fetch_balance(&pool, "ACC-FROM").await.unwrap(),
+        Some(1000.0),
+        "ACC-FROM reverted via cascade"
+    );
+    assert_eq!(
+        fetch_balance(&pool, "ACC-TO").await.unwrap(),
+        Some(0.0),
+        "ACC-TO reverted by direct delete"
+    );
 }
 
 // >1 distinct partner = corrupt link table; reject rather than pick one.
@@ -714,21 +819,28 @@ async fn delete_rejects_when_multiple_distinct_tfr_partners() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (from_txn, _to_txn) = ep_finance::add_transfer_inner(
-        &pool, "ACC-FROM", "ACC-TO", 100.0, None, 1_700_000_000,
-    ).await.expect("transfer ok");
+    let (from_txn, _to_txn) =
+        ep_finance::add_transfer_inner(&pool, "ACC-FROM", "ACC-TO", 100.0, None, 1_700_000_000)
+            .await
+            .expect("transfer ok");
 
     // Inject corruption: a stray tfr-pair link from a bogus doc into the
     // from-leg. Now the bidirectional UNION lookup returns BOTH `to_doc`
     // (legit partner via outgoing) and `BOGUS-DOC` (via incoming).
     sqlx::query(
         "INSERT INTO module_link (source_doc, target_doc, kind)
-         VALUES ('BOGUS-DOC', ?1, 'tfr-pair')"
-    ).bind(&from_txn.doc_id).execute(&pool).await.unwrap();
+         VALUES ('BOGUS-DOC', ?1, 'tfr-pair')",
+    )
+    .bind(&from_txn.doc_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let result = ep_finance::delete_txn_inner(&pool, &from_txn.doc_id).await;
-    assert!(result.is_err(),
-        "must reject when partner lookup returns multiple distinct candidates");
+    assert!(
+        result.is_err(),
+        "must reject when partner lookup returns multiple distinct candidates"
+    );
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains("distinct partners") && msg.contains("manual repair"),
@@ -737,10 +849,15 @@ async fn delete_rejects_when_multiple_distinct_tfr_partners() {
 
     // Tx rolled back: from-leg, both real tfr-pair rows, and the corrupt
     // injected row all preserved as-is for operator inspection.
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM fin_txn WHERE doc_id = ?1"
-    ).bind(&from_txn.doc_id).fetch_one(&pool).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_txn WHERE doc_id = ?1")
+        .bind(&from_txn.doc_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(count, 1, "from-leg preserved by rollback");
-    assert_eq!(fetch_balance(&pool, "ACC-FROM").await.unwrap(), Some(900.0),
-        "ACC-FROM stays at transferred-out balance");
+    assert_eq!(
+        fetch_balance(&pool, "ACC-FROM").await.unwrap(),
+        Some(900.0),
+        "ACC-FROM stays at transferred-out balance"
+    );
 }

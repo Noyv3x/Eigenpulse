@@ -10,11 +10,11 @@ default = []
 ssr     = [
     "dep:axum", "dep:tokio", "dep:sqlx", "dep:tracing",
     "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-notify/ssr",
-    "ep-ui/ssr",
+    "ep-ui/ssr", "ep-i18n/ssr",
     "leptos/ssr",
 ]
 hydrate = [
-    "ep-core/hydrate", "ep-ui/hydrate",
+    "ep-core/hydrate", "ep-ui/hydrate", "ep-i18n/hydrate",
     "leptos/hydrate",
 ]
 
@@ -24,6 +24,7 @@ ep-db      = { workspace = true }
 ep-auth    = { workspace = true }
 ep-notify  = { workspace = true }
 ep-ui      = { workspace = true }
+ep-i18n    = { workspace = true }
 
 leptos       = { workspace = true }
 leptos_meta  = { workspace = true }

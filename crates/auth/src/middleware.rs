@@ -10,15 +10,24 @@ use ep_core::AppState;
 use crate::session::{lookup_session, AuthUser, COOKIE_NAME};
 
 const PUBLIC_PREFIXES: &[&str] = &[
-    "/login", "/logout", "/healthz", "/static", "/pkg",
-    "/favicon.svg", "/manifest.webmanifest", "/sw.js", "/theme-init.js",
-    "/api/v1",   // protected separately by PAT middleware
-    "/events",   // SSE has its own auth via cookie checked inside handler
+    "/login",
+    "/logout",
+    "/healthz",
+    "/static",
+    "/pkg",
+    "/favicon.svg",
+    "/manifest.webmanifest",
+    "/sw.js",
+    "/theme-init.js",
+    "/api/v1", // protected separately by PAT middleware
+    "/events", // SSE has its own auth via cookie checked inside handler
 ];
 
 fn is_public(uri: &Uri) -> bool {
     let path = uri.path();
-    PUBLIC_PREFIXES.iter().any(|p| path == *p || path.starts_with(&format!("{p}/")))
+    PUBLIC_PREFIXES
+        .iter()
+        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
 pub async fn require_session(
@@ -62,8 +71,9 @@ pub async fn require_user_for_server_fn() -> Result<AuthUser, leptos::server_fn:
     fn err(msg: &str) -> leptos::server_fn::ServerFnError {
         leptos::server_fn::ServerFnError::ServerError(msg.to_string())
     }
-    let parts: axum::http::request::Parts = leptos_axum::extract().await.map_err(|_| err("no request context"))?;
+    let parts: axum::http::request::Parts = leptos_axum::extract()
+        .await
+        .map_err(|_| err("no request context"))?;
     let user = parts.extensions.get::<AuthUser>().cloned();
     user.ok_or_else(|| err("unauthorized"))
 }
-

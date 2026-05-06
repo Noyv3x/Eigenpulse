@@ -8,7 +8,8 @@ pub fn Ring(
     #[prop(default = "var(--primary)".to_string())] color: String,
     #[prop(into, optional)] children_text: Option<String>,
 ) -> impl IntoView {
-    let style = format!(
+    let style =
+        format!(
         "--p:{p};--s:{s}px;--t:{t}px;background:conic-gradient({c} calc({p} * 1%), var(--bg-2) 0)",
         p = pct, s = size, t = thick, c = color
     );

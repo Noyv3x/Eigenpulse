@@ -11,10 +11,18 @@ pub enum Direction {
 }
 impl Direction {
     pub fn class(&self) -> &'static str {
-        match self { Self::Up => "up", Self::Down => "down", Self::Flat => "flat" }
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Flat => "flat",
+        }
     }
     pub fn icon(&self) -> IconKind {
-        match self { Self::Up => IconKind::ArrowUp, Self::Down => IconKind::ArrowDown, Self::Flat => IconKind::Flat }
+        match self {
+            Self::Up => IconKind::ArrowUp,
+            Self::Down => IconKind::ArrowDown,
+            Self::Flat => IconKind::Flat,
+        }
     }
 }
 

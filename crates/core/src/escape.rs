@@ -37,6 +37,9 @@ mod tests {
 
     #[test]
     fn preserves_non_ascii_text() {
-        assert_eq!(html_escape("工资 · <入账>"), "工资 · &lt;入账&gt;");
+        assert_eq!(
+            html_escape("\u{5de5}\u{8d44} · <\u{5165}\u{8d26}>"),
+            "\u{5de5}\u{8d44} · &lt;\u{5165}\u{8d26}&gt;"
+        );
     }
 }

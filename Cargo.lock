@@ -803,6 +803,7 @@ dependencies = [
  "ep-db",
  "ep-finance",
  "ep-fitness",
+ "ep-i18n",
  "ep-learning",
  "ep-marketplace",
  "ep-notify",
@@ -974,6 +975,7 @@ dependencies = [
  "ep-auth",
  "ep-core",
  "ep-db",
+ "ep-i18n",
  "ep-notify",
  "ep-ui",
  "leptos",
@@ -996,6 +998,7 @@ dependencies = [
  "ep-auth",
  "ep-core",
  "ep-db",
+ "ep-i18n",
  "ep-ui",
  "leptos",
  "leptos_meta",
@@ -1010,6 +1013,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ep-i18n"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "axum-extra",
+ "cookie",
+ "ep-auth",
+ "ep-core",
+ "ep-db",
+ "leptos",
+ "leptos_axum",
+ "phf",
+ "phf_codegen",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+ "walkdir",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "ep-learning"
 version = "0.1.0"
 dependencies = [
@@ -1017,6 +1043,7 @@ dependencies = [
  "ep-auth",
  "ep-core",
  "ep-db",
+ "ep-i18n",
  "ep-ui",
  "leptos",
  "leptos_meta",
@@ -1036,6 +1063,7 @@ version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
  "ep-core",
+ "ep-i18n",
  "ep-ui",
  "leptos",
  "leptos_meta",
@@ -1066,6 +1094,7 @@ name = "ep-ui"
 version = "0.1.0"
 dependencies = [
  "ep-core",
+ "ep-i18n",
  "leptos",
  "leptos_meta",
  "leptos_router",
@@ -2453,6 +2482,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "phf"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
+dependencies = [
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_codegen"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aef8048c789fa5e851558d709946d6d79a8ff88c0440c587967f8e94bfb1216a"
+dependencies = [
+ "phf_generator",
+ "phf_shared",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
+dependencies = [
+ "phf_shared",
+ "rand 0.8.6",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3318,6 +3385,12 @@ name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
+
+[[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "slab"

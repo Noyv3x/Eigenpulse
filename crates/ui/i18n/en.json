@@ -1,0 +1,21 @@
+{
+  "ui.sidebar.logout_title": "Log out",
+  "ui.row_action.default_confirm": "Delete this item?",
+  "ui.row_action.default_label": "Delete",
+  "ui.sidebar.nav.cfg": "Settings",
+  "ui.sidebar.nav.dsh": "Dashboard",
+  "ui.sidebar.nav.fin": "Finance",
+  "ui.sidebar.nav.fit": "Fitness",
+  "ui.sidebar.nav.lrn": "Learning",
+  "ui.sidebar.nav.mod": "Modules",
+  "ui.sidebar.nav.rpt": "Reports",
+  "ui.sidebar.nav.tdy": "Today",
+  "ui.topbar.collapse_title": "Collapse sidebar",
+  "ui.topbar.dark_title": "Switch to dark",
+  "ui.topbar.light_title": "Switch to light",
+  "ui.topbar.search_placeholder": "Search modules, doc IDs, records…",
+  "ui.topbar.notif_title": "Notifications",
+  "ui.topbar.help_title": "Help",
+  "ui.topbar.lang_toggle.label": "中",
+  "ui.topbar.lang_toggle.title": "切换到中文"
+}

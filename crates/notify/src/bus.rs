@@ -17,7 +17,10 @@ pub struct NotifyBus {
 impl NotifyBus {
     pub fn new(db: SqlitePool) -> Self {
         let (tx, _rx) = broadcast::channel(256);
-        Self { broadcaster: tx, db }
+        Self {
+            broadcaster: tx,
+            db,
+        }
     }
 }
 
@@ -27,7 +30,7 @@ impl NotifyBusTrait for NotifyBus {
         // 1) Persist into `notification`.
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO notification (severity, module, title, body, link, doc_ref)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
         )
         .bind(msg.severity.as_str())
         .bind(msg.module.as_deref())
@@ -45,7 +48,7 @@ impl NotifyBusTrait for NotifyBus {
         let channels: Vec<(i64, String, String, String)> = sqlx::query_as(
             "SELECT id, kind, config_json, min_severity
                FROM notify_channel
-              WHERE enabled = 1"
+              WHERE enabled = 1",
         )
         .fetch_all(&self.db)
         .await
@@ -53,7 +56,9 @@ impl NotifyBusTrait for NotifyBus {
 
         for (ch_id, kind, cfg, min_sev) in channels {
             let min = Severity::parse(&min_sev);
-            if !msg.severity.passes(min) { continue; }
+            if !msg.severity.passes(min) {
+                continue;
+            }
             let result: anyhow::Result<()> = match build_notifier(&kind, &cfg) {
                 Ok(n) => n.send(&msg).await,
                 Err(e) => Err(e),
@@ -62,9 +67,12 @@ impl NotifyBusTrait for NotifyBus {
             let err = result.err().map(|e| e.to_string());
             let _ = sqlx::query(
                 "INSERT INTO notify_delivery (notification_id, channel_id, ok, error)
-                 VALUES (?1, ?2, ?3, ?4)"
+                 VALUES (?1, ?2, ?3, ?4)",
             )
-            .bind(id).bind(ch_id).bind(ok as i64).bind(err)
+            .bind(id)
+            .bind(ch_id)
+            .bind(ok as i64)
+            .bind(err)
             .execute(&self.db)
             .await;
         }
@@ -77,8 +85,8 @@ impl NotifyBusTrait for NotifyBus {
 }
 
 pub fn build_notifier(kind: &str, config_json: &str) -> anyhow::Result<Box<dyn Notifier>> {
-    let v: serde_json::Value = serde_json::from_str(config_json)
-        .map_err(|e| anyhow::anyhow!("bad config json: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| anyhow::anyhow!("bad config json: {e}"))?;
     Ok(match kind {
         "inapp" => Box::new(crate::inapp::InappNotifier),
         "smtp" => Box::new(crate::smtp::SmtpNotifier::from_value(v)?),

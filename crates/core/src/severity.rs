@@ -23,5 +23,7 @@ impl Severity {
             _ => Self::Info,
         }
     }
-    pub fn passes(&self, min: Self) -> bool { *self >= min }
+    pub fn passes(&self, min: Self) -> bool {
+        *self >= min
+    }
 }

@@ -283,6 +283,8 @@ body {
 .icon-btn:hover { background: var(--surface); border-color: var(--border); color: var(--ink); }
 .icon-btn .dot { position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--rose); }
 .icon-btn { position: relative; }
+.icon-btn.lang-toggle { font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; line-height: 1; padding: 0 2px; }
+.icon-btn.lang-toggle:hover { color: var(--primary-ink); }
 
 /* --- Main --- */
 .main {

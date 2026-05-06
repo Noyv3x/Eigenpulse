@@ -1,12 +1,33 @@
 use crate::model::{Account, AccountStats, Category, MonthBucket, Tag, Txn, ACCOUNT_TYPES, TONES};
 use crate::server_fns::*;
 use ep_core::{fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, IconKind, Tone};
-use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, RowDeleteAction, Tabs, TabSpec, Tag as UiTag};
+use ep_i18n::{parse_err, t, tf, use_locale};
 use ep_ui::kpi::Direction;
+use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, RowDeleteAction, TabSpec, Tabs, Tag as UiTag};
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
+
+/// Render a server-fn error for display: error-code variants
+/// (`err:finance.err.X[:payload]`) get translated to the active locale via
+/// the phf catalog; everything else (PAT-facing English contracts, system
+/// errors) falls through to `Display`. Pulls the locale from leptos
+/// context, which the SSR `locale_layer` middleware seeded.
+fn fmt_server_err(e: &ServerFnError) -> String {
+    if let Some((code, payload)) = parse_err(e) {
+        let locale = use_locale();
+        // Bind to a local so the slice we pass to `tf` outlives the call —
+        // an inline `&[("payload", p)]` ties the temp's lifetime to the
+        // expression rather than the function body.
+        let pair = [("payload", payload.unwrap_or(""))];
+        let args: &[(&str, &str)] = if payload.is_some() { &pair } else { &[] };
+        return tf(locale, code, args);
+    }
+    e.to_string()
+}
 
 #[component]
 pub fn FinanceView() -> impl IntoView {
+    let locale = use_locale();
     let active = RwSignal::new(String::from("ledger"));
     let ledger = Resource::new(|| (), |_| async { load_ledger().await });
     let add = ServerAction::<AddTxn>::new();
@@ -53,20 +74,20 @@ pub fn FinanceView() -> impl IntoView {
         <div class="view">
             <PageHead
                 code="FIN-01"
-                module="FINANCE · 财务管理"
+                module=t(locale, "finance.page.module")
                 title="Finance"
-                title_cn="财务管理"
-                sub="账户、预算、收支、投资。支持跨模块关联与自动分类。"
+                title_cn=t(locale, "finance.page.title_cn")
+                sub=t(locale, "finance.page.sub")
                 actions=view! {
                     <a class="btn primary" href="#fin-new-merchant">
-                        <Icon kind=IconKind::Plus size=14/>"记一笔"
+                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
                     </a>
                 }.into_any()
             />
 
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">"loading…"</div> }>
+            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
                 {move || ledger.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">"加载失败 · " {e.to_string()}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {fmt_server_err(&e)}</div></div> }.into_any(),
                     Ok(data) => render_ledger(
                         data, active, add, delete, set_budget, import_budgets,
                         create_account, update_account, archive_account,
@@ -101,10 +122,13 @@ fn render_ledger(
     date_from_filter: RwSignal<String>,
     date_to_filter: RwSignal<String>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let m = &data.month;
     let bud_pct = if m.budget_total > 0.0 {
         (m.expense / m.budget_total * 100.0).round() as u32
-    } else { 0 };
+    } else {
+        0
+    };
     let bud_dir = match bud_pct {
         0..=60 => Direction::Up,
         61..=85 => Direction::Flat,
@@ -115,18 +139,28 @@ fn render_ledger(
     // 3m rolling has 90 days denominator (avg_expense_3m is a monthly figure).
     let daily_3m = m.avg_expense_3m / 30.0;
     let daily_delta = daily_now - daily_3m;
-    let daily_dir = if daily_delta < -0.5 { Direction::Up }      // less spend = up (saving)
-                    else if daily_delta > 0.5 { Direction::Down }
-                    else { Direction::Flat };
+    let daily_dir = if daily_delta < -0.5 {
+        Direction::Up
+    }
+    // less spend = up (saving)
+    else if daily_delta > 0.5 {
+        Direction::Down
+    } else {
+        Direction::Flat
+    };
     let savings_pct = (m.savings_rate * 100.0).round() as u32;
     let savings_dir = match savings_pct {
         0..=10 => Direction::Down,
         11..=29 => Direction::Flat,
         _ => Direction::Up,
     };
-    let emergency_dir = if m.emergency_months >= 6.0 { Direction::Up }
-                       else if m.emergency_months >= 3.0 { Direction::Flat }
-                       else { Direction::Down };
+    let emergency_dir = if m.emergency_months >= 6.0 {
+        Direction::Up
+    } else if m.emergency_months >= 3.0 {
+        Direction::Flat
+    } else {
+        Direction::Down
+    };
     // Tab badge reflects visible rows (LIMIT 50, not month-scoped); the
     // month aggregate goes in the card sub-label.
     let txns_count = data.txns.len() as u32;
@@ -144,46 +178,70 @@ fn render_ledger(
     // in attribute-value position.
     let daily_delta_text = if daily_3m > 0.0 {
         let sign = if daily_delta >= 0.0 { "+" } else { "−" };
-        format!("{}¥{} vs 90d 均值", sign, fmt_int(daily_delta.abs()))
+        tf(
+            locale,
+            "finance.kpi.spend_vs_avg",
+            &[("sign", sign), ("amount", &fmt_int(daily_delta.abs()))],
+        )
     } else {
-        format!("第 {} 天 · 90d 数据不足", m.days_elapsed)
+        tf(
+            locale,
+            "finance.kpi.day_insufficient",
+            &[("day", &m.days_elapsed.to_string())],
+        )
     };
     let savings_delta_text = if m.savings >= 0.0 {
-        format!("¥{} 净结余", fmt_int(m.savings))
+        tf(
+            locale,
+            "finance.kpi.net_savings",
+            &[("amount", &fmt_int(m.savings))],
+        )
     } else {
-        format!("−¥{} 透支", fmt_int(m.savings.abs()))
+        tf(
+            locale,
+            "finance.kpi.net_deficit",
+            &[("amount", &fmt_int(m.savings.abs()))],
+        )
     };
     let emergency_delta_text = if m.avg_expense_3m > 0.0 {
-        format!("¥{} 流动 / ¥{} 月均", fmt_int(m.liquid_balance), fmt_int(m.avg_expense_3m))
+        tf(
+            locale,
+            "finance.kpi.emergency_delta",
+            &[
+                ("liquid", &fmt_int(m.liquid_balance)),
+                ("avg", &fmt_int(m.avg_expense_3m)),
+            ],
+        )
     } else {
-        "数据不足 · 至少需 1 月支出".to_string()
+        t(locale, "finance.kpi.emergency_empty").to_string()
     };
     let kpis = view! {
         <div class="kpi-grid">
-            <Kpi code="FIN-K01" label="本月预算" value=format!("{}", bud_pct) unit="%".to_string()
+            <Kpi code="FIN-K01" label=t(locale, "finance.kpi.budget") value=format!("{}", bud_pct) unit="%".to_string()
                  delta=format!("¥{} / ¥{}", fmt_int(m.expense), fmt_int(m.budget_total))
                  dir=bud_dir/>
-            <Kpi code="FIN-K02" label="日均支出"
+            <Kpi code="FIN-K02" label=t(locale, "finance.kpi.daily_spend")
                  value=format!("¥{}", fmt_int(daily_now))
                  delta=daily_delta_text
                  dir=daily_dir/>
-            <Kpi code="FIN-K03" label="储蓄率"
+            <Kpi code="FIN-K03" label=t(locale, "finance.kpi.savings_rate")
                  value=format!("{}", savings_pct) unit="%".to_string()
                  delta=savings_delta_text
                  dir=savings_dir/>
-            <Kpi code="FIN-K04" label="应急金"
-                 value=format!("{:.1}", m.emergency_months) unit="月".to_string()
+            <Kpi code="FIN-K04" label=t(locale, "finance.kpi.emergency")
+                 value=format!("{:.1}", m.emergency_months) unit=t(locale, "finance.kpi.month_unit").to_string()
                  delta=emergency_delta_text
                  dir=emergency_dir/>
         </div>
     };
 
     let tabs = vec![
-        TabSpec::new("ledger", "总账 / Ledger").with_count(txns_count),
-        TabSpec::new("budget", "预算 / Budget").with_count(budgets_count),
-        TabSpec::new("accounts", "账户 / Accounts").with_count(accounts_count),
-        TabSpec::new("categories", "类别 / Categories").with_count(categories_count),
-        TabSpec::new("reports", "报表 / Reports"),
+        TabSpec::new("ledger", t(locale, "finance.tab.ledger")).with_count(txns_count),
+        TabSpec::new("budget", t(locale, "finance.tab.budget")).with_count(budgets_count),
+        TabSpec::new("accounts", t(locale, "finance.tab.accounts")).with_count(accounts_count),
+        TabSpec::new("categories", t(locale, "finance.tab.categories"))
+            .with_count(categories_count),
+        TabSpec::new("reports", t(locale, "finance.tab.reports")),
     ];
 
     // Share the loaded LedgerData across every tab branch by Arc instead of
@@ -215,48 +273,49 @@ fn render_ledger(
 }
 
 fn render_banner(d: &LedgerData) -> impl IntoView {
+    let locale = use_locale();
     let m = &d.month;
     let week_sign = if m.balance_delta >= 0.0 { "+" } else { "−" };
     let savings_pct = (m.savings_rate * 100.0).round() as u32;
     // Net-worth tone tracks the most recent week: + → green/healthy,
     // 0 → flat/neutral, − → rose/watch.
     let (worth_tone, worth_label) = if m.balance_delta > 0.0 {
-        (Tone::Green, "健康")
+        (Tone::Green, "Healthy")
     } else if m.balance_delta == 0.0 {
-        (Tone::None, "持平")
+        (Tone::None, "Flat")
     } else {
-        (Tone::Rose, "关注")
+        (Tone::Rose, "Watch")
     };
     view! {
         <div class="module-banner">
             <div class="module-glyph fin mono">"¥"</div>
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
-                    <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">"净资产 / NET WORTH"</span>
+                    <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">{t(locale, "finance.banner.net_worth")}</span>
                     <UiTag tone=worth_tone dot=true>{worth_label}</UiTag>
                 </div>
                 <div class="mono" style="font-size:32px;font-weight:600;letter-spacing:-0.02em;line-height:1.1">
                     "¥" {fmt_money(m.balance)}
                 </div>
                 <div class="hstack" style="gap:16px;margin-top:8px;font-size:12.5px;color:var(--ink-3)">
-                    <span class="mono">{format!("{}¥{} 本周", week_sign, fmt_int(m.balance_delta.abs()))}</span>
-                    <span class="mono">{format!("储蓄率 {}%", savings_pct)}</span>
-                    <span class="mono">{format!("{} 账户", d.accounts.len())}</span>
+                    <span class="mono">{tf(locale, "finance.banner.balance_delta", &[("sign", week_sign), ("amount", &fmt_int(m.balance_delta.abs()))])}</span>
+                    <span class="mono">{tf(locale, "finance.banner.savings_rate", &[("pct", &savings_pct.to_string())])}</span>
+                    <span class="mono">{tf(locale, "finance.banner.account_count", &[("count", &d.accounts.len().to_string())])}</span>
                 </div>
             </div>
             <div class="hstack" style="gap:20px;padding-right:8px">
                 <div>
-                    <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">"月收入"</div>
+                    <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">{t(locale, "finance.banner.income")}</div>
                     <div class="mono" style="font-size:18px;font-weight:600;color:var(--primary-ink)">"+¥" {fmt_int(m.income)}</div>
                 </div>
                 <div class="sep-v"></div>
                 <div>
-                    <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">"月支出"</div>
+                    <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">{t(locale, "finance.banner.spend")}</div>
                     <div class="mono" style="font-size:18px;font-weight:600">"−¥" {fmt_int(m.expense)}</div>
                 </div>
                 <div class="sep-v"></div>
                 <div>
-                    <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">"月结余"</div>
+                    <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">{t(locale, "finance.banner.net_savings")}</div>
                     <div class="mono" style="font-size:18px;font-weight:600">{format!("{}¥{}", if m.savings >= 0.0 { "" } else { "−" }, fmt_int(m.savings.abs()))}</div>
                 </div>
             </div>
@@ -264,7 +323,8 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
     }
 }
 
-const INPUT_STYLE: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
+const INPUT_STYLE: &str =
+    "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
 const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
 const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
 
@@ -273,31 +333,32 @@ fn render_new_txn_form(
     categories: Vec<Category>,
     accounts: Vec<Account>,
 ) -> impl IntoView {
+    let locale = use_locale();
     view! {
-        <Card title="记一笔" code="FIN-NEW" sub="新建交易 · 自动生成 FIN-NNNNN 单号 · 标签自动定号位">
+        <Card title=t(locale, "finance.card.new.title") code="FIN-NEW" sub=t(locale, "finance.card.new.sub")>
             <ActionForm action=add attr:class="vstack" attr:style="gap:10px">
                 <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"商户 / 描述"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.merchant_desc")}</span>
                         <input id="fin-new-merchant" name="merchant" required
-                               placeholder="盒马 · 生鲜" style=INPUT_STYLE/>
+                               placeholder=t(locale, "finance.placeholder.merchant") style=INPUT_STYLE/>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"金额 (¥)"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
                         <input name="amount" type="number" step="0.01" min="0.01" required
                                placeholder="42.00" style=INPUT_STYLE_MONO/>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"标签"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tag")}</span>
                         <select name="tag" style=INPUT_STYLE>
-                            <option value=Tag::Exp.as_str() selected="selected">"支出 · exp"</option>
-                            <option value=Tag::Inc.as_str()>"收入 · inc"</option>
+                            <option value=Tag::Exp.as_str() selected="selected">{t(locale, "finance.tag.exp")}</option>
+                            <option value=Tag::Inc.as_str()>{t(locale, "finance.tag.inc")}</option>
                         </select>
                     </label>
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"类别"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
                         <select name="category_code" style=INPUT_STYLE>
                             {categories.into_iter().filter(|c| !c.archived).enumerate().map(|(i, c)| {
                                 let code = c.code.clone();
@@ -307,7 +368,7 @@ fn render_new_txn_form(
                         </select>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"账户"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.account")}</span>
                         <select name="account_code" style=INPUT_STYLE>
                             {accounts.into_iter().filter(|a| !a.archived).enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
@@ -317,28 +378,28 @@ fn render_new_txn_form(
                         </select>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"关联单号 (可选)"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.link_optional")}</span>
                         <input name="linked_doc_id" placeholder="FIT-S-0412 / LRN-B-014"
                                style=INPUT_STYLE_MONO/>
                     </label>
                 </div>
                 <div style="display:grid;grid-template-columns:2fr 2fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"备注 (可选)"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
                         <input name="note" placeholder="…" style=INPUT_STYLE/>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"日期 (可选 · 默认今天)"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.date_default")}</span>
                         <input name="occurred_at" type="date" style=INPUT_STYLE_MONO
-                               title="留空 = 当前时间"/>
+                               title=t(locale, "finance.placeholder.date_now")/>
                     </label>
                     <span class="error-slot" style="align-self:center">
                         {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{e.to_string()}</span>
+                            <span class="tag rose">{fmt_server_err(&e)}</span>
                         })}
                     </span>
                     <button class="btn primary" type="submit" style="align-self:center">
-                        <Icon kind=IconKind::Plus size=14/>"记录"
+                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
                     </button>
                 </div>
             </ActionForm>
@@ -346,20 +407,21 @@ fn render_new_txn_form(
     }
 }
 
-/// 转账 Card; submits to `add_transfer` (writes the paired ±amount rows).
+/// Transfer card; submits to `add_transfer` (writes the paired ±amount rows).
 fn render_transfer_form(
     add_transfer: ServerAction<AddTransfer>,
     accounts: Vec<Account>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let active_accounts: Vec<Account> = accounts.into_iter().filter(|a| !a.archived).collect();
     let from_accounts = active_accounts.clone();
     let to_accounts = active_accounts;
     view! {
-        <Card title="转账" code="FIN-TFR-NEW" sub="账户间互转 · 自动生成两笔配对记录">
+        <Card title=t(locale, "finance.card.transfer.title") code="FIN-TFR-NEW" sub=t(locale, "finance.card.transfer.sub")>
             <ActionForm action=add_transfer attr:class="vstack" attr:style="gap:10px">
                 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"从账户"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.from_account")}</span>
                         <select name="from_account" style=INPUT_STYLE>
                             {from_accounts.into_iter().enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
@@ -369,7 +431,7 @@ fn render_transfer_form(
                         </select>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"到账户"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.to_account")}</span>
                         <select name="to_account" style=INPUT_STYLE>
                             {to_accounts.into_iter().enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
@@ -379,28 +441,28 @@ fn render_transfer_form(
                         </select>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"金额 (¥)"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
                         <input name="amount" type="number" step="0.01" min="0.01" required
                                placeholder="500.00" style=INPUT_STYLE_MONO/>
                     </label>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"日期 (可选)"</span>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.date_optional")}</span>
                         <input name="occurred_at" type="date" style=INPUT_STYLE_MONO
-                               title="留空 = 当前时间"/>
+                               title=t(locale, "finance.placeholder.date_now")/>
                     </label>
                 </div>
                 <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>"备注 (可选)"</span>
-                        <input name="note" placeholder="月初分配 · 储蓄" style=INPUT_STYLE/>
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
+                        <input name="note" placeholder=t(locale, "finance.placeholder.transfer_note") style=INPUT_STYLE/>
                     </label>
                     <span class="error-slot" style="align-self:center">
                         {move || add_transfer.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{e.to_string()}</span>
+                            <span class="tag rose">{fmt_server_err(&e)}</span>
                         })}
                     </span>
                     <button class="btn primary" type="submit" style="align-self:center">
-                        <Icon kind=IconKind::Arrow size=14/>"转账"
+                        <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
                     </button>
                 </div>
             </ActionForm>
@@ -417,11 +479,14 @@ fn render_ledger_tab(
     date_from_filter: RwSignal<String>,
     date_to_filter: RwSignal<String>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let txns = d.txns.clone();
     let cat_summary = d.category_summary.clone();
     let cat_options = d.categories.clone();
     let acc_options = d.accounts.clone();
-    let cat_lookup: std::collections::HashMap<String, Category> = d.categories.iter()
+    let cat_lookup: std::collections::HashMap<String, Category> = d
+        .categories
+        .iter()
         .map(|c| (c.code.clone(), c.clone()))
         .collect();
     let visible_count = txns.len();
@@ -437,23 +502,31 @@ fn render_ledger_tab(
     // The table is "most recent 50, all-time" — the sub-label has to
     // surface that and the month-specific count without conflating them.
     let sub = match (visible_count, total_count) {
-        (0, 0) => "暂无交易 · 在上方记一笔填充".to_string(),
-        (v, m) if v >= 50 => format!("展示最近 50 笔 · 本月已记录 {} 笔 · 支持商户搜索 / 类别 / 日期筛选", m),
-        (v, m) => format!("共 {} 笔（全部）· 本月 {} 笔 · 支持商户搜索 / 类别 / 日期筛选", v, m),
+        (0, 0) => t(locale, "finance.ledger.empty").to_string(),
+        (v, m) if v >= 50 => tf(
+            locale,
+            "finance.ledger.sub_recent",
+            &[("month", &m.to_string())],
+        ),
+        (v, m) => tf(
+            locale,
+            "finance.ledger.sub_all",
+            &[("visible", &v.to_string()), ("month", &m.to_string())],
+        ),
     };
 
     view! {
         <div class="grid-2" style="margin-top:20px">
-            <Card title="交易明细" code="FIN-LGR-01" sub=sub>
+            <Card title=t(locale, "finance.card.ledger.title") code="FIN-LGR-01" sub=sub>
                 <div class="hstack" style="gap:10px;margin-bottom:12px;flex-wrap:wrap">
-                    <input type="text" placeholder="搜索商户 / 描述…"
+                    <input type="text" placeholder=t(locale, "finance.filter.search")
                            prop:value=move || merchant_filter.get()
                            on:input=move |ev| merchant_filter.set(event_target_value(&ev))
                            style=format!("flex:1;min-width:160px;{}", INPUT_STYLE)/>
                     <select prop:value=move || category_filter.get()
                             on:change=move |ev| category_filter.set(event_target_value(&ev))
                             style=INPUT_STYLE>
-                        <option value="">"全部类别"</option>
+                        <option value="">{t(locale, "finance.filter.all_categories")}</option>
                         {cat_options.iter().cloned().map(|c| {
                             let code = c.code.clone();
                             let label = format!("{} {}", c.name, c.code);
@@ -464,28 +537,28 @@ fn render_ledger_tab(
                            prop:value=move || date_from_filter.get()
                            on:input=move |ev| date_from_filter.set(event_target_value(&ev))
                            style=INPUT_STYLE_MONO
-                           title="起始日期"/>
+                           title=t(locale, "finance.filter.date_from")/>
                     <input type="date"
                            prop:value=move || date_to_filter.get()
                            on:input=move |ev| date_to_filter.set(event_target_value(&ev))
                            style=INPUT_STYLE_MONO
-                           title="结束日期"/>
+                           title=t(locale, "finance.filter.date_to")/>
                     <a class="btn" download="finance-export.csv" href=export_href>
-                        <Icon kind=IconKind::Export size=14/>"导出"
+                        <Icon kind=IconKind::Export size=14/>{t(locale, "finance.action.export")}
                     </a>
                 </div>
                 <div class="scroll-x">
                     <table class="tbl">
                         <thead>
                             <tr>
-                                <th style="width:76px">"日期"</th>
-                                <th style="width:110px">"单号"</th>
-                                <th>"商户 / 描述"</th>
-                                <th style="width:80px">"类别"</th>
-                                <th style="width:80px">"账户"</th>
-                                <th class="num" style="width:110px">"金额"</th>
-                                <th style="width:80px">"关联"</th>
-                                <th class="num" style="width:120px">"操作"</th>
+                                <th style="width:76px">{t(locale, "finance.field.date")}</th>
+                                <th style="width:110px">{t(locale, "finance.field.link_doc")}</th>
+                                <th>{t(locale, "finance.field.merchant_desc")}</th>
+                                <th style="width:80px">{t(locale, "finance.field.category")}</th>
+                                <th style="width:80px">{t(locale, "finance.field.account")}</th>
+                                <th class="num" style="width:110px">{t(locale, "finance.field.amount")}</th>
+                                <th style="width:80px">{t(locale, "finance.field.link_doc")}</th>
+                                <th class="num" style="width:120px">{t(locale, "finance.field.ops")}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -517,9 +590,9 @@ fn render_ledger_tab(
             </Card>
 
             <div class="vstack" style="gap:20px">
-                <Card title="支出结构" code="FIN-R02" sub="本月 · 按类别">
+                <Card title=t(locale, "finance.card.category_share.title") code="FIN-R02" sub=t(locale, "finance.card.category_share.sub")>
                     {if cat_summary.is_empty() {
-                        view! { <p class="muted">"本月暂无支出 · 在左侧记一笔填充"</p> }.into_any()
+                        view! { <p class="muted">{t(locale, "finance.card.category_share.empty")}</p> }.into_any()
                     } else {
                         view! {
                             <div class="vstack" style="gap:10px">
@@ -544,7 +617,7 @@ fn render_ledger_tab(
                     }}
                 </Card>
 
-                <Card title="智能建议" code="FIN-AI-01" sub="基于本月预算 + 近 30 天交易 · 规则驱动">
+                <Card title=t(locale, "finance.card.ai.title") code="FIN-AI-01" sub=t(locale, "finance.card.ai.sub")>
                     <div class="vstack" style="gap:10px">
                         {render_suggestions(suggestions)}
                     </div>
@@ -555,8 +628,9 @@ fn render_ledger_tab(
 }
 
 fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoView {
+    let locale = use_locale();
     if items.is_empty() {
-        return view! { <p class="muted">"未识别可行动建议 · 数据健康"</p> }.into_any();
+        return view! { <p class="muted">{t(locale, "finance.card.ai.empty")}</p> }.into_any();
     }
     // Wrap each row in an anchor when the rule provided a link target so the
     // suggestion is one click instead of a "look at this" toast. Inline
@@ -582,7 +656,8 @@ fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoVi
                 </div>
             }.into_any(),
         }).collect_view()}
-    }.into_any()
+    }
+    .into_any()
 }
 
 fn render_txn_row(
@@ -593,9 +668,14 @@ fn render_txn_row(
     delete: ServerAction<DeleteTxn>,
     update_txn: ServerAction<UpdateTxn>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let date = fmt_ts_md(Some(t.occurred_at));
     let time_ = fmt_ts_hm(Some(t.occurred_at));
-    let cls_amt = if t.amount > 0.0 { "num amt-pos" } else { "num amt-neg" };
+    let cls_amt = if t.amount > 0.0 {
+        "num amt-pos"
+    } else {
+        "num amt-neg"
+    };
     let txind = match Tag::parse(&t.tag) {
         Some(Tag::Inc) => "txind inc",
         Some(Tag::Tfr) => "txind tfr",
@@ -608,18 +688,20 @@ fn render_txn_row(
     };
     let is_tfr = matches!(Tag::parse(&t.tag), Some(Tag::Tfr));
     let link = t.linked_doc_id.clone();
-    let cat_tone = cat_lookup.get(&t.category_code)
+    let cat_tone = cat_lookup
+        .get(&t.category_code)
         .map(|c| Tone::from_str(&c.tone))
         .unwrap_or(Tone::None);
     let cat_label = t.category_code.clone();
     let doc_id = t.doc_id.clone();
 
-    // Category cell renders the "转账" pill on tfr rows so the user sees
+    // Category cell renders the transfer pill on tfr rows so the user sees
     // why the edit affordance is suppressed; non-tfr rows keep the existing
     // category Tag (toned via cat_lookup, including archived ones for
     // historical accuracy — E5).
     let cat_cell = if is_tfr {
-        view! { <UiTag tone=Tone::Blue>"转账"</UiTag> }.into_any()
+        view! { <UiTag tone=Tone::Blue>{ep_i18n::t(locale, "finance.tag.transfer")}</UiTag> }
+            .into_any()
     } else {
         view! { <UiTag tone=cat_tone>{cat_label}</UiTag> }.into_any()
     };
@@ -631,25 +713,27 @@ fn render_txn_row(
     // deliberate. The cancel button calls editing.set(false) explicitly.
     let editing = RwSignal::new(false);
 
-    // Action column varies by tfr-ness — non-tfr gets an inline 编辑
+    // Action column varies by tfr-ness — non-tfr gets an inline edit
     // toggle, tfr gets a tooltip-bearing placeholder.
     let action_cell = if is_tfr {
         view! {
             <span class="dim mono"
                   style="font-size:10.5px"
-                  title="转账记录不可编辑，请删除后重建">"——"</span>
+                  title=ep_i18n::t(locale, "finance.title.tfr_not_editable")>"——"</span>
             <RowDeleteAction action=delete value=doc_id.clone()
-                             confirm="删除该转账？两笔配对记录会同时回滚，余额同步恢复。"/>
-        }.into_any()
+                             confirm=ep_i18n::t(locale, "finance.confirm.delete_transfer")/>
+        }
+        .into_any()
     } else {
         view! {
             <button class="btn sm" type="button"
                     on:click=move |_| editing.update(|v| *v = !*v)>
-                "编辑"
+                {ep_i18n::t(locale, "finance.action.edit")}
             </button>
             <RowDeleteAction action=delete value=doc_id.clone()
-                             confirm="删除该笔交易？账户余额会同步回滚。"/>
-        }.into_any()
+                             confirm=ep_i18n::t(locale, "finance.confirm.delete_txn")/>
+        }
+        .into_any()
     };
 
     // Pre-baked prefilled values for the edit form. All clones live on the
@@ -676,16 +760,16 @@ fn render_txn_row(
             <ActionForm action=update_txn attr:class="hstack" attr:style="gap:8px;flex-wrap:wrap;padding:10px">
                 <input type="hidden" name="doc_id" value=edit_doc_id/>
                 <label class="vstack" style="gap:2px;flex:2;min-width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>"商户"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.merchant")}</span>
                     <input name="merchant" required value=edit_merchant style=INPUT_STYLE/>
                 </label>
                 <label class="vstack" style="gap:2px;width:110px">
-                    <span class="mono dim" style=FIELD_LABEL>"金额"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.amount")}</span>
                     <input name="amount" type="number" step="0.01" min="0.01"
                            value=edit_amount_str style=INPUT_STYLE_MONO/>
                 </label>
                 <label class="vstack" style="gap:2px;width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>"类别"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.category")}</span>
                     <select name="category_code" style=INPUT_STYLE>
                         {cat_opts_active.into_iter().map(|c| {
                             let selected = c.code == edit_category;
@@ -696,7 +780,7 @@ fn render_txn_row(
                     </select>
                 </label>
                 <label class="vstack" style="gap:2px;width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>"账户"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.account")}</span>
                     <select name="account_code" style=INPUT_STYLE>
                         {acc_opts_active.into_iter().map(|a| {
                             let selected = a.code == edit_account;
@@ -707,24 +791,24 @@ fn render_txn_row(
                     </select>
                 </label>
                 <label class="vstack" style="gap:2px;width:130px">
-                    <span class="mono dim" style=FIELD_LABEL>"日期"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.date")}</span>
                     <input name="occurred_at" type="date" value=edit_date style=INPUT_STYLE_MONO/>
                 </label>
                 <label class="vstack" style="gap:2px;flex:1;min-width:120px">
-                    <span class="mono dim" style=FIELD_LABEL>"备注"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.note")}</span>
                     <input name="note" value=edit_note style=INPUT_STYLE/>
                 </label>
                 <label class="vstack" style="gap:2px;width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>"关联单号"</span>
+                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.link_doc")}</span>
                     <input name="linked_doc_id" value=edit_link style=INPUT_STYLE_MONO/>
                 </label>
                 <div class="hstack" style="gap:6px;align-items:center">
-                    <button class="btn primary sm" type="submit">"保存"</button>
+                    <button class="btn primary sm" type="submit">{ep_i18n::t(locale, "finance.action.save")}</button>
                     <button class="btn ghost sm" type="button"
-                            on:click=move |_| editing.set(false)>"取消"</button>
+                            on:click=move |_| editing.set(false)>{ep_i18n::t(locale, "finance.action.cancel")}</button>
                     <span class="error-slot">
                         {move || update_txn.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{e.to_string()}</span>
+                            <span class="tag rose">{fmt_server_err(&e)}</span>
                         })}
                     </span>
                 </div>
@@ -778,19 +862,24 @@ fn render_budget(
     set_budget: ServerAction<SetBudget>,
     import_budgets: ServerAction<ImportBudgetsFrom>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let m = &d.month;
     let period = m.period.clone();
     let categories_for_form = d.categories.clone();
     // Owned-string lookup so the closures below don't capture a borrow into
     // a Vec the view! macro will move.
-    let cat_lookup: std::collections::HashMap<String, (String, String)> = d.categories.iter()
+    let cat_lookup: std::collections::HashMap<String, (String, String)> = d
+        .categories
+        .iter()
         .map(|c| (c.code.clone(), (c.name.clone(), c.tone.clone())))
         .collect();
     let budgets = d.budgets.clone();
     let budgets_count = budgets.len();
     // Categories that have spent this month but no budget — surfaced so the
     // user can react ("oh I forgot to budget for X this month").
-    let unbudgeted: Vec<crate::model::CategorySummary> = d.category_summary.iter()
+    let unbudgeted: Vec<crate::model::CategorySummary> = d
+        .category_summary
+        .iter()
         .filter(|c| !d.budgets.iter().any(|b| b.category_code == c.code))
         .cloned()
         .collect();
@@ -800,15 +889,35 @@ fn render_budget(
     let import_source = previous_period(&period);
     let import_target = period.clone();
     let next_period_label = next_period(&period);
-    let pool_title = format!("预算池 · {}", period);
+    let pool_title = tf(locale, "finance.budget.pool_title", &[("period", &period)]);
     let pool_sub = if budgets_count == 0 {
-        "本期尚未设置预算".to_string()
+        t(locale, "finance.budget.empty").to_string()
     } else {
-        format!("{} 个类别 · 已用 ¥{} / ¥{}", budgets_count, fmt_int(m.expense), fmt_int(m.budget_total))
+        tf(
+            locale,
+            "finance.budget.pool_sub",
+            &[
+                ("count", &budgets_count.to_string()),
+                ("used", &fmt_int(m.expense)),
+                ("total", &fmt_int(m.budget_total)),
+            ],
+        )
     };
-    let import_button_label = format!("从 {} 导入", import_source);
-    let empty_period_hint = format!("{} 期间未设置任何预算 · 通过右侧编辑器添加，或一键复制上期。", period);
-    let next_month_sub = format!("基于本月支出节奏推算 · 建议 {} 期", next_period_label);
+    let import_button_label = tf(
+        locale,
+        "finance.budget.import",
+        &[("period", &import_source)],
+    );
+    let empty_period_hint = tf(
+        locale,
+        "finance.budget.empty_period",
+        &[("period", &period)],
+    );
+    let next_month_sub = tf(
+        locale,
+        "finance.budget.card.next_sub",
+        &[("period", &next_period_label)],
+    );
     let editor_period = period.clone();
 
     view! {
@@ -829,7 +938,7 @@ fn render_budget(
                                 </ActionForm>
                                 <span class="error-slot">
                                     {move || import_budgets.value().get().and_then(|r| r.err()).map(|e| view! {
-                                        <span class="tag rose">{e.to_string()}</span>
+                                        <span class="tag rose">{fmt_server_err(&e)}</span>
                                     })}
                                 </span>
                             </div>
@@ -871,7 +980,7 @@ fn render_budget(
                             } else {
                                 view! {
                                     <div style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
-                                        <div class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">"未预算的类别 · 已发生支出"</div>
+                                        <div class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">{t(locale, "finance.budget.unbudgeted")}</div>
                                         {unbudgeted.into_iter().map(|c| view! {
                                             <div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0">
                                                 <span>{c.name.clone()} <span class="mono dim" style="margin-left:6px;font-size:10.5px">{c.code.clone()}</span></span>
@@ -887,18 +996,18 @@ fn render_budget(
             </Card>
 
             <div class="vstack" style="gap:20px">
-                <Card title="编辑预算" code="FIN-BDG-EDIT"
-                      sub="选择期间 + 类别 · 金额 0 视为删除条目">
+                <Card title=t(locale, "finance.budget.card.edit_title") code="FIN-BDG-EDIT"
+                      sub=t(locale, "finance.budget.card.edit_sub")>
                     <ActionForm action=set_budget attr:class="vstack" attr:style="gap:10px">
                         <div style="display:grid;grid-template-columns:1fr 1.5fr 1fr auto;gap:10px;align-items:end">
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"期间"</span>
+                                <span class="mono dim" style=FIELD_LABEL>"Period"</span>
                                 <input name="period" type="month"
                                        value=editor_period required
                                        style=INPUT_STYLE_MONO/>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"类别"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
                                 <select name="category_code" style=INPUT_STYLE>
                                     {categories_for_form.into_iter().filter(|c| !c.archived).map(|c| {
                                         let code = c.code.clone();
@@ -908,25 +1017,25 @@ fn render_budget(
                                 </select>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"金额 (¥)"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
                                 <input name="amount" type="number" step="50" min="0"
                                        placeholder="3200" style=INPUT_STYLE_MONO/>
                             </label>
                             <button class="btn primary" type="submit">
-                                <Icon kind=IconKind::Check size=14/>"保存"
+                                <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.save")}
                             </button>
                         </div>
                         <span class="error-slot">
                             {move || set_budget.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{e.to_string()}</span>
+                                <span class="tag rose">{fmt_server_err(&e)}</span>
                             })}
                         </span>
                     </ActionForm>
                 </Card>
 
-                <Card title="下月规划" code="FIN-BDG-02" sub=next_month_sub>
+                <Card title=t(locale, "finance.budget.card.next_title") code="FIN-BDG-02" sub=next_month_sub>
                     {if next_month_planner.is_empty() {
-                        view! { <p class="muted">"近 3 个月支出数据不足 · 至少需 1 笔记录方能给出规划"</p> }.into_any()
+                        view! { <p class="muted">{t(locale, "finance.budget.card.next_empty")}</p> }.into_any()
                     } else {
                         view! {
                             <div class="vstack" style="gap:10px">
@@ -942,7 +1051,7 @@ fn render_budget(
                                     }
                                 }).collect_view()}
                                 <div class="mono dim" style="font-size:10.5px;margin-top:4px;padding-top:8px;border-top:1px dashed var(--border)">
-                                    "建议金额 = 近 3 月该类别支出 ÷ 3 · 取整到 50"
+                                    {t(locale, "finance.budget.suggestion_formula")}
                                 </div>
                             </div>
                         }.into_any()
@@ -971,10 +1080,14 @@ fn next_period(period: &str) -> String {
 
 fn parse_period(period: &str) -> Option<(i32, u32)> {
     let bytes = period.as_bytes();
-    if bytes.len() != 7 || bytes[4] != b'-' { return None; }
+    if bytes.len() != 7 || bytes[4] != b'-' {
+        return None;
+    }
     let y: i32 = period[..4].parse().ok()?;
     let m: u32 = period[5..7].parse().ok()?;
-    if !(1..=12).contains(&m) { return None; }
+    if !(1..=12).contains(&m) {
+        return None;
+    }
     Some((y, m))
 }
 
@@ -987,14 +1100,16 @@ fn render_accounts(
     // load_ledger now ships archived accounts too. Split here so the main
     // grid stays clean while the management Card still surfaces archived
     // rows for unarchive (Categories-tab parity).
-    let pairs: Vec<(Account, AccountStats)> = d.accounts.iter().cloned()
+    let pairs: Vec<(Account, AccountStats)> = d
+        .accounts
+        .iter()
+        .cloned()
         .zip(d.account_stats.iter().cloned())
         .collect();
-    let active_pairs: Vec<(Account, AccountStats)> = pairs.iter()
-        .filter(|(a, _)| !a.archived)
-        .cloned()
-        .collect();
-    let archived_accounts: Vec<Account> = pairs.iter()
+    let active_pairs: Vec<(Account, AccountStats)> =
+        pairs.iter().filter(|(a, _)| !a.archived).cloned().collect();
+    let archived_accounts: Vec<Account> = pairs
+        .iter()
         .filter(|(a, _)| a.archived)
         .map(|(a, _)| a.clone())
         .collect();
@@ -1008,19 +1123,24 @@ fn render_accounts(
     }
 }
 
-/// 账户管理 Card — 新建表单 + 已归档子区（带取消归档按钮）。
+/// Account management card: create form plus archived recovery section.
 fn render_account_manager(
     create_account: ServerAction<CreateAccount>,
     archived_accounts: Vec<Account>,
     archive_account: ServerAction<ArchiveAccount>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let archived_count = archived_accounts.len();
-    let archived_summary = format!("已归档 {} 个账户", archived_count);
+    let archived_summary = tf(
+        locale,
+        "finance.account.archived_count",
+        &[("count", &archived_count.to_string())],
+    );
     view! {
-        <Card title="账户管理" code="FIN-ACC-MGR" sub="新建 / 编辑 / 归档 · 余额由交易自动维护">
+        <Card title=t(locale, "finance.account.manager.title") code="FIN-ACC-MGR" sub=t(locale, "finance.account.manager.sub")>
             <details>
                 <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
-                    <Icon kind=IconKind::Plus size=14/>"新建账户"
+                    <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.account.new")}
                 </summary>
                 <ActionForm action=create_account attr:class="vstack" attr:style="gap:10px;margin-top:12px">
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr 1fr;gap:10px">
@@ -1028,16 +1148,16 @@ fn render_account_manager(
                             <span class="mono dim" style=FIELD_LABEL>"code"</span>
                             <input name="code" required maxlength="16" placeholder="ACC-99"
                                    pattern="[-A-Z0-9]{2,16}"
-                                   title="2..=16 字符，仅大写字母 / 数字 / 连字符"
+                                   title="2..=16 chars, uppercase letters / digits / hyphen only"
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"名称"</span>
-                            <input name="name" required maxlength="64" placeholder="招行储蓄"
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
+                            <input name="name" required maxlength="64" placeholder=t(locale, "finance.placeholder.account_name")
                                    style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"类型"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.type")}</span>
                             <select name="type" style=INPUT_STYLE>
                                 {ACCOUNT_TYPES.iter().enumerate().map(|(i, t)| view! {
                                     <option value=*t selected={i == 0}>{*t}</option>
@@ -1045,7 +1165,7 @@ fn render_account_manager(
                             </select>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tone")}</span>
                             <select name="tone" style=INPUT_STYLE>
                                 <option value="" selected="selected">"—"</option>
                                 {TONES.iter().map(|t| view! {
@@ -1054,18 +1174,18 @@ fn render_account_manager(
                             </select>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"开户余额"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.opening_balance")}</span>
                             <input name="opening_balance" type="number" step="0.01" value="0"
                                    style=INPUT_STYLE_MONO/>
                         </label>
                     </div>
                     <div class="hstack" style="gap:10px;align-items:center">
                         <button class="btn primary" type="submit">
-                            <Icon kind=IconKind::Check size=14/>"创建"
+                            <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
                         </button>
                         <span class="error-slot">
                             {move || create_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{e.to_string()}</span>
+                                <span class="tag rose">{fmt_server_err(&e)}</span>
                             })}
                         </span>
                     </div>
@@ -1085,14 +1205,19 @@ fn render_account_manager(
     }
 }
 
-/// One row in the "已归档" section: code + name + 取消归档 button. Lighter
+/// One row in the archived section: code + name + unarchive button. Lighter
 /// than the main account card — the user's primary task here is recovering
 /// from an accidental archive, not editing.
 fn render_archived_account_row(
     a: Account,
     archive_account: ServerAction<ArchiveAccount>,
 ) -> impl IntoView {
-    let confirm_msg = format!("取消归档账户 {}？", a.code);
+    let locale = use_locale();
+    let confirm_msg = tf(
+        locale,
+        "finance.account.confirm_unarchive",
+        &[("code", &a.code)],
+    );
     let onclick = format!("return confirm('{}')", confirm_msg);
     let code_for_form = a.code.clone();
     let display_code = a.code.clone();
@@ -1107,7 +1232,7 @@ fn render_archived_account_row(
             <ActionForm action=archive_account attr:style="display:inline">
                 <input type="hidden" name="code" value=code_for_form/>
                 <input type="hidden" name="archived" value="false"/>
-                <button class="btn sm" type="submit" onclick=onclick>"取消归档"</button>
+                <button class="btn sm" type="submit" onclick=onclick>{t(locale, "finance.account.cancel_archive")}</button>
             </ActionForm>
         </div>
     }
@@ -1120,12 +1245,21 @@ fn render_account_card(
     update_account: ServerAction<UpdateAccount>,
     archive_account: ServerAction<ArchiveAccount>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let tone = Tone::from_str(&a.tone);
     let last_seen = match s.last_seen_at {
-        Some(ts) => format!("最近活动 {}", fmt_ts_date(Some(ts))),
-        None => "尚无活动".to_string(),
+        Some(ts) => tf(
+            locale,
+            "finance.account.last_activity",
+            &[("date", &fmt_ts_date(Some(ts)))],
+        ),
+        None => t(locale, "finance.account.empty_activity").to_string(),
     };
-    let archive_label = if a.archived { "取消归档" } else { "归档" };
+    let archive_label = if a.archived {
+        t(locale, "finance.account.cancel_archive")
+    } else {
+        t(locale, "finance.account.archive")
+    };
     let archive_target = if a.archived { "false" } else { "true" };
     // Pre-bake the prefilled values so we never embed a `move ||` closure
     // inside `value=` (CLAUDE.md "Don't put a `move ||`-returning attribute
@@ -1139,10 +1273,10 @@ fn render_account_card(
     let card_code = a.code.clone();
     let card_sub = a.r#type.clone();
     let archive_code = a.code.clone();
-    let confirm_msg = format!(
-        "{} 账户 {}？余额保留，历史交易仍可查询。",
-        if a.archived { "取消归档" } else { "归档" },
-        a.code
+    let confirm_msg = tf(
+        locale,
+        "finance.account.confirm_archive",
+        &[("action", archive_label), ("code", &a.code)],
     );
     let onclick = format!("return confirm('{}')", confirm_msg);
     view! {
@@ -1160,23 +1294,23 @@ fn render_account_card(
             <div class="hstack" style="margin-top:12px;gap:6px;flex-wrap:wrap">
                 <details style="flex:1;min-width:0">
                     <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
-                        <Icon kind=IconKind::Settings size=12/>"编辑"
+                        <Icon kind=IconKind::Settings size=12/>{t(locale, "finance.action.edit")}
                     </summary>
                     <ActionForm action=update_account attr:class="vstack" attr:style="gap:8px;margin-top:8px">
                         <input type="hidden" name="code" value=code.clone()/>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"code (不可改)"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code_readonly")}</span>
                             <input type="text" disabled value=code.clone()
-                                   title="账户 code 不可修改"
+                                   title=t(locale, "finance.account.title_code_readonly")
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"名称"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
                             <input name="name" required maxlength="64" value=name
                                    style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"类型"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.type")}</span>
                             <select name="type" style=INPUT_STYLE>
                                 {ACCOUNT_TYPES.iter().map(|t| {
                                     let selected = *t == type_str.as_str();
@@ -1185,7 +1319,7 @@ fn render_account_card(
                             </select>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tone")}</span>
                             <select name="tone" style=INPUT_STYLE>
                                 <option value="" selected={tone_str.is_empty()}>"—"</option>
                                 {TONES.iter().map(|t| {
@@ -1196,11 +1330,11 @@ fn render_account_card(
                         </label>
                         <div class="hstack" style="gap:8px;align-items:center">
                             <button class="btn primary" type="submit">
-                                <Icon kind=IconKind::Check size=12/>"保存"
+                                <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
                             </button>
                             <span class="error-slot">
                                 {move || update_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                    <span class="tag rose">{e.to_string()}</span>
+                                    <span class="tag rose">{fmt_server_err(&e)}</span>
                                 })}
                             </span>
                         </div>
@@ -1224,6 +1358,7 @@ fn render_categories(
     update_category: ServerAction<UpdateCategory>,
     archive_category: ServerAction<ArchiveCategory>,
 ) -> impl IntoView {
+    let locale = use_locale();
     // Sort by sort_order then code so the management table matches what the
     // dropdown shows. Cloning is fine — the categories vec is small (≤ ~20).
     let mut cats = d.categories.clone();
@@ -1231,10 +1366,10 @@ fn render_categories(
     let usage = d.category_usage.clone();
     let next_sort = cats.iter().map(|c| c.sort_order).max().unwrap_or(0) + 1;
     view! {
-        <Card title="分类管理" code="FIN-CAT-MGR" sub="新建 / 编辑 / 归档 · 不可硬删（保留 FK 引用）">
+        <Card title=t(locale, "finance.category.manager.title") code="FIN-CAT-MGR" sub=t(locale, "finance.category.manager.sub")>
             <details>
                 <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
-                    <Icon kind=IconKind::Plus size=14/>"新建分类"
+                    <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.category.new")}
                 </summary>
                 <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;margin-top:12px">
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:10px">
@@ -1242,16 +1377,16 @@ fn render_categories(
                             <span class="mono dim" style=FIELD_LABEL>"code"</span>
                             <input name="code" required maxlength="8" placeholder="EDU"
                                    pattern="[A-Z&]{1,8}"
-                                   title="1..=8 字符，仅大写字母 / &"
+                                   title="1..=8 chars, uppercase letters / & only"
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"名称"</span>
-                            <input name="name" required maxlength="32" placeholder="教育"
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
+                            <input name="name" required maxlength="32" placeholder=t(locale, "finance.placeholder.category_name")
                                    style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tone")}</span>
                             <select name="tone" style=INPUT_STYLE>
                                 <option value="" selected="selected">"—"</option>
                                 {TONES.iter().map(|t| view! {
@@ -1260,7 +1395,7 @@ fn render_categories(
                             </select>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"顺序"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.sort_order")}</span>
                             <input name="sort_order" type="number" step="1" min="0"
                                    value=next_sort.to_string()
                                    style=INPUT_STYLE_MONO/>
@@ -1268,11 +1403,11 @@ fn render_categories(
                     </div>
                     <div class="hstack" style="gap:10px;align-items:center">
                         <button class="btn primary" type="submit">
-                            <Icon kind=IconKind::Check size=14/>"创建"
+                            <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
                         </button>
                         <span class="error-slot">
                             {move || create_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{e.to_string()}</span>
+                                <span class="tag rose">{fmt_server_err(&e)}</span>
                             })}
                         </span>
                     </div>
@@ -1283,13 +1418,13 @@ fn render_categories(
                 <table class="tbl">
                     <thead>
                         <tr>
-                            <th>"名称"</th>
+                            <th>{t(locale, "finance.field.name")}</th>
                             <th style="width:80px">"code"</th>
-                            <th style="width:80px">"色调"</th>
-                            <th class="num" style="width:64px">"顺序"</th>
-                            <th class="num" style="width:64px">"在用"</th>
-                            <th style="width:64px">"归档"</th>
-                            <th class="num" style="width:220px">"操作"</th>
+                            <th style="width:80px">{t(locale, "finance.field.tone")}</th>
+                            <th class="num" style="width:64px">{t(locale, "finance.field.sort_order")}</th>
+                            <th class="num" style="width:64px">{t(locale, "finance.field.used")}</th>
+                            <th style="width:64px">{t(locale, "finance.field.archived")}</th>
+                            <th class="num" style="width:220px">{t(locale, "finance.field.ops")}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1312,16 +1447,21 @@ fn render_category_row(
     update_category: ServerAction<UpdateCategory>,
     archive_category: ServerAction<ArchiveCategory>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let tone_enum = Tone::from_str(&c.tone);
     let usage_count = usage.get(&c.code).copied().unwrap_or(0);
     let row_class = if c.archived { "row-archived" } else { "" };
-    let archive_label = if c.archived { "取消归档" } else { "归档" };
+    let archive_label = if c.archived {
+        t(locale, "finance.account.cancel_archive")
+    } else {
+        t(locale, "finance.category.archive")
+    };
     let archive_target = if c.archived { "false" } else { "true" };
     let archived_mark = if c.archived { "✓" } else { "" };
-    let confirm_msg = format!(
-        "{} 分类 {}？",
-        if c.archived { "取消归档" } else { "归档" },
-        c.code
+    let confirm_msg = tf(
+        locale,
+        "finance.category.confirm_archive",
+        &[("action", archive_label), ("code", &c.code)],
     );
     let onclick = format!("return confirm('{}')", confirm_msg);
     let code = c.code.clone();
@@ -1330,7 +1470,11 @@ fn render_category_row(
     let sort_order_str = c.sort_order.to_string();
     let display_name = c.name.clone();
     let display_code = c.code.clone();
-    let display_tone_label = if c.tone.is_empty() { "—".to_string() } else { c.tone.clone() };
+    let display_tone_label = if c.tone.is_empty() {
+        "—".to_string()
+    } else {
+        c.tone.clone()
+    };
     let archive_code = c.code.clone();
     view! {
         <tr class=row_class>
@@ -1346,23 +1490,23 @@ fn render_category_row(
                 <div class="hstack" style="gap:6px;justify-content:flex-end;flex-wrap:wrap">
                     <details>
                         <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
-                            <Icon kind=IconKind::Settings size=12/>"编辑"
+                            <Icon kind=IconKind::Settings size=12/>{t(locale, "finance.action.edit")}
                         </summary>
                         <ActionForm action=update_category attr:class="vstack" attr:style="gap:8px;margin-top:8px;min-width:240px">
                             <input type="hidden" name="code" value=code.clone()/>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"code (不可改)"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code_readonly")}</span>
                                 <input type="text" disabled value=code
-                                       title="分类 code 不可修改"
+                                       title="Category code cannot be changed"
                                        style=INPUT_STYLE_MONO/>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"名称"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
                                 <input name="name" required maxlength="32" value=name
                                        style=INPUT_STYLE/>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"色调"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tone")}</span>
                                 <select name="tone" style=INPUT_STYLE>
                                     <option value="" selected={tone_str.is_empty()}>"—"</option>
                                     {TONES.iter().map(|t| {
@@ -1372,18 +1516,18 @@ fn render_category_row(
                                 </select>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"顺序"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.sort_order")}</span>
                                 <input name="sort_order" type="number" step="1" min="0"
                                        value=sort_order_str
                                        style=INPUT_STYLE_MONO/>
                             </label>
                             <div class="hstack" style="gap:8px;align-items:center">
                                 <button class="btn primary" type="submit">
-                                    <Icon kind=IconKind::Check size=12/>"保存"
+                                    <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
                                 </button>
                                 <span class="error-slot">
                                     {move || update_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                        <span class="tag rose">{e.to_string()}</span>
+                                        <span class="tag rose">{fmt_server_err(&e)}</span>
                                     })}
                                 </span>
                             </div>
@@ -1403,21 +1547,27 @@ fn render_category_row(
 }
 
 fn render_reports(d: &LedgerData) -> impl IntoView {
+    let locale = use_locale();
     let months = d.months_12.clone();
     if months.is_empty() {
         return view! {
             <div class="card"><div class="card-body">
-                <p class="muted">"暂无可聚合数据 · 至少需要一笔交易"</p>
+                <p class="muted">{t(locale, "finance.reports.empty")}</p>
             </div></div>
-        }.into_any();
+        }
+        .into_any();
     }
-    let labels: Vec<String> = months.iter()
+    let labels: Vec<String> = months
+        .iter()
         .map(|m| m.period.split('-').nth(1).unwrap_or("?").to_string())
         .collect();
     let income_data: Vec<f64> = months.iter().map(|m| m.income).collect();
     let expense_data: Vec<f64> = months.iter().map(|m| m.expense).collect();
     let last = months.last().cloned().unwrap_or(MonthBucket {
-        period: d.month.period.clone(), income: 0.0, expense: 0.0, net: 0.0,
+        period: d.month.period.clone(),
+        income: 0.0,
+        expense: 0.0,
+        net: 0.0,
     });
     let net_strip = render_net_strip(&months);
 
@@ -1425,20 +1575,24 @@ fn render_reports(d: &LedgerData) -> impl IntoView {
 
     view! {
         <div class="grid-2">
-            <Card title="月度趋势" code="FIN-RPT-01"
-                  sub=format!("{} 月 · 本月 ¥{} 净结余 · 收入 ¥{} / 支出 ¥{}",
-                              months.len(), fmt_int(last.net), fmt_int(last.income), fmt_int(last.expense))>
+            <Card title=t(locale, "finance.reports.month_title") code="FIN-RPT-01"
+                  sub=tf(locale, "finance.reports.month_sub", &[
+                      ("count", &months.len().to_string()),
+                      ("net", &fmt_int(last.net)),
+                      ("income", &fmt_int(last.income)),
+                      ("expense", &fmt_int(last.expense)),
+                  ])>
                 <div class="vstack" style="gap:14px">
                     <div>
-                        <div class="mono dim" style="font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">"收入 · INCOME"</div>
+                        <div class="mono dim" style="font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">{t(locale, "finance.reports.income")}</div>
                         <ChartBars data=income_data labels=labels.clone()/>
                     </div>
                     <div>
-                        <div class="mono dim" style="font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">"支出 · EXPENSE"</div>
+                        <div class="mono dim" style="font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">{t(locale, "finance.reports.expense")}</div>
                         <ChartBars data=expense_data labels=labels/>
                     </div>
                     <div>
-                        <div class="mono dim" style="font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">"净结余 · NET (绿=盈余 / 玫=透支)"</div>
+                        <div class="mono dim" style="font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">{t(locale, "finance.reports.net")}</div>
                         {net_strip}
                     </div>
                 </div>
@@ -1488,14 +1642,15 @@ fn net_cell_parts(net: f64) -> (&'static str, &'static str, String) {
 }
 
 fn render_category_share_card(d: &LedgerData) -> impl IntoView {
+    let locale = use_locale();
     let cats = d.category_summary.clone();
     // `.abs()` because `fmt_int` of IEEE -0.0 prints "-0".
     let total: f64 = cats.iter().map(|c| c.value).sum::<f64>().abs();
     view! {
-        <Card title="类别分布" code="FIN-RPT-02"
-              sub=format!("本月 · 共 ¥{}", fmt_int(total))>
+        <Card title=t(locale, "finance.reports.category_title") code="FIN-RPT-02"
+              sub=tf(locale, "finance.reports.category_sub", &[("total", &fmt_int(total))])>
             {if cats.is_empty() {
-                view! { <p class="muted">"本月尚无支出数据"</p> }.into_any()
+                view! { <p class="muted">{t(locale, "finance.reports.category_empty")}</p> }.into_any()
             } else {
                 view! {
                     <div class="vstack" style="gap:10px">
@@ -1531,7 +1686,9 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, f64)> {
     // Bucket months_12's last 3 months: months_12 is oldest → newest, so the
     // tail-3 is the recent quarter.
     let recent: Vec<&MonthBucket> = d.months_12.iter().rev().take(3).collect();
-    if recent.is_empty() { return Vec::new(); }
+    if recent.is_empty() {
+        return Vec::new();
+    }
     // months_12 only carries totals, not per-category. For the per-category
     // average we approximate using the current month's category_summary
     // (which is signed, accurate, and already aggregated). Scaling the
@@ -1554,7 +1711,8 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, f64)> {
         let suggested = ((projected / 50.0).round() * 50.0).max(50.0);
         by_code.insert(c.code.clone(), (c.name.clone(), suggested));
     }
-    let mut out: Vec<(String, String, f64)> = by_code.into_iter()
+    let mut out: Vec<(String, String, f64)> = by_code
+        .into_iter()
         .map(|(code, (name, suggested))| (name, code, suggested))
         .collect();
     // Largest suggested first — the user's attention is most valuable on
@@ -1578,11 +1736,15 @@ fn parse_date_ceiling(s: &str) -> Option<i64> {
 
 fn parse_date_components(s: &str) -> Option<(i32, u8, u8)> {
     let bytes = s.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' { return None; }
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
     let y: i32 = s[..4].parse().ok()?;
     let m: u8 = s[5..7].parse().ok()?;
     let d: u8 = s[8..10].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) { return None; }
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
     Some((y, m, d))
 }
 
@@ -1590,14 +1752,16 @@ fn date_to_unix(year: i32, month: u8, day: u8, offset_seconds: i64) -> i64 {
     // Reuse `time::Date` to avoid hand-rolling leap-year arithmetic. Pure
     // math (no `now`-style call), so it's wasm-safe and matches the
     // `fmt_ts_*` helpers' precedent.
-    let Ok(month_enum) = time::Month::try_from(month) else { return 0 };
+    let Ok(month_enum) = time::Month::try_from(month) else {
+        return 0;
+    };
     let date = match time::Date::from_calendar_date(year, month_enum, day) {
         Ok(d) => d,
         Err(_) => return 0,
     };
-    let dt = date.with_hms(0, 0, 0).unwrap_or_else(|_| {
-        time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT)
-    });
+    let dt = date
+        .with_hms(0, 0, 0)
+        .unwrap_or_else(|_| time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT));
     dt.assume_utc().unix_timestamp() + offset_seconds
 }
 
@@ -1612,7 +1776,10 @@ fn csv_data_uri(txns: &[Txn]) -> String {
     for t in txns {
         let occurred = time::OffsetDateTime::from_unix_timestamp(t.occurred_at)
             .ok()
-            .and_then(|d| d.format(&time::format_description::well_known::Rfc3339).ok())
+            .and_then(|d| {
+                d.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
             .unwrap_or_default();
         let _ = writeln!(
             csv,
@@ -1689,7 +1856,10 @@ mod tests {
     #[test]
     fn percent_encode_keeps_unreserved_and_encodes_utf8() {
         assert_eq!(percent_encode("AZaz09-_.~"), "AZaz09-_.~");
-        assert_eq!(percent_encode("工资, ok"), "%E5%B7%A5%E8%B5%84%2C%20ok");
+        assert_eq!(
+            percent_encode("\u{5de5}\u{8d44}, ok"),
+            "%E5%B7%A5%E8%B5%84%2C%20ok"
+        );
     }
 
     #[test]
@@ -1739,7 +1909,10 @@ mod tests {
     #[test]
     fn parse_date_ceiling_returns_end_of_day() {
         // 86399 sec after midnight = 23:59:59 UTC
-        assert_eq!(parse_date_ceiling("2024-05-01"), Some(1_714_521_600 + 86_399));
+        assert_eq!(
+            parse_date_ceiling("2024-05-01"),
+            Some(1_714_521_600 + 86_399)
+        );
     }
 
     #[test]
@@ -1759,7 +1932,7 @@ mod tests {
         let (color, sign, val) = net_cell_parts(-1_234.56);
         assert_eq!(color, "var(--rose-ink)");
         assert_eq!(sign, "−"); // U+2212 minus, not ASCII '-'
-        // Magnitude only — the sign lives in the `sign` slot.
+                               // Magnitude only — the sign lives in the `sign` slot.
         assert_eq!(val, "1,235");
     }
 

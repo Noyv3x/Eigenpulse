@@ -1,5 +1,5 @@
 use axum::{extract::State, Extension, Json};
-use ep_auth::{AuthPat, pat::require_scope};
+use ep_auth::{pat::require_scope, AuthPat};
 use ep_core::{AppState, NotifyMessage, Severity};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,9 @@ pub struct NotifyInput {
 }
 
 #[derive(Debug, Serialize)]
-pub struct NotifyResp { pub id: i64 }
+pub struct NotifyResp {
+    pub id: i64,
+}
 
 pub async fn handler(
     State(state): State<AppState>,
@@ -27,7 +29,11 @@ pub async fn handler(
     if let Err(r) = require_scope(&pat, "notify:write") {
         return Err(ApiError::Forbidden(format!("{:?}", r.status())));
     }
-    let sev = input.severity.as_deref().map(Severity::parse).unwrap_or(Severity::Info);
+    let sev = input
+        .severity
+        .as_deref()
+        .map(Severity::parse)
+        .unwrap_or(Severity::Info);
     let msg = NotifyMessage {
         severity: sev,
         module: input.module,
@@ -36,7 +42,10 @@ pub async fn handler(
         link: input.link,
         doc_ref: input.doc_ref,
     };
-    let id = state.notify.dispatch(msg).await
+    let id = state
+        .notify
+        .dispatch(msg)
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(NotifyResp { id }))
 }

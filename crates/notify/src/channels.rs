@@ -17,12 +17,22 @@ pub async fn list_channels(pool: &SqlitePool) -> anyhow::Result<Vec<NotifyChanne
     let rows: Vec<(i64, String, String, i64, String, String, i64)> = sqlx::query_as(
         "SELECT id, kind, name, enabled, config_json, min_severity, created_at
            FROM notify_channel
-          ORDER BY created_at DESC"
-    ).fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|r| NotifyChannelRow {
-        id: r.0, kind: r.1, name: r.2, enabled: r.3 != 0, config_json: r.4,
-        min_severity: r.5, created_at: r.6,
-    }).collect())
+          ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| NotifyChannelRow {
+            id: r.0,
+            kind: r.1,
+            name: r.2,
+            enabled: r.3 != 0,
+            config_json: r.4,
+            min_severity: r.5,
+            created_at: r.6,
+        })
+        .collect())
 }
 
 pub async fn create_channel(
@@ -34,10 +44,14 @@ pub async fn create_channel(
 ) -> anyhow::Result<i64> {
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO notify_channel (kind, name, enabled, config_json, min_severity)
-         VALUES (?1, ?2, 1, ?3, ?4) RETURNING id"
+         VALUES (?1, ?2, 1, ?3, ?4) RETURNING id",
     )
-    .bind(kind).bind(name).bind(config_json).bind(min_severity)
-    .fetch_one(pool).await?;
+    .bind(kind)
+    .bind(name)
+    .bind(config_json)
+    .bind(min_severity)
+    .fetch_one(pool)
+    .await?;
     Ok(id)
 }
 
@@ -52,15 +66,23 @@ pub async fn update_channel(
     sqlx::query(
         "UPDATE notify_channel
             SET enabled = ?1, name = ?2, config_json = ?3, min_severity = ?4
-          WHERE id = ?5"
+          WHERE id = ?5",
     )
-    .bind(enabled as i64).bind(name).bind(config_json).bind(min_severity).bind(id)
-    .execute(pool).await?;
+    .bind(enabled as i64)
+    .bind(name)
+    .bind(config_json)
+    .bind(min_severity)
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 pub async fn delete_channel(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM notify_channel WHERE id = ?1").bind(id).execute(pool).await?;
+    sqlx::query("DELETE FROM notify_channel WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -69,8 +91,10 @@ pub async fn test_channel(kind: &str, config_json: &str) -> anyhow::Result<()> {
     let msg = NotifyMessage {
         severity: Severity::Info,
         module: Some("CFG".into()),
-        title: "Eigenpulse · 通道测试".into(),
-        body: Some(format!("如果你看到这条消息，{} 通道工作正常。", kind)),
+        title: "Eigenpulse · Channel test".into(),
+        body: Some(format!(
+            "If you see this message, the {kind} channel is working."
+        )),
         link: None,
         doc_ref: None,
     };

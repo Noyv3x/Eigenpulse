@@ -1,4 +1,5 @@
 use ep_core::IconKind;
+use ep_i18n::{t, use_locale};
 use ep_ui::{Card, Icon, PageHead, RowDeleteAction, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -28,13 +29,22 @@ pub async fn list_channels() -> Result<Vec<ChannelDto>, ServerFnError> {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
         let rows = ep_notify::list_channels(&st.db).await.map_err(server_err)?;
-        Ok(rows.into_iter().map(|r| ChannelDto {
-            id: r.id, kind: r.kind, name: r.name, enabled: r.enabled,
-            min_severity: r.min_severity, created_at: r.created_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| ChannelDto {
+                id: r.id,
+                kind: r.kind,
+                name: r.name,
+                enabled: r.enabled,
+                min_severity: r.min_severity,
+                created_at: r.created_at,
+            })
+            .collect())
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[server(CreateChannel, "/api/_internal/cfg", "Url", "create_channel")]
@@ -55,10 +65,13 @@ pub async fn create_channel(
         }
         let st: ep_core::AppState = expect_context();
         ep_notify::create_channel(&st.db, &kind, &name, &config_json, &min_severity)
-            .await.map_err(server_err)
+            .await
+            .map_err(server_err)
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[server(DeleteChannel, "/api/_internal/cfg", "Url", "delete_channel")]
@@ -67,10 +80,14 @@ pub async fn delete_channel(id: i64) -> Result<(), ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
-        ep_notify::delete_channel(&st.db, id).await.map_err(server_err)
+        ep_notify::delete_channel(&st.db, id)
+            .await
+            .map_err(server_err)
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[server(ToggleChannel, "/api/_internal/cfg", "Url", "toggle_channel")]
@@ -80,12 +97,18 @@ pub async fn toggle_channel(id: i64) -> Result<bool, ServerFnError> {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
         let new_enabled: i64 = sqlx::query_scalar(
-            "UPDATE notify_channel SET enabled = NOT enabled WHERE id = ?1 RETURNING enabled"
-        ).bind(id).fetch_one(&st.db).await.map_err(server_err)?;
+            "UPDATE notify_channel SET enabled = NOT enabled WHERE id = ?1 RETURNING enabled",
+        )
+        .bind(id)
+        .fetch_one(&st.db)
+        .await
+        .map_err(server_err)?;
         Ok(new_enabled != 0)
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[server(TestChannel, "/api/_internal/cfg", "Url", "test_channel")]
@@ -94,9 +117,12 @@ pub async fn test_channel(id: i64) -> Result<(), ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
-        let row: (String, String) = sqlx::query_as(
-            "SELECT kind, config_json FROM notify_channel WHERE id = ?1"
-        ).bind(id).fetch_one(&st.db).await.map_err(server_err)?;
+        let row: (String, String) =
+            sqlx::query_as("SELECT kind, config_json FROM notify_channel WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&st.db)
+                .await
+                .map_err(server_err)?;
         // The notifier `Err` from lettre/reqwest can include the SMTP connection
         // string with password, the Bark device-key URL, the Telegram bot URL
         // (`api.telegram.org/bot<TOKEN>/sendMessage`), or the Discord webhook URL —
@@ -105,11 +131,13 @@ pub async fn test_channel(id: i64) -> Result<(), ServerFnError> {
         // detail server-side and return a generic, channel-typed message.
         ep_notify::test_channel(&row.0, &row.1).await.map_err(|e| {
             tracing::warn!(channel_id = id, kind = %row.0, error = %e, "notify channel test failed");
-            server_err(format!("{} 通道测试失败 · 详细错误已记录到服务器日志", row.0))
+            server_err(format!("{} channel test failed; details were logged on the server", row.0))
         })
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[component]
@@ -132,53 +160,54 @@ pub fn NotificationChannelsView() -> impl IntoView {
     });
 
     let test_msg = test.value();
+    let locale = use_locale();
 
     view! {
         <div class="view">
             <PageHead
                 code="CFG-NOT-01"
-                module="SETTINGS · 通知通道"
+                module=t(locale, "app.settings.notifications.page.module")
                 title="Notifications"
-                title_cn="通知通道"
-                sub="SMTP / Bark / Telegram / Discord · in-app SSE 始终启用"
+                title_cn=t(locale, "app.settings.notifications.page.title_cn")
+                sub=t(locale, "app.settings.notifications.page.sub")
             />
 
-            <Card title="新增通道" code="CFG-NOT-NEW" sub="config_json 字段按通道类型填充；inapp 用 {}">
+            <Card title=t(locale, "app.settings.notifications.card.new_title") code="CFG-NOT-NEW" sub=t(locale, "app.settings.notifications.card.new_sub")>
                 <ActionForm action=create attr:class="vstack" attr:style="gap:10px">
                     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"名称"</span>
-                            <input name="name" required placeholder="家庭邮箱"
+                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "app.settings.notifications.field.name")}</span>
+                            <input name="name" required placeholder=t(locale, "app.settings.notifications.placeholder.name")
                                    style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"类型"</span>
+                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "app.settings.notifications.field.kind")}</span>
                             <select name="kind" required style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
-                                <option value="smtp">"SMTP · 邮件"</option>
-                                <option value="bark">"Bark · iOS 推送"</option>
+                                <option value="smtp">{t(locale, "app.settings.notifications.option.smtp")}</option>
+                                <option value="bark">{t(locale, "app.settings.notifications.option.bark")}</option>
                                 <option value="telegram">"Telegram Bot"</option>
                                 <option value="discord">"Discord Webhook"</option>
-                                <option value="inapp">"inapp · 站内"</option>
+                                <option value="inapp">{t(locale, "app.settings.notifications.option.inapp")}</option>
                             </select>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"最低严重度"</span>
+                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "app.settings.notifications.field.min_severity")}</span>
                             <select name="min_severity" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
-                                <option value="info" selected="selected">"info · 全部"</option>
-                                <option value="warn">"warn · 警告及以上"</option>
-                                <option value="crit">"crit · 仅严重"</option>
+                                <option value="info" selected="selected">{t(locale, "app.settings.notifications.option.info")}</option>
+                                <option value="warn">{t(locale, "app.settings.notifications.option.warn")}</option>
+                                <option value="crit">{t(locale, "app.settings.notifications.option.crit")}</option>
                             </select>
                         </label>
                     </div>
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"config_json"</span>
+                        <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "app.settings.notifications.field.config")}</span>
                         <textarea name="config_json" rows="4" required
                                   placeholder=r#"{"host":"smtp.example.com","port":587,"username":"...","password":"...","from":"a@b","to":"a@b","starttls":true}"#
                                   style="font-family:var(--font-mono);font-size:12px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"></textarea>
                     </label>
                     <div class="hstack" style="gap:8px">
                         <button class="btn primary" type="submit">
-                            <Icon kind=IconKind::Plus size=14/>"添加"
+                            <Icon kind=IconKind::Plus size=14/>{t(locale, "app.settings.notifications.add")}
                         </button>
                         // Wrapper element keeps a stable DOM neighbour for the
                         // text-node hydrate walker; without it, tachys 0.1.9
@@ -195,27 +224,27 @@ pub fn NotificationChannelsView() -> impl IntoView {
 
             <div class="test-notice-slot">
                 {move || test_msg.get().map(|r| match r {
-                    Ok(_) => view! { <p style="margin:12px 0;color:var(--primary-ink)" class="mono">"✓ 测试通道发送成功"</p> }.into_any(),
-                    Err(e) => view! { <p style="margin:12px 0;color:var(--rose-ink)" class="mono">"✕ 测试失败 · " {e.to_string()}</p> }.into_any(),
+                    Ok(_) => view! { <p style="margin:12px 0;color:var(--primary-ink)" class="mono">{t(locale, "app.settings.notifications.test_ok")}</p> }.into_any(),
+                    Err(e) => view! { <p style="margin:12px 0;color:var(--rose-ink)" class="mono">{t(locale, "app.settings.notifications.test_failed")} {e.to_string()}</p> }.into_any(),
                 })}
             </div>
 
             <div style="margin-top:24px"></div>
 
-            <Card title="已配置通道" code="CFG-NOT-LST">
-                <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:120px">"loading…"</div> }>
+            <Card title=t(locale, "app.settings.notifications.card.list") code="CFG-NOT-LST">
+                <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:120px">{t(locale, "app.common.loading")}</div> }>
                     {move || channels.get().map(|res| match res {
-                        Err(e) => view! { <p>"加载失败 · " {e.to_string()}</p> }.into_any(),
-                        Ok(rows) if rows.is_empty() => view! { <p class="muted">"暂无通道。添加上方一项即可启用 SMTP/Bark/Telegram/Discord 推送。"</p> }.into_any(),
+                        Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {e.to_string()}</p> }.into_any(),
+                        Ok(rows) if rows.is_empty() => view! { <p class="muted">{t(locale, "app.settings.notifications.empty")}</p> }.into_any(),
                         Ok(rows) => view! {
                             <table class="tbl">
                                 <thead>
                                     <tr>
-                                        <th>"名称"</th>
-                                        <th>"类型"</th>
-                                        <th>"最低严重度"</th>
-                                        <th>"启用"</th>
-                                        <th class="num">"操作"</th>
+                                        <th>{t(locale, "app.settings.notifications.field.name")}</th>
+                                        <th>{t(locale, "app.settings.notifications.field.kind")}</th>
+                                        <th>{t(locale, "app.settings.notifications.field.min_severity")}</th>
+                                        <th>{t(locale, "app.settings.notifications.field.enabled")}</th>
+                                        <th class="num">{t(locale, "app.settings.notifications.field.ops")}</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -247,10 +276,10 @@ pub fn NotificationChannelsView() -> impl IntoView {
                                                     <span class="row-actions-slot">
                                                         <ActionForm action=test attr:style="display:inline;margin-right:6px">
                                                             <input type="hidden" name="id" value=id/>
-                                                            <button class="btn sm" type="submit">"测试"</button>
+                                                            <button class="btn sm" type="submit">{t(locale, "app.settings.notifications.test")}</button>
                                                         </ActionForm>
                                                         <RowDeleteAction action=delete value=id.to_string()
-                                                                         field="id" confirm="删除该通道？"/>
+                                                                         field="id" confirm=t(locale, "app.settings.notifications.confirm_delete")/>
                                                     </span>
                                                 </td>
                                             </tr>

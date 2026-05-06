@@ -49,7 +49,15 @@ pub fn fmt_ts_minute(ts: Option<i64>) -> String {
     let Some(t) = ts else { return "—".into() };
     time::OffsetDateTime::from_unix_timestamp(t)
         .ok()
-        .map(|d| format!("{:02}-{:02} {:02}:{:02}", d.month() as u8, d.day(), d.hour(), d.minute()))
+        .map(|d| {
+            format!(
+                "{:02}-{:02} {:02}:{:02}",
+                d.month() as u8,
+                d.day(),
+                d.hour(),
+                d.minute()
+            )
+        })
         .unwrap_or_else(|| "—".into())
 }
 

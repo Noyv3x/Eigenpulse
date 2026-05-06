@@ -1,1 +1,3 @@
-pub async fn ok() -> &'static str { "ok" }
+pub async fn ok() -> &'static str {
+    "ok"
+}

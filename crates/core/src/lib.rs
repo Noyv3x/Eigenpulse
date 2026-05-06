@@ -4,30 +4,32 @@
 //! - `Module` trait & `ModuleRegistry` — SSR-only (depend on axum/sqlx).
 //! - `AppState` — SSR-only.
 
-pub mod nav;
-pub mod tone;
-pub mod severity;
-pub mod fmt;
 pub mod escape;
+pub mod fmt;
+pub mod nav;
+pub mod severity;
+pub mod tone;
 
+#[cfg(feature = "ssr")]
+pub mod errors;
 #[cfg(feature = "ssr")]
 pub mod ids;
 #[cfg(feature = "ssr")]
 pub mod module;
 #[cfg(feature = "ssr")]
+pub mod notify_msg;
+#[cfg(feature = "ssr")]
 pub mod registry;
 #[cfg(feature = "ssr")]
 pub mod state;
-#[cfg(feature = "ssr")]
-pub mod notify_msg;
-#[cfg(feature = "ssr")]
-pub mod errors;
 
-pub use nav::{NavSection, NavEntry, IconKind};
-pub use tone::Tone;
-pub use severity::Severity;
-pub use fmt::{fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, fmt_ts_minute, thousands_sep};
 pub use escape::html_escape;
+pub use fmt::{
+    fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, fmt_ts_minute, thousands_sep,
+};
+pub use nav::{IconKind, NavEntry, NavSection};
+pub use severity::Severity;
+pub use tone::Tone;
 
 /// Map any `Display` (sqlx::Error, anyhow::Error, &str, …) into a
 /// `ServerFnError`. Exposed from `ep_core` so module crates and the binary
@@ -40,14 +42,14 @@ pub fn server_err<E: std::fmt::Display>(e: E) -> leptos::server_fn::ServerFnErro
 }
 
 #[cfg(feature = "ssr")]
-pub use module::{Module, ModuleLink, DashboardWidget, WidgetKind, TodayItem};
+pub use errors::{Error, Result};
+#[cfg(feature = "ssr")]
+pub use ids::{next_doc_id, DocIdShape};
+#[cfg(feature = "ssr")]
+pub use module::{DashboardWidget, Module, ModuleLink, TodayItem, WidgetKind};
+#[cfg(feature = "ssr")]
+pub use notify_msg::{NotifyBusHandle, NotifyBusTrait, NotifyMessage};
 #[cfg(feature = "ssr")]
 pub use registry::ModuleRegistry;
 #[cfg(feature = "ssr")]
 pub use state::AppState;
-#[cfg(feature = "ssr")]
-pub use ids::{next_doc_id, DocIdShape};
-#[cfg(feature = "ssr")]
-pub use notify_msg::{NotifyMessage, NotifyBusHandle, NotifyBusTrait};
-#[cfg(feature = "ssr")]
-pub use errors::{Error, Result};

@@ -14,7 +14,11 @@ pub enum Tag {
 
 impl Tag {
     pub const fn as_str(&self) -> &'static str {
-        match self { Self::Exp => "exp", Self::Inc => "inc", Self::Tfr => "tfr" }
+        match self {
+            Self::Exp => "exp",
+            Self::Inc => "inc",
+            Self::Tfr => "tfr",
+        }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -30,7 +34,12 @@ impl Tag {
 /// validation in account CRUD and the dropdown in the management UI stay
 /// in sync. `Other` is the catch-all; do not add new values without the UI.
 pub const ACCOUNT_TYPES: &[&str] = &[
-    "Checking", "Savings", "Cash", "Investment", "Credit", "Other",
+    "Checking",
+    "Savings",
+    "Cash",
+    "Investment",
+    "Credit",
+    "Other",
 ];
 
 /// Allowed values for the optional `tone` column on accounts/categories.

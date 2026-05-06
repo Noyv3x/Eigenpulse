@@ -1,7 +1,6 @@
-use ep_ui::{
-    provide_tweak_state, Sidebar, Topbar, TweakState,
-};
+use ep_i18n::{t, Locale};
 use ep_ui::notifications::provide_unread_signal;
+use ep_ui::{provide_tweak_state, Sidebar, Topbar, TweakState};
 use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::components::{Route, Router, Routes, A};
@@ -51,22 +50,29 @@ pub fn App() -> impl IntoView {
 
 #[component]
 fn NotFound() -> impl IntoView {
+    let locale = ep_i18n::use_locale();
     view! {
         <div class="view">
             <div class="card"><div class="card-body">
                 <h2>"404"</h2>
-                <p class="muted">"页面未找到 · "<A href="/">"返回首页"</A></p>
+                <p class="muted">{t(locale, "app.not_found.message")} " · "<A href="/">{t(locale, "app.not_found.back_home")}</A></p>
             </div></div>
         </div>
     }
 }
 
 /// SSR document shell. Renders `<html><head/><body><App/></body></html>`.
+///
+/// `<html lang>` is set from the `Locale` provided in leptos context (by
+/// the per-request `provide_state` callback in `main.rs`); falls back to
+/// the default locale when no context is present (e.g. during hydration's
+/// initial type-check pass).
 pub fn shell(options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
+    let lang = use_context::<Locale>().unwrap_or_default().as_html_lang();
     view! {
         <!DOCTYPE html>
-        <html lang="zh-CN">
+        <html lang=lang>
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>

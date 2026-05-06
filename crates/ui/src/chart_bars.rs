@@ -12,7 +12,11 @@ pub fn ChartBars(
         .enumerate()
         .map(|(i, v)| {
             let h = (v / max * 100.0).max(4.0);
-            let cls = if Some(i) == highlight { "bar-cell hi" } else { "bar-cell" };
+            let cls = if Some(i) == highlight {
+                "bar-cell hi"
+            } else {
+                "bar-cell"
+            };
             view! { <div class=cls style=format!("height:{h:.1}%")></div> }
         })
         .collect_view();

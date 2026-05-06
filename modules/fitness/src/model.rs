@@ -16,7 +16,11 @@ pub enum Strain {
 
 impl Strain {
     pub const fn as_str(&self) -> &'static str {
-        match self { Self::L => "L", Self::M => "M", Self::H => "H" }
+        match self {
+            Self::L => "L",
+            Self::M => "M",
+            Self::H => "H",
+        }
     }
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -27,16 +31,28 @@ impl Strain {
         }
     }
     pub const fn label_cn(&self) -> &'static str {
-        match self { Self::L => "轻", Self::M => "中", Self::H => "高" }
+        match self {
+            Self::L => "L",
+            Self::M => "M",
+            Self::H => "H",
+        }
     }
     pub const fn tone(&self) -> Tone {
-        match self { Self::L => Tone::Green, Self::M => Tone::Amber, Self::H => Tone::Rose }
+        match self {
+            Self::L => Tone::Green,
+            Self::M => Tone::Amber,
+            Self::H => Tone::Rose,
+        }
     }
     /// Per-strain weight applied to `duration_m` for the load metric. Kept
     /// in sync with the SQL `CASE strain WHEN … THEN …` in
     /// `compute_summary` so re-tuning happens in one place.
     pub const fn load_factor(&self) -> f64 {
-        match self { Self::L => 0.6, Self::M => 1.0, Self::H => 1.4 }
+        match self {
+            Self::L => 0.6,
+            Self::M => 1.0,
+            Self::H => 1.4,
+        }
     }
 }
 

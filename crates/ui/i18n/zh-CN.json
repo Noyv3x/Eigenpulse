@@ -1,0 +1,21 @@
+{
+  "ui.sidebar.logout_title": "退出登录",
+  "ui.row_action.default_confirm": "确认删除？",
+  "ui.row_action.default_label": "删除",
+  "ui.sidebar.nav.cfg": "Settings · 系统设置",
+  "ui.sidebar.nav.dsh": "Dashboard · 全局仪表",
+  "ui.sidebar.nav.fin": "Finance · 财务管理",
+  "ui.sidebar.nav.fit": "Fitness · 健身管理",
+  "ui.sidebar.nav.lrn": "Learning · 学习管理",
+  "ui.sidebar.nav.mod": "Modules · 模块市场",
+  "ui.sidebar.nav.rpt": "Reports · 报表中心",
+  "ui.sidebar.nav.tdy": "Today · 今日聚焦",
+  "ui.topbar.collapse_title": "折叠侧栏",
+  "ui.topbar.dark_title": "切到深色",
+  "ui.topbar.light_title": "切到浅色",
+  "ui.topbar.search_placeholder": "搜索模块、单号或记录…",
+  "ui.topbar.notif_title": "通知",
+  "ui.topbar.help_title": "帮助",
+  "ui.topbar.lang_toggle.label": "EN",
+  "ui.topbar.lang_toggle.title": "Switch to English"
+}

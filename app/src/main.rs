@@ -1,11 +1,14 @@
 #![cfg(feature = "ssr")]
 
 mod app;
-mod views;
 mod login;
 mod sse;
+mod views;
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use ep_core::{AppState, ModuleRegistry};
 use leptos::prelude::*;
 use leptos_axum::{generate_route_list, LeptosRoutes};
@@ -21,7 +24,10 @@ struct Assets;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,sqlx=warn".into()),
+        )
         .init();
 
     // Leptos config (reads LEPTOS_* env vars; cargo-leptos sets them in dev/release).
@@ -62,13 +68,22 @@ async fn main() -> anyhow::Result<()> {
     let leptos_routes = generate_route_list(crate::app::App);
 
     // /api/v1/*  — protected by PAT middleware.
-    let open_api_routes = ep_api::router(state.clone(), &registry)
-        .layer(axum::middleware::from_fn_with_state(state.clone(), ep_auth::pat::require_pat));
+    let open_api_routes = ep_api::router(state.clone(), &registry).layer(
+        axum::middleware::from_fn_with_state(state.clone(), ep_auth::pat::require_pat),
+    );
 
     // Web app routes — protected by cookie session middleware (white-list inside the layer).
+    // The per-request `provide_state` closure pulls the locale that
+    // `ep_i18n::locale_layer` stuck in request extensions and propagates
+    // it to leptos context, so `crate::app::shell()` can write `<html lang>`
+    // and views can call `t!(use_locale(), ...)` against the right table.
     let provide_state_state = state.clone();
     let provide_state = move || {
         provide_context(provide_state_state.clone());
+        // Reads request `Parts` from leptos context (provided by
+        // `leptos_axum::handle_response_inner` just before this closure
+        // runs) and forwards the resolved `Locale` into leptos context.
+        let _ = ep_i18n::provide_locale_from_request_parts();
     };
     let leptos_options_for_shell = leptos_options.clone();
 
@@ -77,31 +92,29 @@ async fn main() -> anyhow::Result<()> {
         .route("/login", get(login::page).post(login::submit))
         .route("/logout", post(login::logout).get(login::logout))
         .route("/events/notifications", get(sse::notifications_stream))
-        .nest_service(
-            "/static",
-            axum::routing::any(static_handler),
-        )
+        .nest_service("/static", axum::routing::any(static_handler))
         .nest_service(
             "/pkg",
             tower_http::services::ServeDir::new(format!("{}/pkg", leptos_options.site_root)),
         )
-        .leptos_routes_with_context(
-            &state,
-            leptos_routes,
-            move || provide_state(),
-            {
-                let opts = leptos_options_for_shell.clone();
-                move || crate::app::shell(opts.clone())
-            },
-        )
-        .layer(axum::middleware::from_fn_with_state(state.clone(), ep_auth::middleware::require_session));
+        .leptos_routes_with_context(&state, leptos_routes, move || provide_state(), {
+            let opts = leptos_options_for_shell.clone();
+            move || crate::app::shell(opts.clone())
+        })
+        .layer(axum::middleware::from_fn(ep_i18n::locale_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            ep_auth::middleware::require_session,
+        ));
 
     let router: Router = Router::<AppState>::new()
         .nest("/api/v1", open_api_routes)
         .merge(web_routes)
-        .layer(ServiceBuilder::new()
-            .layer(CompressionLayer::new())
-            .layer(TraceLayer::new_for_http()))
+        .layer(
+            ServiceBuilder::new()
+                .layer(CompressionLayer::new())
+                .layer(TraceLayer::new_for_http()),
+        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -114,7 +127,9 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     use tokio::signal;
-    let ctrl_c = async { let _ = signal::ctrl_c().await; };
+    let ctrl_c = async {
+        let _ = signal::ctrl_c().await;
+    };
     #[cfg(unix)]
     let term = async {
         if let Ok(mut s) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
@@ -129,7 +144,9 @@ async fn shutdown_signal() {
 
 async fn ep_secret_or_create() -> anyhow::Result<String> {
     if let Ok(s) = std::env::var("EP_SECRET") {
-        if s.len() >= 64 { return Ok(s); }
+        if s.len() >= 64 {
+            return Ok(s);
+        }
         anyhow::bail!("EP_SECRET must be at least 64 characters");
     }
     let path = std::path::PathBuf::from("data/secret.key");
@@ -142,7 +159,9 @@ async fn ep_secret_or_create() -> anyhow::Result<String> {
     let mut buf = [0u8; 64];
     rand::thread_rng().fill_bytes(&mut buf);
     let s = hex::encode(buf);
-    if let Some(parent) = path.parent() { tokio::fs::create_dir_all(parent).await.ok(); }
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
     let _ = tokio::fs::write(&path, s.as_bytes()).await;
     tracing::warn!("EP_SECRET not set; generated and persisted to {:?}", path);
     Ok(s)
@@ -157,10 +176,13 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             (
-                [(header::CONTENT_TYPE, mime.as_ref().to_string()),
-                 (header::CACHE_CONTROL, "public, max-age=86400".into())],
+                [
+                    (header::CONTENT_TYPE, mime.as_ref().to_string()),
+                    (header::CACHE_CONTROL, "public, max-age=86400".into()),
+                ],
                 Body::from(file.data.into_owned()),
-            ).into_response()
+            )
+                .into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }

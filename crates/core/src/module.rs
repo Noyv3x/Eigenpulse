@@ -12,7 +12,11 @@ pub struct ModuleLink {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WidgetKind { Kpi, Card, Chart }
+pub enum WidgetKind {
+    Kpi,
+    Card,
+    Chart,
+}
 
 /// A widget injected by a module into the global Dashboard grid.
 /// Render fn returns a Leptos AnyView and runs in SSR; widgets that need data
@@ -48,10 +52,16 @@ pub trait Module: Sync + 'static {
     fn routes(&self, state: AppState) -> axum::Router<AppState>;
 
     /// Open-API sub-router; mounted under PAT middleware at `/api/v1/<code>`.
-    fn open_api(&self, _state: AppState) -> axum::Router<AppState> { axum::Router::new() }
-    fn open_api_scopes(&self) -> &'static [&'static str] { &[] }
+    fn open_api(&self, _state: AppState) -> axum::Router<AppState> {
+        axum::Router::new()
+    }
+    fn open_api_scopes(&self) -> &'static [&'static str] {
+        &[]
+    }
 
-    fn dashboard_widgets(&self) -> &'static [DashboardWidget] { &[] }
+    fn dashboard_widgets(&self) -> &'static [DashboardWidget] {
+        &[]
+    }
 
     fn today_items<'a>(
         &'a self,
@@ -61,5 +71,7 @@ pub trait Module: Sync + 'static {
         Box::pin(async move { Vec::new() })
     }
 
-    fn links(&self) -> &'static [ModuleLink] { &[] }
+    fn links(&self) -> &'static [ModuleLink] {
+        &[]
+    }
 }

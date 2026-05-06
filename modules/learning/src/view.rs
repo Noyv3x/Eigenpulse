@@ -1,11 +1,22 @@
 use crate::model::*;
 use crate::server_fns::*;
 use ep_core::IconKind;
-use ep_ui::{Card, Heatmap, Icon, Kpi, kpi::Direction, PageHead, Ring, RowDeleteAction, Tag};
+use ep_i18n::{parse_err, t, tf, use_locale};
+use ep_ui::{kpi::Direction, Card, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, Tag};
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
+
+fn fmt_server_err(e: &ServerFnError) -> String {
+    let locale = use_locale();
+    match parse_err(e) {
+        Some((code, payload)) => tf(locale, code, &[("payload", payload.unwrap_or(""))]),
+        None => e.to_string(),
+    }
+}
 
 #[component]
 pub fn LearningView() -> impl IntoView {
+    let locale = use_locale();
     let data = Resource::new(|| (), |_| async { load_learning().await });
     let add_book = ServerAction::<AddBook>::new();
     let cycle = ServerAction::<CycleBookStatus>::new();
@@ -19,22 +30,24 @@ pub fn LearningView() -> impl IntoView {
         del_book.version().get();
         add_note.version().get();
         del_note.version().get();
-        if prev.is_some() { data.refetch(); }
+        if prev.is_some() {
+            data.refetch();
+        }
     });
 
     view! {
         <div class="view">
             <PageHead
                 code="LRN-03"
-                module="LEARNING · 学习管理"
+                module=t(locale, "learning.page.module")
                 title="Learning"
-                title_cn="学习管理"
-                sub="课程进度 · 书籍状态 · 笔记 28 天热度。所有数字来自 lrn_* 表实时聚合。"
+                title_cn=t(locale, "learning.page.title_cn")
+                sub=t(locale, "learning.page.sub")
             />
 
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">"loading…"</div> }>
+            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
                 {move || data.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">"加载失败 · " {e.to_string()}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {fmt_server_err(&e)}</div></div> }.into_any(),
                     Ok(d) => render_learning(d, add_book, cycle, del_book, add_note, del_note).into_any(),
                 })}
             </Suspense>
@@ -50,10 +63,18 @@ fn render_learning(
     add_note: ServerAction<AddNote>,
     del_note: ServerAction<DeleteNote>,
 ) -> impl IntoView {
+    let locale = use_locale();
     let s = d.summary.clone();
     let progress_pct = (s.courses_avg_progress * 100.0).round() as u32;
     let books_total = s.books_done + s.books_reading + s.books_todo;
-    let banner_text = format!("{} 个课程进行中 · 平均进度 {}%", d.courses.len(), progress_pct);
+    let banner_text = tf(
+        locale,
+        "learning.banner.courses",
+        &[
+            ("count", &d.courses.len().to_string()),
+            ("pct", &progress_pct.to_string()),
+        ],
+    );
     let heatmap_total: u32 = s.note_heatmap_28d.iter().map(|c| *c as u32).sum();
     let heatmap_data = s.note_heatmap_28d;
     view! {
@@ -61,37 +82,41 @@ fn render_learning(
             <div class="module-glyph lrn mono">"LRN"</div>
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
-                    <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">"学习状态 / STATUS"</span>
-                    <Tag tone=ep_core::Tone::Blue dot=true>{format!("近 30 天 {} 笔记", s.notes_30d)}</Tag>
+                    <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "learning.banner.status")}</span>
+                    <Tag tone=ep_core::Tone::Blue dot=true>{tf(locale, "learning.banner.notes", &[("count", &s.notes_30d.to_string())])}</Tag>
                 </div>
                 <div style="font-size:22px;font-weight:600;letter-spacing:-0.01em">
                     {banner_text}
                 </div>
                 <div class="hstack" style="gap:16px;margin-top:8px;font-size:12.5px;color:var(--ink-3)">
-                    <span class="mono">{format!("在读 {} · 已完成 {} · 待读 {} · 共 {}",
-                                              s.books_reading, s.books_done, s.books_todo, books_total)}</span>
+                    <span class="mono">{tf(locale, "learning.banner.books", &[
+                        ("reading", &s.books_reading.to_string()),
+                        ("done", &s.books_done.to_string()),
+                        ("todo", &s.books_todo.to_string()),
+                        ("total", &books_total.to_string()),
+                    ])}</span>
                 </div>
             </div>
             <div style="text-align:center">
                 <Ring pct=progress_pct size=80 thick=6 children_text=format!("{}%", progress_pct)/>
-                <div class="mono dim" style="font-size:10px;margin-top:6px;text-transform:uppercase;letter-spacing:0.06em">"课程均值"</div>
+                <div class="mono dim" style="font-size:10px;margin-top:6px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "learning.title.course_avg")}</div>
             </div>
         </div>
 
         <div class="kpi-grid">
-            <Kpi code="LRN-K01" label="近 30 天笔记" value=format!("{}", s.notes_30d)
-                 unit="条".to_string()
-                 delta=format!("28 天热力 {} 条", heatmap_total) dir=Direction::Up/>
-            <Kpi code="LRN-K02" label="课程进度"
+            <Kpi code="LRN-K01" label=t(locale, "learning.kpi.notes") value=format!("{}", s.notes_30d)
+                 unit=t(locale, "app.today.unit.entries").to_string()
+                 delta=tf(locale, "learning.kpi.heat", &[("count", &heatmap_total.to_string())]) dir=Direction::Up/>
+            <Kpi code="LRN-K02" label=t(locale, "learning.kpi.course_progress")
                  value=format!("{}", progress_pct) unit="%".to_string()
-                 delta=format!("{} 个课程", d.courses.len()) dir=Direction::Flat/>
-            <Kpi code="LRN-K03" label="在读书籍" value=format!("{}", s.books_reading)
-                 delta=format!("已完成 {}", s.books_done) dir=Direction::Flat/>
-            <Kpi code="LRN-K04" label="待读队列" value=format!("{}", s.books_todo)
-                 delta=format!("共 {} 本", books_total) dir=Direction::Flat/>
+                 delta=tf(locale, "learning.kpi.courses", &[("count", &d.courses.len().to_string())]) dir=Direction::Flat/>
+            <Kpi code="LRN-K03" label=t(locale, "learning.kpi.books_reading") value=format!("{}", s.books_reading)
+                 delta=tf(locale, "learning.kpi.books_done", &[("count", &s.books_done.to_string())]) dir=Direction::Flat/>
+            <Kpi code="LRN-K04" label=t(locale, "learning.kpi.books_todo") value=format!("{}", s.books_todo)
+                 delta=tf(locale, "learning.kpi.total_books", &[("count", &books_total.to_string())]) dir=Direction::Flat/>
         </div>
 
-        <Card title="笔记热度" code="LRN-HEAT-01" sub="近 28 天 · 单元格深度按当日笔记条数 (0..4) 归一化">
+        <Card title=t(locale, "learning.card.heat.title") code="LRN-HEAT-01" sub=t(locale, "learning.card.heat.sub")>
             <Heatmap data=heatmap_data/>
         </Card>
 
@@ -109,21 +134,22 @@ fn render_body(
     add_note: ServerAction<AddNote>,
     del_note: ServerAction<DeleteNote>,
 ) -> impl IntoView {
+    let locale = use_locale();
     view! {
         <div class="grid-2">
-            <Card title="阅读列表" code="LRN-BK-01" sub="Books">
+            <Card title=t(locale, "learning.card.books.title") code="LRN-BK-01" sub="Books">
                 <ActionForm action=add_book attr:class="vstack" attr:style="gap:8px;margin-bottom:12px">
                     <div style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end">
-                        <input name="name" required placeholder="书名"
+                        <input name="name" required placeholder=t(locale, "learning.field.book")
                                style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
-                        <input name="author" placeholder="作者"
+                        <input name="author" placeholder=t(locale, "learning.field.author")
                                style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
                         <select name="status" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
-                            <option value="todo" selected="selected">"待读"</option>
-                            <option value="reading">"阅读中"</option>
-                            <option value="done">"已完成"</option>
+                            <option value="todo" selected="selected">{t(locale, "learning.status.todo")}</option>
+                            <option value="reading">{t(locale, "learning.status.reading")}</option>
+                            <option value="done">{t(locale, "learning.status.done")}</option>
                         </select>
-                        <button class="btn primary sm" type="submit">"+ 添加"</button>
+                        <button class="btn primary sm" type="submit">{t(locale, "learning.submit.add")}</button>
                     </div>
                     <span class="error-slot">
                         {move || add_book.value().get().and_then(|r| r.err()).map(|e| view! {
@@ -135,11 +161,11 @@ fn render_body(
                 <table class="tbl">
                     <thead>
                         <tr>
-                            <th style="width:90px">"单号"</th>
-                            <th>"书名"</th>
-                            <th style="width:120px">"作者"</th>
-                            <th style="width:90px">"状态"</th>
-                            <th class="num" style="width:70px">"操作"</th>
+                            <th style="width:90px">{t(locale, "learning.field.doc")}</th>
+                            <th>{t(locale, "learning.field.book")}</th>
+                            <th style="width:120px">{t(locale, "learning.field.author")}</th>
+                            <th style="width:90px">{t(locale, "learning.field.status")}</th>
+                            <th class="num" style="width:70px">{t(locale, "learning.field.ops")}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -147,9 +173,9 @@ fn render_body(
                             let doc = b.doc_id.clone();
                             let doc2 = b.doc_id.clone();
                             let (tone, label) = match b.status.as_str() {
-                                "done" => (ep_core::Tone::Green, "已完成"),
-                                "reading" => (ep_core::Tone::Blue, "阅读中"),
-                                _ => (ep_core::Tone::None, "待读"),
+                                "done" => (ep_core::Tone::Green, t(locale, "learning.status.done")),
+                                "reading" => (ep_core::Tone::Blue, t(locale, "learning.status.reading")),
+                                _ => (ep_core::Tone::None, t(locale, "learning.status.todo")),
                             };
                             view! {
                                 <tr>
@@ -159,14 +185,14 @@ fn render_body(
                                     <td>
                                         <ActionForm action=cycle attr:style="display:inline">
                                             <input type="hidden" name="doc_id" value=doc/>
-                                            <button class="btn sm" type="submit" title="点击切换状态">
+                                            <button class="btn sm" type="submit" title=t(locale, "learning.title.switch_status")>
                                                 <Tag tone=tone>{label}</Tag>
                                             </button>
                                         </ActionForm>
                                     </td>
                                     <td class="num">
                                         <RowDeleteAction action=del_book value=doc2
-                                                         confirm="删除该书？" label="×"/>
+                                                         confirm=t(locale, "learning.confirm.book") label="×"/>
                                     </td>
                                 </tr>
                             }
@@ -175,14 +201,14 @@ fn render_body(
                 </table>
             </Card>
 
-            <Card title="笔记" code="LRN-N-01" sub="Notes">
+            <Card title=t(locale, "learning.card.notes.title") code="LRN-N-01" sub="Notes">
                 <ActionForm action=add_note attr:class="vstack" attr:style="gap:8px;margin-bottom:12px">
-                    <input name="title" required placeholder="标题"
+                    <input name="title" required placeholder=t(locale, "learning.field.title")
                            style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
-                    <textarea name="body" rows="2" placeholder="正文（可选）"
+                    <textarea name="body" rows="2" placeholder=t(locale, "learning.field.body")
                               style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono);font-size:12px"></textarea>
                     <div class="hstack" style="gap:8px">
-                        <button class="btn primary sm" type="submit"><Icon kind=IconKind::Plus size=12/>"添加笔记"</button>
+                        <button class="btn primary sm" type="submit"><Icon kind=IconKind::Plus size=12/>{t(locale, "learning.submit.add_note")}</button>
                         <span class="error-slot">
                             {move || add_note.value().get().and_then(|r| r.err()).map(|e| view! {
                                 <span class="tag rose">{e.to_string()}</span>
@@ -203,7 +229,7 @@ fn render_body(
                                     <div class="meta mono dim">{when}</div>
                                 </div>
                                 <RowDeleteAction action=del_note value=doc
-                                                 confirm="删除该笔记？" label="×"/>
+                                                 confirm=t(locale, "learning.confirm.note") label="×"/>
                             </div>
                         }
                     }).collect_view()}
@@ -213,7 +239,7 @@ fn render_body(
 
         <div style="margin-top:24px"></div>
 
-        <Card title="进行中的课程" code="LRN-CRS-01" sub="只读 · 后续接入 Coursera/Anki 同步">
+        <Card title=t(locale, "learning.card.courses.title") code="LRN-CRS-01" sub=t(locale, "learning.card.courses.sub")>
             <div class="vstack" style="gap:0">
                 {d.courses.into_iter().map(|c| {
                     let pct = (c.progress * 100.0) as u32;
@@ -224,7 +250,7 @@ fn render_body(
                                 <div>
                                     <div style="font-size:13.5px;font-weight:500">{c.name}</div>
                                     <div class="mono dim" style="font-size:10.5px;margin-top:2px">
-                                        {c.doc_id}" · "{c.provider.unwrap_or_default()}" · 截止 "{c.due_on.unwrap_or_else(|| "—".into())}
+                                        {c.doc_id}" · "{c.provider.unwrap_or_default()}" · "{tf(locale, "learning.course.due", &[("date", &c.due_on.unwrap_or_else(|| "—".into()))])}
                                     </div>
                                 </div>
                                 <div class="mono" style="font-size:12px;font-weight:500">{pct}"%"</div>

@@ -16,5 +16,9 @@ pub async fn notifications_stream(
         let payload = serde_json::to_string(&m).ok()?;
         Some(Ok(Event::default().data(payload)))
     });
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("ping"))
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }

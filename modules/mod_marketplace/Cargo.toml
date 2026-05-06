@@ -8,17 +8,18 @@ license     = { workspace = true }
 [features]
 default = []
 ssr     = ["dep:axum", 
-    "ep-core/ssr", "ep-ui/ssr",
+    "ep-core/ssr", "ep-ui/ssr", "ep-i18n/ssr",
     "leptos/ssr",
 ]
 hydrate = [
-    "ep-core/hydrate", "ep-ui/hydrate",
+    "ep-core/hydrate", "ep-ui/hydrate", "ep-i18n/hydrate",
     "leptos/hydrate",
 ]
 
 [dependencies]
 ep-core    = { workspace = true }
 ep-ui      = { workspace = true }
+ep-i18n    = { workspace = true }
 
 leptos        = { workspace = true }
 axum  = { workspace = true, optional = true }

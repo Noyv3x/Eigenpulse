@@ -32,7 +32,7 @@ pub async fn login_create_session(pool: &SqlitePool, user_id: i64) -> anyhow::Re
     let expires_at = now + SESSION_LIFETIME_SECS;
     sqlx::query(
         "INSERT INTO session (token, user_id, issued_at, expires_at, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?3)"
+         VALUES (?1, ?2, ?3, ?4, ?3)",
     )
     .bind(&token)
     .bind(user_id)
@@ -40,7 +40,11 @@ pub async fn login_create_session(pool: &SqlitePool, user_id: i64) -> anyhow::Re
     .bind(expires_at)
     .execute(pool)
     .await?;
-    Ok(Session { token, user_id, expires_at })
+    Ok(Session {
+        token,
+        user_id,
+        expires_at,
+    })
 }
 
 pub async fn logout_destroy_session(pool: &SqlitePool, token: &str) -> anyhow::Result<()> {
@@ -61,40 +65,61 @@ pub async fn purge_all_sessions<'e, E>(executor: E) -> sqlx::Result<u64>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let result = sqlx::query("DELETE FROM session")
-        .execute(executor)
-        .await?;
+    let result = sqlx::query("DELETE FROM session").execute(executor).await?;
     Ok(result.rows_affected())
 }
 
-pub async fn lookup_session(pool: &SqlitePool, token: &str) -> anyhow::Result<Option<(Session, AuthUser)>> {
+pub async fn lookup_session(
+    pool: &SqlitePool,
+    token: &str,
+) -> anyhow::Result<Option<(Session, AuthUser)>> {
     let row: Option<(String, i64, i64, i64, String, String, String)> = sqlx::query_as(
         "SELECT s.token, s.user_id, s.expires_at, s.last_seen, u.handle, u.name, u.role
            FROM session s
            JOIN app_user u ON u.id = s.user_id
-          WHERE s.token = ?1"
+          WHERE s.token = ?1",
     )
     .bind(token)
     .fetch_optional(pool)
     .await?;
-    let Some((token, user_id, expires_at, last_seen, handle, name, role)) = row else { return Ok(None) };
+    let Some((token, user_id, expires_at, last_seen, handle, name, role)) = row else {
+        return Ok(None);
+    };
     let now = OffsetDateTime::now_utc().unix_timestamp();
     if expires_at <= now {
-        let _ = sqlx::query("DELETE FROM session WHERE token = ?1").bind(&token).execute(pool).await;
+        let _ = sqlx::query("DELETE FROM session WHERE token = ?1")
+            .bind(&token)
+            .execute(pool)
+            .await;
         return Ok(None);
     }
     // Sliding renewal.
     if last_seen < now - 3600 {
         let _ = sqlx::query("UPDATE session SET last_seen = ?1 WHERE token = ?2")
-            .bind(now).bind(&token).execute(pool).await;
+            .bind(now)
+            .bind(&token)
+            .execute(pool)
+            .await;
     }
     if expires_at < now + 7 * 24 * 3600 {
         let _ = sqlx::query("UPDATE session SET expires_at = ?1 WHERE token = ?2")
-            .bind(now + SESSION_LIFETIME_SECS).bind(&token).execute(pool).await;
+            .bind(now + SESSION_LIFETIME_SECS)
+            .bind(&token)
+            .execute(pool)
+            .await;
     }
     Ok(Some((
-        Session { token, user_id, expires_at },
-        AuthUser { id: user_id, handle, name, role },
+        Session {
+            token,
+            user_id,
+            expires_at,
+        },
+        AuthUser {
+            id: user_id,
+            handle,
+            name,
+            role,
+        },
     )))
 }
 
@@ -115,8 +140,11 @@ mod tests {
                 issued_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
                 last_seen INTEGER NOT NULL
-             )"
-        ).execute(&pool).await.unwrap();
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool
     }
 
@@ -126,12 +154,16 @@ mod tests {
         for i in 0..3 {
             sqlx::query("INSERT INTO session VALUES (?, 1, 0, 0, 0)")
                 .bind(format!("tok-{i}"))
-                .execute(&pool).await.unwrap();
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         let purged = purge_all_sessions(&pool).await.unwrap();
         assert_eq!(purged, 3);
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(remaining, 0);
     }
 
@@ -146,14 +178,18 @@ mod tests {
     async fn purge_all_sessions_works_inside_transaction() {
         let pool = fixture_pool().await;
         sqlx::query("INSERT INTO session VALUES ('a', 1, 0, 0, 0)")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         let mut tx = pool.begin().await.unwrap();
         // Generic-over-Executor: should accept `&mut *tx`, not just `&pool`.
         let purged = purge_all_sessions(&mut *tx).await.unwrap();
         assert_eq!(purged, 1);
         tx.commit().await.unwrap();
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(remaining, 0);
     }
 }

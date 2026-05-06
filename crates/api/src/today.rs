@@ -26,15 +26,18 @@ pub async fn handler(State(state): State<AppState>) -> Result<Json<TodayResp>, A
            FROM activity
           WHERE occurred_at >= unixepoch('now','-1 day')
           ORDER BY occurred_at DESC
-          LIMIT 50"
+          LIMIT 50",
     )
     .fetch_all(&state.db)
     .await?;
-    let items = rows.into_iter().map(|(ts, module, doc_id, summary, _link)| TodayItemDto {
-        time: fmt_ts_hm(Some(ts)),
-        state: "pending".into(),
-        text: format!("{} · {}", module, summary),
-        doc_ref: doc_id,
-    }).collect();
+    let items = rows
+        .into_iter()
+        .map(|(ts, module, doc_id, summary, _link)| TodayItemDto {
+            time: fmt_ts_hm(Some(ts)),
+            state: "pending".into(),
+            text: format!("{} · {}", module, summary),
+            doc_ref: doc_id,
+        })
+        .collect();
     Ok(Json(TodayResp { date, items }))
 }

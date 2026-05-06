@@ -7,11 +7,12 @@ license     = { workspace = true }
 
 [features]
 default = []
-ssr     = ["leptos/ssr", "ep-core/ssr"]
-hydrate = ["leptos/hydrate", "ep-core/hydrate", "dep:web-sys", "dep:wasm-bindgen"]
+ssr     = ["leptos/ssr", "ep-core/ssr", "ep-i18n/ssr"]
+hydrate = ["leptos/hydrate", "ep-core/hydrate", "ep-i18n/hydrate", "dep:web-sys", "dep:wasm-bindgen"]
 
 [dependencies]
 ep-core      = { workspace = true }
+ep-i18n      = { workspace = true }
 leptos       = { workspace = true }
 leptos_meta  = { workspace = true }
 leptos_router = { workspace = true }

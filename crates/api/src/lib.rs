@@ -1,16 +1,19 @@
 #[cfg(feature = "ssr")]
 pub mod errors;
 #[cfg(feature = "ssr")]
-pub mod whoami;
-#[cfg(feature = "ssr")]
-pub mod today;
+pub mod healthz;
 #[cfg(feature = "ssr")]
 pub mod notify;
 #[cfg(feature = "ssr")]
-pub mod healthz;
+pub mod today;
+#[cfg(feature = "ssr")]
+pub mod whoami;
 
 #[cfg(feature = "ssr")]
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 #[cfg(feature = "ssr")]
 use ep_core::{AppState, ModuleRegistry};
 

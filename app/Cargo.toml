@@ -22,14 +22,14 @@ ssr = [
     "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess",
     "dep:base64", "dep:rand", "dep:hex", "dep:futures-util", "dep:tokio-stream",
     "leptos/ssr",
-    "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-ui/ssr",
+    "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-ui/ssr", "ep-i18n/ssr",
     "ep-notify/ssr", "ep-api/ssr",
     "ep-finance/ssr", "ep-fitness/ssr", "ep-learning/ssr", "ep-marketplace/ssr",
 ]
 hydrate = [
     "leptos/hydrate",
     "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:web-sys",
-    "ep-core/hydrate", "ep-ui/hydrate",
+    "ep-core/hydrate", "ep-ui/hydrate", "ep-i18n/hydrate",
     "ep-finance/hydrate", "ep-fitness/hydrate", "ep-learning/hydrate", "ep-marketplace/hydrate",
 ]
 
@@ -38,6 +38,7 @@ ep-core      = { workspace = true }
 ep-db        = { workspace = true }
 ep-auth      = { workspace = true }
 ep-ui        = { workspace = true }
+ep-i18n      = { workspace = true }
 ep-notify    = { workspace = true }
 ep-api       = { workspace = true }
 ep-finance   = { workspace = true }

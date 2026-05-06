@@ -7,6 +7,7 @@ members = [
     "crates/db",
     "crates/auth",
     "crates/ui",
+    "crates/i18n",
     "crates/notify",
     "crates/api",
     "modules/finance",
@@ -82,6 +83,7 @@ ep-core       = { path = "crates/core" }
 ep-db         = { path = "crates/db" }
 ep-auth       = { path = "crates/auth" }
 ep-ui         = { path = "crates/ui" }
+ep-i18n       = { path = "crates/i18n" }
 ep-notify     = { path = "crates/notify" }
 ep-api        = { path = "crates/api" }
 ep-finance    = { path = "modules/finance" }

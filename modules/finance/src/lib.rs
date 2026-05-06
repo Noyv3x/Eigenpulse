@@ -12,26 +12,45 @@ pub use view::FinanceView;
 
 #[cfg(feature = "ssr")]
 mod ssr_module {
-    use ep_core::{IconKind, Module, ModuleLink, NavSection, AppState};
+    use ep_core::{AppState, IconKind, Module, ModuleLink, NavSection};
 
     pub struct FinanceModule;
 
     pub static MODULE: &dyn Module = &FinanceModule;
 
     impl Module for FinanceModule {
-        fn code(&self) -> &'static str { "FIN" }
-        fn name(&self) -> &'static str { "Finance" }
-        fn name_cn(&self) -> &'static str { "财务管理" }
-        fn nav_section(&self) -> NavSection { NavSection::Modules }
-        fn nav_icon(&self) -> IconKind { IconKind::Finance }
-        fn glyph(&self) -> &'static str { "fin" }
-        fn description(&self) -> &'static str { "账户、预算、收支、投资组合" }
-        fn version(&self) -> &'static str { "0.1.0" }
+        fn code(&self) -> &'static str {
+            "FIN"
+        }
+        fn name(&self) -> &'static str {
+            "Finance"
+        }
+        fn name_cn(&self) -> &'static str {
+            "\u{8d22}\u{52a1}\u{7ba1}\u{7406}"
+        }
+        fn nav_section(&self) -> NavSection {
+            NavSection::Modules
+        }
+        fn nav_icon(&self) -> IconKind {
+            IconKind::Finance
+        }
+        fn glyph(&self) -> &'static str {
+            "fin"
+        }
+        fn description(&self) -> &'static str {
+            "\u{8d26}\u{6237}\u{3001}\u{9884}\u{7b97}\u{3001}\u{6536}\u{652f}\u{3001}\u{6295}\u{8d44}\u{7ec4}\u{5408}"
+        }
+        fn version(&self) -> &'static str {
+            "0.1.0"
+        }
 
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
             &[
-                ("001_finance",      include_str!("../migrations/001_finance.sql")),
-                ("002_finance_crud", include_str!("../migrations/002_finance_crud.sql")),
+                ("001_finance", include_str!("../migrations/001_finance.sql")),
+                (
+                    "002_finance_crud",
+                    include_str!("../migrations/002_finance_crud.sql"),
+                ),
             ]
         }
 
@@ -55,13 +74,29 @@ mod ssr_module {
         // here would either be unused or double-render.
         fn links(&self) -> &'static [ModuleLink] {
             &[
-                ModuleLink { source: "FIN", target: "DSH", kind: "totals-feed" },
-                ModuleLink { source: "FIN", target: "FIT", kind: "doc-ref" },
-                ModuleLink { source: "FIN", target: "LRN", kind: "doc-ref" },
+                ModuleLink {
+                    source: "FIN",
+                    target: "DSH",
+                    kind: "totals-feed",
+                },
+                ModuleLink {
+                    source: "FIN",
+                    target: "FIT",
+                    kind: "doc-ref",
+                },
+                ModuleLink {
+                    source: "FIN",
+                    target: "LRN",
+                    kind: "doc-ref",
+                },
                 // Transfer pairs are intra-FIN edges in module_link
                 // (kind='tfr-pair'); document the kind here for module-graph
                 // viz. Runtime is unaffected.
-                ModuleLink { source: "FIN", target: "FIN", kind: "tfr-pair" },
+                ModuleLink {
+                    source: "FIN",
+                    target: "FIN",
+                    kind: "tfr-pair",
+                },
             ]
         }
     }

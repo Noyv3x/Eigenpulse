@@ -1,0 +1,6 @@
+{
+  "app.common.load_failed": "加载失败",
+  "app.common.loading": "加载中…",
+  "app.common.missing_key": "[[缺失 i18n key]]",
+  "app.common.unknown_locale": "未知语言代码 '{payload}'"
+}

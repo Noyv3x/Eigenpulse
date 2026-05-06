@@ -8,11 +8,11 @@ pub enum NavSection {
 }
 
 impl NavSection {
-    pub fn label(&self) -> &'static str {
+    pub fn label_key(&self) -> &'static str {
         match self {
-            Self::Core => "核心 · CORE",
-            Self::Modules => "模块 · MODULES",
-            Self::System => "系统 · SYSTEM",
+            Self::Core => "core.nav.section.core",
+            Self::Modules => "core.nav.section.modules",
+            Self::System => "core.nav.section.system",
         }
     }
     pub fn order(&self) -> u8 {
@@ -26,11 +26,41 @@ impl NavSection {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IconKind {
-    Dashboard, Today, Finance, Fitness, Learning,
-    Modules, Reports, Settings, Help, Search, Bell,
-    Plus, Arrow, ArrowUp, ArrowDown, Flat, Check, More,
-    Menu, Chevron, Filter, Sun, Moon, Tag, Link, Sparkle,
-    Upload, Flame, Book, Dumbbell, Heart, Coin, Grid, Export, Cube,
+    Dashboard,
+    Today,
+    Finance,
+    Fitness,
+    Learning,
+    Modules,
+    Reports,
+    Settings,
+    Help,
+    Search,
+    Bell,
+    Plus,
+    Arrow,
+    ArrowUp,
+    ArrowDown,
+    Flat,
+    Check,
+    More,
+    Menu,
+    Chevron,
+    Filter,
+    Sun,
+    Moon,
+    Tag,
+    Link,
+    Sparkle,
+    Upload,
+    Flame,
+    Book,
+    Dumbbell,
+    Heart,
+    Coin,
+    Grid,
+    Export,
+    Cube,
 }
 
 #[derive(Clone, Debug)]

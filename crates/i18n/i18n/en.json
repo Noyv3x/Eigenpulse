@@ -1,0 +1,6 @@
+{
+  "app.common.load_failed": "Load failed",
+  "app.common.loading": "Loading…",
+  "app.common.missing_key": "[[missing i18n key]]",
+  "app.common.unknown_locale": "Unknown locale code '{payload}'"
+}

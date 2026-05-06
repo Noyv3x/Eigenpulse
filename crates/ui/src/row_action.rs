@@ -1,10 +1,5 @@
 use leptos::prelude::*;
-use leptos::server_fn::{
-    client::Client,
-    codec::PostUrl,
-    request::ClientReq,
-    ServerFn,
-};
+use leptos::server_fn::{client::Client, codec::PostUrl, request::ClientReq, ServerFn};
 
 /// Per-row "delete" / "revoke" affordance for ledger-style tables.
 ///
@@ -45,12 +40,15 @@ where
         + serde::de::DeserializeOwned,
     <S as ServerFn>::Output: Send + Sync,
     <S as ServerFn>::Error: Send + Sync,
-    <<<S as ServerFn>::Client as Client<<S as ServerFn>::Error>>::Request
-        as ClientReq<<S as ServerFn>::Error>>::FormData: From<leptos::web_sys::FormData>,
+    <<<S as ServerFn>::Client as Client<<S as ServerFn>::Error>>::Request as ClientReq<
+        <S as ServerFn>::Error,
+    >>::FormData: From<leptos::web_sys::FormData>,
 {
     let field = field.unwrap_or_else(|| "doc_id".into());
-    let confirm_msg = confirm.unwrap_or_else(|| "确认删除？".into());
-    let label = label.unwrap_or_else(|| "删除".into());
+    let locale = ep_i18n::use_locale();
+    let confirm_msg =
+        confirm.unwrap_or_else(|| ep_i18n::t(locale, "ui.row_action.default_confirm").into());
+    let label = label.unwrap_or_else(|| ep_i18n::t(locale, "ui.row_action.default_label").into());
     let onclick = format!("return confirm('{confirm_msg}')");
     view! {
         <span class="row-actions-slot">

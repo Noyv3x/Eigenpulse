@@ -1,6 +1,11 @@
 # Open follow-ups
 
-## #26 — settings/* hydration panic (`tachys::hydration::failed_to_cast_text_node`)
+## #26 — settings/* hydration panic (`tachys::hydration::failed_to_cast_text_node`) — resolved
+
+**Status.** Resolved in `app/src/views/settings/{notifications,security}.rs` by
+anchoring conditional action feedback in stable wrapper elements
+(`error-slot`, `test-notice-slot`, `new-token-slot`). Keep this note as the
+regression pattern for future settings forms.
 
 **Symptom.** Navigating in a real browser to `/settings/notifications` or
 `/settings/security` after authenticating produces:

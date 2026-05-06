@@ -1,6 +1,8 @@
 use crate::model::*;
 #[cfg(feature = "ssr")]
 use ep_core::server_err;
+#[cfg(feature = "ssr")]
+use ep_i18n::{err, err_with};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -16,12 +18,12 @@ pub struct FitnessSummary {
     /// Sum(`duration_m * strain_factor`) per ISO week, oldest → newest.
     /// 12 weeks padded — empty weeks render as flat bars.
     pub weekly_load: Vec<f64>,
-    pub week_labels: Vec<String>,           // "W17" etc., parallel to weekly_load
+    pub week_labels: Vec<String>, // "W17" etc., parallel to weekly_load
     pub this_week_count: u32,
     pub this_week_target: u32,
-    pub streak_days: u32,                   // consecutive trailing days with ≥ 1 workout
-    pub aerobic_min_this_week: u32,         // sum(duration_m where kind ~ "/cardio|有氧|跑|cycle/")
-    pub avg_duration_min: u32,              // last 30 days
+    pub streak_days: u32,           // consecutive trailing days with ≥ 1 workout
+    pub aerobic_min_this_week: u32, // sum(duration_m where kind ~ "/cardio|aerobic|run|cycle/")
+    pub avg_duration_min: u32,      // last 30 days
     /// Heaviest strain among workouts in the last 7 days. None if empty.
     pub heaviest_strain: Option<String>,
 }
@@ -32,26 +34,56 @@ pub async fn load_fitness() -> Result<FitnessData, ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
         let st: ep_core::AppState = expect_context();
-        type Row = (String, i64, String, Option<String>, i64, Option<String>, Option<String>, Option<i64>, Option<String>);
+        type Row = (
+            String,
+            i64,
+            String,
+            Option<String>,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        );
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes
-               FROM fit_workout ORDER BY occurred_at DESC LIMIT 30"
-        ).fetch_all(&st.db).await.map_err(server_err)?;
+               FROM fit_workout ORDER BY occurred_at DESC LIMIT 30",
+        )
+        .fetch_all(&st.db)
+        .await
+        .map_err(server_err)?;
 
-        let workouts: Vec<Workout> = rows.into_iter().map(|r| Workout {
-            doc_id: r.0, occurred_at: r.1, kind: r.2, program: r.3,
-            duration_m: r.4, load_text: r.5, strain: r.6, rpe: r.7, notes: r.8,
-        }).collect();
+        let workouts: Vec<Workout> = rows
+            .into_iter()
+            .map(|r| Workout {
+                doc_id: r.0,
+                occurred_at: r.1,
+                kind: r.2,
+                program: r.3,
+                duration_m: r.4,
+                load_text: r.5,
+                strain: r.6,
+                rpe: r.7,
+                notes: r.8,
+            })
+            .collect();
 
-        let summary = compute_summary(&st.db, &workouts).await.map_err(server_err)?;
+        let summary = compute_summary(&st.db, &workouts)
+            .await
+            .map_err(server_err)?;
         Ok(FitnessData { workouts, summary })
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[cfg(feature = "ssr")]
-async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx::Result<FitnessSummary> {
+async fn compute_summary(
+    pool: &sqlx::SqlitePool,
+    workouts: &[Workout],
+) -> sqlx::Result<FitnessSummary> {
     // 12-week dense frame, server's local-tz aware. Each row is one ISO week
     // label like "2026-W17" mapped to weighted load (duration × strain).
     type WeekRow = (String, f64);
@@ -65,8 +97,10 @@ async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx:
            FROM fit_workout
           WHERE occurred_at >= unixepoch('now','localtime','-77 days','utc')
           GROUP BY w
-          ORDER BY w ASC"
-    ).fetch_all(pool).await?;
+          ORDER BY w ASC",
+    )
+    .fetch_all(pool)
+    .await?;
 
     let frame: Vec<String> = sqlx::query_scalar(
         "WITH RECURSIVE weeks(w, n) AS (
@@ -76,13 +110,24 @@ async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx:
               FROM weeks
              WHERE n + 1 < 12
          )
-         SELECT w FROM weeks ORDER BY w ASC"
-    ).fetch_all(pool).await?;
+         SELECT w FROM weeks ORDER BY w ASC",
+    )
+    .fetch_all(pool)
+    .await?;
 
     let by_week: std::collections::HashMap<String, f64> = week_rows.into_iter().collect();
-    let weekly_load: Vec<f64> = frame.iter().map(|w| by_week.get(w).copied().unwrap_or(0.0)).collect();
-    let week_labels: Vec<String> = frame.iter()
-        .map(|w| w.split("-W").nth(1).map(|n| format!("W{}", n)).unwrap_or_else(|| w.clone()))
+    let weekly_load: Vec<f64> = frame
+        .iter()
+        .map(|w| by_week.get(w).copied().unwrap_or(0.0))
+        .collect();
+    let week_labels: Vec<String> = frame
+        .iter()
+        .map(|w| {
+            w.split("-W")
+                .nth(1)
+                .map(|n| format!("W{}", n))
+                .unwrap_or_else(|| w.clone())
+        })
         .collect();
 
     // Week boundary = local Monday 00:00 of the week containing today.
@@ -102,22 +147,28 @@ async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx:
 
     let this_week_count: u32 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM fit_workout WHERE occurred_at >= {WEEK_START_MONDAY}"
-    )).fetch_one(pool).await?;
+    ))
+    .fetch_one(pool)
+    .await?;
 
     let aerobic_min_this_week: u32 = sqlx::query_scalar(&format!(
         "SELECT COALESCE(SUM(duration_m), 0) FROM fit_workout
           WHERE occurred_at >= {WEEK_START_MONDAY}
             AND (lower(kind) LIKE '%cardio%'
-                 OR lower(kind) LIKE '%有氧%'
-                 OR lower(kind) LIKE '%跑%'
-                 OR lower(kind) LIKE '%骑%'
-                 OR lower(kind) LIKE '%游%')"
-    )).fetch_one(pool).await?;
+                 OR lower(kind) LIKE '%\u{6709}\u{6c27}%'
+                 OR lower(kind) LIKE '%\u{8dd1}%'
+                 OR lower(kind) LIKE '%\u{9a91}%'
+                 OR lower(kind) LIKE '%\u{6e38}%')"
+    ))
+    .fetch_one(pool)
+    .await?;
 
     let avg_duration_min: u32 = sqlx::query_scalar(
         "SELECT COALESCE(CAST(AVG(duration_m) AS INTEGER), 0) FROM fit_workout
-          WHERE occurred_at >= unixepoch('now','localtime','-30 days','utc')"
-    ).fetch_one(pool).await?;
+          WHERE occurred_at >= unixepoch('now','localtime','-30 days','utc')",
+    )
+    .fetch_one(pool)
+    .await?;
 
     // Heaviest strain in last 7 days, ranked H > M > L.
     let heaviest_strain: Option<String> = sqlx::query_scalar(
@@ -125,8 +176,11 @@ async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx:
           WHERE occurred_at >= unixepoch('now','localtime','-7 days','utc')
             AND strain IS NOT NULL
           ORDER BY CASE strain WHEN 'H' THEN 3 WHEN 'M' THEN 2 WHEN 'L' THEN 1 ELSE 0 END DESC
-          LIMIT 1"
-    ).fetch_optional(pool).await?.flatten();
+          LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
 
     // Streak: walk back from today's local date counting consecutive days
     // with ≥ 1 workout. `'start of day'` on both sides is load-bearing —
@@ -140,9 +194,10 @@ async fn compute_summary(pool: &sqlx::SqlitePool, workouts: &[Workout]) -> sqlx:
         "SELECT DISTINCT CAST(julianday(occurred_at,'unixepoch','localtime','start of day') AS INTEGER)
            FROM fit_workout"
     ).fetch_all(pool).await?;
-    let today_local: i64 = sqlx::query_scalar(
-        "SELECT CAST(julianday('now','localtime','start of day') AS INTEGER)"
-    ).fetch_one(pool).await?;
+    let today_local: i64 =
+        sqlx::query_scalar("SELECT CAST(julianday('now','localtime','start of day') AS INTEGER)")
+            .fetch_one(pool)
+            .await?;
     let _ = workouts; // streak no longer reads the loaded list — see SQL above
     let streak_days = compute_streak(today_local, &workout_days_local);
 
@@ -186,19 +241,19 @@ mod streak_tests {
 
     #[test]
     fn contiguous_chain_ending_today() {
-        let dates = [2_460_000, 2_459_999, 2_459_998];   // today, today-1, today-2
+        let dates = [2_460_000, 2_459_999, 2_459_998]; // today, today-1, today-2
         assert_eq!(compute_streak(2_460_000, &dates), 3);
     }
 
     #[test]
     fn gap_breaks_chain() {
-        let dates = [2_460_000, 2_459_998];               // today + today-2 (gap on today-1)
+        let dates = [2_460_000, 2_459_998]; // today + today-2 (gap on today-1)
         assert_eq!(compute_streak(2_460_000, &dates), 1);
     }
 
     #[test]
     fn no_workout_today_resets_to_zero() {
-        let dates = [2_459_999, 2_459_998];               // yesterday + day before
+        let dates = [2_459_999, 2_459_998]; // yesterday + day before
         assert_eq!(compute_streak(2_460_000, &dates), 0);
     }
 
@@ -229,11 +284,16 @@ mod streak_tests {
                 ('2026-05-02 12:00:00'),
                 ('2026-05-03 23:00:00')
              )
-             SELECT datetime(s,'-6 days','weekday 1','start of day') FROM d"
-        ).fetch_all(&pool).await.unwrap();
+             SELECT datetime(s,'-6 days','weekday 1','start of day') FROM d",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         for a in &week_anchors {
-            assert_eq!(a, "2026-04-27 00:00:00",
-                       "expected Monday 2026-04-27 00:00:00, got {a}");
+            assert_eq!(
+                a, "2026-04-27 00:00:00",
+                "expected Monday 2026-04-27 00:00:00, got {a}"
+            );
         }
     }
 
@@ -254,20 +314,34 @@ mod streak_tests {
         // pick two timestamps 3 hours apart spanning UTC midnight so the
         // bucketing test is TZ-independent (the modifier order is what's
         // being pinned, not the TZ math).
-        let t_pre_midnight: i64 = 1_777_507_140;   // 2026-04-29 22:39 UTC
-        let t_post_midnight: i64 = t_pre_midnight + 3 * 3600;  // ~01:39 UTC the next day
+        let t_pre_midnight: i64 = 1_777_507_140; // 2026-04-29 22:39 UTC
+        let t_post_midnight: i64 = t_pre_midnight + 3 * 3600; // ~01:39 UTC the next day
         let buggy: Vec<i64> = sqlx::query_scalar(
             "SELECT DISTINCT CAST(julianday(?, 'unixepoch') AS INTEGER) UNION
-             SELECT DISTINCT CAST(julianday(?, 'unixepoch') AS INTEGER) ORDER BY 1"
-        ).bind(t_pre_midnight).bind(t_post_midnight).fetch_all(&pool).await.unwrap();
+             SELECT DISTINCT CAST(julianday(?, 'unixepoch') AS INTEGER) ORDER BY 1",
+        )
+        .bind(t_pre_midnight)
+        .bind(t_post_midnight)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         let fixed: Vec<i64> = sqlx::query_scalar(
             "SELECT DISTINCT CAST(julianday(?, 'unixepoch','start of day') AS INTEGER) UNION
-             SELECT DISTINCT CAST(julianday(?, 'unixepoch','start of day') AS INTEGER) ORDER BY 1"
-        ).bind(t_pre_midnight).bind(t_post_midnight).fetch_all(&pool).await.unwrap();
+             SELECT DISTINCT CAST(julianday(?, 'unixepoch','start of day') AS INTEGER) ORDER BY 1",
+        )
+        .bind(t_pre_midnight)
+        .bind(t_post_midnight)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
         // Buggy form may collapse to one bucket (it does empirically: the
         // sub-day fractional truncates the same way for both). The fixed
         // form distinguishes the two UTC-midnight-spanning timestamps.
-        assert_eq!(fixed.len(), 2, "fixed form should bucket the two timestamps separately, got {fixed:?}");
+        assert_eq!(
+            fixed.len(),
+            2,
+            "fixed form should bucket the two timestamps separately, got {fixed:?}"
+        );
         // Sanity: buggy form would have collapsed (uncomment to verify):
         let _ = buggy;
     }
@@ -285,27 +359,40 @@ pub async fn add_workout(
     {
         ep_auth::require_user_for_server_fn().await?;
         if kind.trim().is_empty() {
-            return Err(ServerFnError::Args("kind is required".into()));
+            return Err(err("fitness.err.kind_required"));
         }
         if duration_m <= 0 {
-            return Err(ServerFnError::Args("duration must be positive".into()));
+            return Err(err("fitness.err.duration_positive"));
         }
         let strain_kind = if strain.is_empty() {
             Strain::M
         } else {
             match Strain::parse(&strain) {
                 Some(k) => k,
-                None => return Err(ServerFnError::Args(format!("strain must be L/M/H, got '{strain}'"))),
+                None => return Err(err_with("fitness.err.strain_invalid", &strain)),
             }
         };
         let strain_norm = strain_kind.as_str().to_string();
         let st: ep_core::AppState = expect_context();
         let occurred = time::OffsetDateTime::now_utc().unix_timestamp();
         let mut tx = st.db.begin().await.map_err(server_err)?;
-        let doc_id = ep_core::next_doc_id(&mut tx, "FIT", ep_core::DocIdShape::TypeSerial4 { kind: "S" })
-            .await.map_err(server_err)?;
-        let program_opt = if program.trim().is_empty() { None } else { Some(program.clone()) };
-        let load_opt = if load_text.trim().is_empty() { None } else { Some(load_text.clone()) };
+        let doc_id = ep_core::next_doc_id(
+            &mut tx,
+            "FIT",
+            ep_core::DocIdShape::TypeSerial4 { kind: "S" },
+        )
+        .await
+        .map_err(server_err)?;
+        let program_opt = if program.trim().is_empty() {
+            None
+        } else {
+            Some(program.clone())
+        };
+        let load_opt = if load_text.trim().is_empty() {
+            None
+        } else {
+            Some(load_text.clone())
+        };
         sqlx::query(
             "INSERT INTO fit_workout (doc_id, occurred_at, kind, program, duration_m, load_text, strain)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
@@ -315,19 +402,32 @@ pub async fn add_workout(
         .execute(&mut *tx).await.map_err(server_err)?;
         sqlx::query(
             "INSERT INTO activity (occurred_at, module, doc_id, summary, status)
-             VALUES (?1, 'FIT', ?2, ?3, ?4)"
+             VALUES (?1, 'FIT', ?2, ?3, ?4)",
         )
-        .bind(occurred).bind(&doc_id).bind(&kind).bind(&strain_norm)
-        .execute(&mut *tx).await.map_err(server_err)?;
+        .bind(occurred)
+        .bind(&doc_id)
+        .bind(&kind)
+        .bind(&strain_norm)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
         tx.commit().await.map_err(server_err)?;
         Ok(Workout {
-            doc_id, occurred_at: occurred, kind, program: program_opt,
-            duration_m, load_text: load_opt, strain: Some(strain_norm),
-            rpe: None, notes: None,
+            doc_id,
+            occurred_at: occurred,
+            kind,
+            program: program_opt,
+            duration_m,
+            load_text: load_opt,
+            strain: Some(strain_norm),
+            rpe: None,
+            notes: None,
         })
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }
 
 #[server(DeleteWorkout, "/api/_internal/fit", "Url", "delete_workout")]
@@ -338,12 +438,20 @@ pub async fn delete_workout(doc_id: String) -> Result<(), ServerFnError> {
         let st: ep_core::AppState = expect_context();
         let mut tx = st.db.begin().await.map_err(server_err)?;
         sqlx::query("DELETE FROM fit_workout WHERE doc_id = ?1")
-            .bind(&doc_id).execute(&mut *tx).await.map_err(server_err)?;
+            .bind(&doc_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
         sqlx::query("DELETE FROM activity WHERE module = 'FIT' AND doc_id = ?1")
-            .bind(&doc_id).execute(&mut *tx).await.map_err(server_err)?;
+            .bind(&doc_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
         tx.commit().await.map_err(server_err)?;
         Ok(())
     }
     #[cfg(not(feature = "ssr"))]
-    { Err(server_err("ssr-only")) }
+    {
+        Err(server_err("ssr-only"))
+    }
 }

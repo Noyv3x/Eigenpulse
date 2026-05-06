@@ -1,5 +1,5 @@
 pub mod dashboard;
-pub mod today;
+pub mod notifications;
 pub mod reports;
 pub mod settings;
-pub mod notifications;
+pub mod today;

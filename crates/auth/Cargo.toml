@@ -36,3 +36,11 @@ hex         = { workspace = true, optional = true }
 tracing     = { workspace = true, optional = true }
 leptos      = { workspace = true, optional = true }
 leptos_axum = { workspace = true, optional = true }
+
+# Examples are SSR-only utilities (use tokio / sqlx / ep_db / hash_password / purge_all_sessions —
+# all gated #[cfg(feature = "ssr")] in this crate). Without `required-features`, a default-feature
+# `cargo check --workspace` tries to compile them and fails E0433/E0282. The eigenpulse `[[bin]]`
+# uses the same mechanism (app/Cargo.toml).
+[[example]]
+name              = "reset_password"
+required-features = ["ssr"]

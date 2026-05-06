@@ -11,11 +11,17 @@ pub struct AppState {
 
 // axum FromRef impls so handlers can extract sub-states via State<...>
 impl axum::extract::FromRef<AppState> for SqlitePool {
-    fn from_ref(s: &AppState) -> Self { s.db.clone() }
+    fn from_ref(s: &AppState) -> Self {
+        s.db.clone()
+    }
 }
 impl axum::extract::FromRef<AppState> for cookie::Key {
-    fn from_ref(s: &AppState) -> Self { s.cookie_key.clone() }
+    fn from_ref(s: &AppState) -> Self {
+        s.cookie_key.clone()
+    }
 }
 impl axum::extract::FromRef<AppState> for leptos::config::LeptosOptions {
-    fn from_ref(s: &AppState) -> Self { s.leptos_options.clone() }
+    fn from_ref(s: &AppState) -> Self {
+        s.leptos_options.clone()
+    }
 }

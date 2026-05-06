@@ -5,7 +5,8 @@ pub mod security;
 // module crates. Re-export so existing `super::server_err` paths still resolve.
 pub use ep_core::server_err;
 
-use ep_ui::tweaks::{Density, TweakState, use_tweaks};
+use ep_i18n::{t, use_locale};
+use ep_ui::tweaks::{use_tweaks, Density, TweakState};
 use ep_ui::{Card, PageHead, StatRow};
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -13,47 +14,48 @@ use leptos_router::components::A;
 #[component]
 pub fn SettingsIndex() -> impl IntoView {
     let tweaks = use_tweaks();
+    let locale = use_locale();
     view! {
         <div class="view">
             <PageHead
                 code="CFG-01"
-                module="SETTINGS · 系统设置"
+                module=t(locale, "app.settings.index.page.module")
                 title="Settings"
-                title_cn="系统设置"
+                title_cn=t(locale, "app.settings.index.page.title_cn")
             />
             <div class="grid-2">
-                <Card title="账户 & 身份" code="CFG-ACC">
+                <Card title=t(locale, "app.settings.index.account_card.title") code="CFG-ACC">
                     <div class="vstack" style="gap:0">
-                        <StatRow label="用户" value="Leo Chen · UID-0001".to_string()/>
-                        <StatRow label="角色" value="OWNER".to_string()/>
-                        <StatRow label="数据条数" value="—".to_string()/>
+                        <StatRow label=t(locale, "app.settings.index.user") value="Leo Chen · UID-0001".to_string()/>
+                        <StatRow label=t(locale, "app.settings.index.role") value="OWNER".to_string()/>
+                        <StatRow label=t(locale, "app.settings.index.data_count") value="—".to_string()/>
                     </div>
                 </Card>
-                <Card title="数据 & 同步" code="CFG-DATA">
+                <Card title=t(locale, "app.settings.index.data_card.title") code="CFG-DATA">
                     <div class="vstack" style="gap:0">
-                        <StatRow label="本地存储" value="data/eigenpulse.db".to_string()/>
-                        <StatRow label="上次备份" value="尚未配置".to_string()/>
-                        <StatRow label="同步状态" value="本地".to_string()/>
+                        <StatRow label=t(locale, "app.settings.index.data_card.storage") value="data/eigenpulse.db".to_string()/>
+                        <StatRow label=t(locale, "app.settings.index.data_card.backup") value=t(locale, "app.settings.index.unconfigured").to_string()/>
+                        <StatRow label=t(locale, "app.settings.index.data_card.sync") value=t(locale, "app.settings.index.data_card.local").to_string()/>
                     </div>
                 </Card>
-                <Card title="通知 · 通道" code="CFG-NOT" sub="SMTP / Bark / Telegram / Discord">
-                    <p class="muted">"在 " <A href="/settings/notifications">"通道管理"</A> " 中配置外部推送。"</p>
+                <Card title=t(locale, "app.settings.index.notify_card.title") code="CFG-NOT" sub="SMTP / Bark / Telegram / Discord">
+                    <p class="muted">{t(locale, "app.settings.index.notify_card.hint_a")} " " <A href="/settings/notifications">{t(locale, "app.settings.index.notify_card.link")}</A> " " {t(locale, "app.settings.index.notify_card.hint_b")}</p>
                 </Card>
-                <Card title="API · Personal Access Tokens" code="CFG-SEC" sub="/api/v1/* 端点鉴权">
-                    <p class="muted">"在 " <A href="/settings/security">"安全管理"</A> " 中生成 PAT。"</p>
+                <Card title=t(locale, "app.settings.index.api_card.title") code="CFG-SEC" sub=t(locale, "app.settings.index.api_card.sub")>
+                    <p class="muted">{t(locale, "app.settings.index.api_card.hint_a")} " " <A href="/settings/security">{t(locale, "app.settings.index.api_card.link")}</A> " " {t(locale, "app.settings.index.api_card.hint_b")}</p>
                 </Card>
-                <Card title="外观 · 显示密度" code="CFG-UI" sub="主题切换在右上角图标">
+                <Card title=t(locale, "app.settings.index.ui_card.title") code="CFG-UI" sub=t(locale, "app.settings.index.ui_card.sub")>
                     <div class="tweak-row">
-                        <label>"密度 · DENSITY"</label>
+                        <label>{t(locale, "app.settings.index.density_label")}</label>
                         <div class="seg">
                             <button
                                 class=move || if tweaks.get().density == Density::Comfortable { "on" } else { "" }
                                 on:click=move |_| tweaks.update(|v: &mut TweakState| v.density = Density::Comfortable)
-                            >"宽松"</button>
+                            >{t(locale, "app.settings.index.density_comfortable")}</button>
                             <button
                                 class=move || if tweaks.get().density == Density::Compact { "on" } else { "" }
                                 on:click=move |_| tweaks.update(|v: &mut TweakState| v.density = Density::Compact)
-                            >"紧凑"</button>
+                            >{t(locale, "app.settings.index.density_compact")}</button>
                         </div>
                     </div>
                 </Card>

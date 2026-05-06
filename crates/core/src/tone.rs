@@ -26,8 +26,8 @@ impl Tone {
         match s {
             "green" => Self::Green,
             "amber" => Self::Amber,
-            "rose"  => Self::Rose,
-            "blue"  => Self::Blue,
+            "rose" => Self::Rose,
+            "blue" => Self::Blue,
             "violet" => Self::Violet,
             _ => Self::None,
         }

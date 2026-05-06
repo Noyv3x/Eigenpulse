@@ -48,7 +48,9 @@ fn base62_encode(bytes: &[u8]) -> String {
     let mut out = String::new();
     for chunk in bytes.chunks(2) {
         let mut v: u32 = 0;
-        for b in chunk { v = (v << 8) | (*b as u32); }
+        for b in chunk {
+            v = (v << 8) | (*b as u32);
+        }
         for _ in 0..3 {
             out.push(ALPHABET[(v % 62) as usize] as char);
             v /= 62;
@@ -69,7 +71,7 @@ pub async fn generate_pat(
     let scopes_s = scopes.join(" ");
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO pat (name, prefix, hash, scopes, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id"
+         VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
     )
     .bind(name)
     .bind(&prefix)
@@ -79,31 +81,56 @@ pub async fn generate_pat(
     .fetch_one(pool)
     .await?;
     let row = PatRow {
-        id, name: name.into(), prefix, scopes: scopes_s,
+        id,
+        name: name.into(),
+        prefix,
+        scopes: scopes_s,
         created_at: OffsetDateTime::now_utc().unix_timestamp(),
-        expires_at, last_used_at: None, revoked_at: None,
+        expires_at,
+        last_used_at: None,
+        revoked_at: None,
     };
     Ok((token, row))
 }
 
 pub async fn list_pats(pool: &SqlitePool) -> anyhow::Result<Vec<PatRow>> {
-    let rows: Vec<(i64, String, String, String, i64, Option<i64>, Option<i64>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT id, name, prefix, scopes, created_at, expires_at, last_used_at, revoked_at
-               FROM pat ORDER BY revoked_at IS NOT NULL, created_at DESC"
-        )
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(|r| PatRow {
-        id: r.0, name: r.1, prefix: r.2, scopes: r.3,
-        created_at: r.4, expires_at: r.5, last_used_at: r.6, revoked_at: r.7,
-    }).collect())
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT id, name, prefix, scopes, created_at, expires_at, last_used_at, revoked_at
+               FROM pat ORDER BY revoked_at IS NOT NULL, created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| PatRow {
+            id: r.0,
+            name: r.1,
+            prefix: r.2,
+            scopes: r.3,
+            created_at: r.4,
+            expires_at: r.5,
+            last_used_at: r.6,
+            revoked_at: r.7,
+        })
+        .collect())
 }
 
 pub async fn revoke_pat(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
     let now = OffsetDateTime::now_utc().unix_timestamp();
     sqlx::query("UPDATE pat SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL")
-        .bind(now).bind(id).execute(pool).await?;
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -111,14 +138,13 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
 }
 
-pub async fn require_pat(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_pat(State(state): State<AppState>, req: Request, next: Next) -> Response {
     // Allow unauthenticated /api/v1/healthz
     if req.uri().path().ends_with("/healthz") {
         return next.run(req).await;
@@ -128,23 +154,35 @@ pub async fn require_pat(
         _ => return unauthorized(),
     };
     let h = hash_token(&token);
-    let row: Option<(i64, String, String, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT id, name, scopes, expires_at, revoked_at FROM pat WHERE hash = ?1"
-    )
-    .bind(&h)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-    let Some((id, name, scopes, expires_at, revoked_at)) = row else { return unauthorized() };
-    if revoked_at.is_some() { return unauthorized() }
+    let row: Option<(i64, String, String, Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT id, name, scopes, expires_at, revoked_at FROM pat WHERE hash = ?1")
+            .bind(&h)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let Some((id, name, scopes, expires_at, revoked_at)) = row else {
+        return unauthorized();
+    };
+    if revoked_at.is_some() {
+        return unauthorized();
+    }
     let now = OffsetDateTime::now_utc().unix_timestamp();
-    if expires_at.map(|e| e <= now).unwrap_or(false) { return unauthorized() }
+    if expires_at.map(|e| e <= now).unwrap_or(false) {
+        return unauthorized();
+    }
     let scopes_v: Vec<String> = scopes.split_whitespace().map(|s| s.to_string()).collect();
     let _ = sqlx::query("UPDATE pat SET last_used_at = ?1 WHERE id = ?2")
-        .bind(now).bind(id).execute(&state.db).await;
+        .bind(now)
+        .bind(id)
+        .execute(&state.db)
+        .await;
     let mut req = req;
-    req.extensions_mut().insert(AuthPat { id, name, scopes: scopes_v });
+    req.extensions_mut().insert(AuthPat {
+        id,
+        name,
+        scopes: scopes_v,
+    });
     next.run(req).await
 }
 
@@ -161,6 +199,7 @@ pub fn require_scope(pat: &AuthPat, scope: &str) -> Result<(), Response> {
             StatusCode::FORBIDDEN,
             [(header::CONTENT_TYPE, "application/json")],
             format!(r#"{{"error":{{"code":"forbidden","message":"requires scope: {scope}"}}}}"#),
-        ).into_response())
+        )
+            .into_response())
     }
 }

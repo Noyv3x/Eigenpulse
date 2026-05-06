@@ -1,5 +1,5 @@
-use argon2::password_hash::{PasswordHasher, PasswordVerifier, SaltString, PasswordHash};
-use argon2::{Argon2, Algorithm, Version, Params};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 
 fn hasher() -> Argon2<'static> {
@@ -17,8 +17,8 @@ pub fn hash_password(plain: &str) -> anyhow::Result<String> {
 }
 
 pub fn verify_password(plain: &str, encoded: &str) -> anyhow::Result<bool> {
-    let parsed = PasswordHash::new(encoded)
-        .map_err(|e| anyhow::anyhow!("argon2 parse failed: {e}"))?;
+    let parsed =
+        PasswordHash::new(encoded).map_err(|e| anyhow::anyhow!("argon2 parse failed: {e}"))?;
     Ok(hasher().verify_password(plain.as_bytes(), &parsed).is_ok())
 }
 
@@ -51,7 +51,10 @@ mod tests {
         // must differ (otherwise we have a salt collision or a bug).
         let a = hash_password("same-plain").unwrap();
         let b = hash_password("same-plain").unwrap();
-        assert_ne!(a, b, "same plaintext must produce different hashes (random salt)");
+        assert_ne!(
+            a, b,
+            "same plaintext must produce different hashes (random salt)"
+        );
         assert!(verify_password("same-plain", &a).unwrap());
         assert!(verify_password("same-plain", &b).unwrap());
     }
@@ -64,7 +67,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn hash_verify_async_roundtrip() {
         let h = hash_password_async("test1234".into()).await.unwrap();
-        assert!(verify_password_async("test1234".into(), h.clone()).await.unwrap());
+        assert!(verify_password_async("test1234".into(), h.clone())
+            .await
+            .unwrap());
         assert!(!verify_password_async("nope".into(), h).await.unwrap());
     }
 }

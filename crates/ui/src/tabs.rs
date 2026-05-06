@@ -8,16 +8,20 @@ pub struct TabSpec {
 }
 impl TabSpec {
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { id: id.into(), label: label.into(), count: None }
+        Self {
+            id: id.into(),
+            label: label.into(),
+            count: None,
+        }
     }
-    pub fn with_count(mut self, c: u32) -> Self { self.count = Some(c); self }
+    pub fn with_count(mut self, c: u32) -> Self {
+        self.count = Some(c);
+        self
+    }
 }
 
 #[component]
-pub fn Tabs(
-    tabs: Vec<TabSpec>,
-    active: RwSignal<String>,
-) -> impl IntoView {
+pub fn Tabs(tabs: Vec<TabSpec>, active: RwSignal<String>) -> impl IntoView {
     view! {
         <div class="tabs">
             <For
