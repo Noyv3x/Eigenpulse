@@ -1,7 +1,7 @@
 use crate::model::{Account, Category, Tag, Txn};
 use crate::server_fns::{
-    add_transfer_inner, archive_account_inner, archive_category_inner, create_account_inner,
-    create_category_inner, list_accounts_inner, set_budget_inner, update_account_inner,
+    add_transfer_inner, create_account_inner, create_category_inner, delete_account_inner,
+    delete_category_inner, list_accounts_inner, set_budget_inner, update_account_inner,
     update_category_inner, update_txn_inner, UpdateTxnFields,
 };
 use axum::extract::{Path, Query, State};
@@ -21,11 +21,15 @@ pub fn open_api(_state: AppState) -> Router<AppState> {
         .route("/txn/:doc_id", delete(delete_txn).patch(patch_txn))
         .route("/transfer", post(post_transfer))
         .route("/account", get(list_account).post(post_account))
-        .route("/account/:code", patch(patch_account))
-        .route("/account/:code/archive", post(post_account_archive))
+        .route(
+            "/account/:code",
+            patch(patch_account).delete(delete_account),
+        )
         .route("/category", get(list_category).post(post_category))
-        .route("/category/:code", patch(patch_category))
-        .route("/category/:code/archive", post(post_category_archive))
+        .route(
+            "/category/:code",
+            patch(patch_category).delete(delete_category),
+        )
         .route("/budget", get(list_budget).post(post_budget))
         .route("/budget/:period/:category_code", delete(delete_budget))
 }
@@ -103,11 +107,9 @@ async fn post_txn(
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
             .bind(&input.category_code)
             .fetch_one(&state.db),
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1 AND archived = 0)"
-        )
-        .bind(&input.account_code)
-        .fetch_one(&state.db),
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
+            .bind(&input.account_code)
+            .fetch_one(&state.db),
     )
     .map_err(db_err_response)?;
     if cat_exists == 0 {
@@ -121,7 +123,7 @@ async fn post_txn(
         return Err(error_json(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            &format!("unknown or archived account_code '{}'", input.account_code),
+            &format!("unknown account_code '{}'", input.account_code),
         ));
     }
 
@@ -338,7 +340,7 @@ async fn post_transfer(
     if let Err(r) = require_scope(&pat, "fin:write") {
         return Err(r);
     }
-    // Validation (FK + archived + finite + distinct + non-empty) lives in
+    // Validation (FK + finite + distinct + non-empty) lives in
     // add_transfer_inner, so this handler is just request-shape mapping.
     let occurred_input = input.occurred_at.unwrap_or_default();
     let occurred = crate::server_fns::parse_occurred_at(&state.db, &occurred_input)
@@ -367,22 +369,14 @@ async fn post_transfer(
 // Account routes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct ListAccountQuery {
-    /// Wire form: `0` or `1`. Anything truthy enables archived.
-    include_archived: Option<u8>,
-}
-
 async fn list_account(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Query(q): Query<ListAccountQuery>,
 ) -> Result<Json<Vec<Account>>, Response> {
     if let Err(r) = require_scope(&pat, "fin:read") {
         return Err(r);
     }
-    let include = q.include_archived.unwrap_or(0) != 0;
-    let rows = list_accounts_inner(&state.db, include)
+    let rows = list_accounts_inner(&state.db)
         .await
         .map_err(db_err_response)?;
     Ok(Json(rows))
@@ -467,62 +461,42 @@ async fn patch_account(
     Ok(Json(acc))
 }
 
-#[derive(Debug, Deserialize)]
-struct ArchiveInput {
-    archived: bool,
-}
-
 #[derive(Debug, Serialize)]
-struct ArchiveResult {
+struct AccountDeleted {
     code: String,
-    archived: bool,
 }
 
-async fn post_account_archive(
+async fn delete_account(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
-    Json(input): Json<ArchiveInput>,
-) -> Result<Json<ArchiveResult>, Response> {
+) -> Result<Json<AccountDeleted>, Response> {
     if let Err(r) = require_scope(&pat, "fin:write") {
         return Err(r);
     }
-    archive_account_inner(&state.db, code.clone(), input.archived)
+    delete_account_inner(&state.db, code.clone())
         .await
         .map_err(server_err_to_response)?;
-    Ok(Json(ArchiveResult {
-        code,
-        archived: input.archived,
-    }))
+    Ok(Json(AccountDeleted { code }))
 }
 
 // ---------------------------------------------------------------------------
 // Category routes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct ListCategoryQuery {
-    include_archived: Option<u8>,
-}
-
 async fn list_category(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Query(q): Query<ListCategoryQuery>,
 ) -> Result<Json<Vec<Category>>, Response> {
     if let Err(r) = require_scope(&pat, "fin:read") {
         return Err(r);
     }
-    let include = q.include_archived.unwrap_or(0) != 0;
-    let flag: i64 = if include { 1 } else { 0 };
     type Row = (String, String, String, i64, bool, i64);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT code, name, tone, sort_order, archived, created_at
            FROM fin_category
-          WHERE ?1 = 1 OR archived = 0
           ORDER BY sort_order ASC, code ASC",
     )
-    .bind(flag)
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
@@ -615,22 +589,23 @@ async fn patch_category(
     Ok(Json(cat))
 }
 
-async fn post_category_archive(
+#[derive(Debug, Serialize)]
+struct CategoryDeleted {
+    code: String,
+}
+
+async fn delete_category(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
-    Json(input): Json<ArchiveInput>,
-) -> Result<Json<ArchiveResult>, Response> {
+) -> Result<Json<CategoryDeleted>, Response> {
     if let Err(r) = require_scope(&pat, "fin:write") {
         return Err(r);
     }
-    archive_category_inner(&state.db, code.clone(), input.archived)
+    delete_category_inner(&state.db, code.clone())
         .await
         .map_err(server_err_to_response)?;
-    Ok(Json(ArchiveResult {
-        code,
-        archived: input.archived,
-    }))
+    Ok(Json(CategoryDeleted { code }))
 }
 
 // ---------------------------------------------------------------------------

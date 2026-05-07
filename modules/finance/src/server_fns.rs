@@ -91,17 +91,11 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         );
         type SumRow = (String, f64);
 
-        // Accounts: return all (including archived) — UI filters in dropdowns
-        // and the management Card. Mirrors the categories convention so the
-        // hydrate side has full ground truth without a second fetch.
-        // `liquid_balance` (below) still scopes to archived = 0 because that
-        // KPI semantically excludes parked / closed accounts.
         let accounts_q = sqlx::query_as::<_, AccRow>(
             "SELECT code, name, type, tone, balance, archived, created_at
-               FROM fin_account ORDER BY archived ASC, code",
+               FROM fin_account ORDER BY code",
         )
         .fetch_all(pool);
-        // Categories: return all (including archived) — UI filters in dropdowns.
         let categories_q = sqlx::query_as::<_, CatRow>(
             "SELECT code, name, tone, sort_order, archived, created_at
                FROM fin_category ORDER BY sort_order",
@@ -184,7 +178,7 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         // Liquid balance — the denominator for `emergency_months`.
         let liquid_balance_q = sqlx::query_scalar::<_, f64>(
             "SELECT COALESCE(SUM(CASE WHEN type IN ('Checking','Savings','Cash') THEN balance ELSE 0.0 END), 0.0)
-               FROM fin_account WHERE archived = 0"
+               FROM fin_account"
         ).fetch_one(pool);
 
         // Total fin_txn count for the current month (independent of the
@@ -363,15 +357,7 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             })
             .collect::<Vec<_>>();
 
-        // Net worth excludes archived rows — those are closed/abandoned and
-        // shouldn't pull the figure up or down. Mirrors the comment on
-        // MonthSummary::balance ("Sum of every non-archived account's
-        // current balance.").
-        let balance: f64 = accounts
-            .iter()
-            .filter(|a| !a.archived)
-            .map(|a| a.balance)
-            .sum();
+        let balance: f64 = accounts.iter().map(|a| a.balance).sum();
 
         let budgets: Vec<BudgetEntry> = budget_rows
             .into_iter()
@@ -536,20 +522,16 @@ pub async fn add_txn(
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
                 .bind(&category_code)
                 .fetch_one(pool),
-            sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1 AND archived = 0)"
-            )
-            .bind(&account_code)
-            .fetch_one(pool),
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
+                .bind(&account_code)
+                .fetch_one(pool),
         )
         .map_err(server_err)?;
         if cat_exists == 0 {
             return Err(args_err(format!("unknown category_code '{category_code}'")));
         }
         if acc_exists == 0 {
-            return Err(args_err(format!(
-                "unknown or archived account_code '{account_code}'"
-            )));
+            return Err(args_err(format!("unknown account_code '{account_code}'")));
         }
 
         let occurred = parse_occurred_at(pool, &occurred_at)
@@ -939,23 +921,20 @@ pub async fn update_txn_inner(
         fields.amount.abs()
     };
 
-    // Validate FK / archived constraints. New category may be archived
-    // (allow re-categorizing into an archived bucket); new account must
-    // exist AND not be archived. Sequential because we share one tx —
-    // try_join would alias-borrow the connection.
+    // Validate FK constraints. Sequential because we share one tx — try_join
+    // would alias-borrow the connection.
     let cat_exists: i64 =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
             .bind(&fields.category_code)
             .fetch_one(&mut *tx)
             .await
             .map_err(server_err)?;
-    let acc_ok: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1 AND archived = 0)",
-    )
-    .bind(&fields.account_code)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(server_err)?;
+    let acc_ok: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
+            .bind(&fields.account_code)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(server_err)?;
     if cat_exists == 0 {
         return Err(args_err(format!(
             "unknown category_code '{}'",
@@ -964,7 +943,7 @@ pub async fn update_txn_inner(
     }
     if acc_ok == 0 {
         return Err(args_err(format!(
-            "unknown or archived account_code '{}'",
+            "unknown account_code '{}'",
             fields.account_code
         )));
     }
@@ -1124,8 +1103,8 @@ pub async fn update_txn(
 /// `'TFR'` category. `delete_txn_inner` cascades via the `tfr-pair` links.
 ///
 /// Validates inputs (non-empty / distinct accounts / finite positive amount,
-/// FK + archived check on both accounts and TFR category). Wrappers don't
-/// need to re-validate.
+/// FK check on both accounts and TFR category). Wrappers don't need to
+/// re-validate.
 #[cfg(feature = "ssr")]
 pub async fn add_transfer_inner(
     pool: &SqlitePool,
@@ -1147,31 +1126,21 @@ pub async fn add_transfer_inner(
         return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
     }
     let (from_ok, to_ok, tfr_ok): (i64, i64, i64) = tokio::try_join!(
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1 AND archived = 0)"
-        )
-        .bind(from_account)
-        .fetch_one(pool),
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1 AND archived = 0)"
-        )
-        .bind(to_account)
-        .fetch_one(pool),
-        sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = 'TFR' AND archived = 0)"
-        )
-        .fetch_one(pool),
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
+            .bind(from_account)
+            .fetch_one(pool),
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
+            .bind(to_account)
+            .fetch_one(pool),
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = 'TFR')")
+            .fetch_one(pool),
     )
     .map_err(server_err)?;
     if from_ok == 0 {
-        return Err(args_err(format!(
-            "unknown or archived account_code '{from_account}'"
-        )));
+        return Err(args_err(format!("unknown account_code '{from_account}'")));
     }
     if to_ok == 0 {
-        return Err(args_err(format!(
-            "unknown or archived account_code '{to_account}'"
-        )));
+        return Err(args_err(format!("unknown account_code '{to_account}'")));
     }
     if tfr_ok == 0 {
         return Err(ep_i18n::err("finance.err.tfr_category_missing"));
@@ -1487,34 +1456,29 @@ pub async fn update_account_inner(
 }
 
 #[cfg(feature = "ssr")]
-pub async fn archive_account_inner(
-    pool: &SqlitePool,
-    code: String,
-    archived: bool,
-) -> Result<(), ServerFnError> {
+pub async fn delete_account_inner(pool: &SqlitePool, code: String) -> Result<(), ServerFnError> {
     let code = code.trim().to_string();
     if code.is_empty() {
         return Err(args_err("code is required"));
     }
-    // No-op short-circuit: skip the UPDATE (and the action.version() tick
-    // it triggers via the caller) when the row is already in target state.
-    let res =
-        sqlx::query("UPDATE fin_account SET archived = ?1 WHERE code = ?2 AND archived <> ?1")
-            .bind(archived)
-            .bind(&code)
-            .execute(pool)
-            .await
-            .map_err(server_err)?;
+    let txn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_txn WHERE account_code = ?1")
+        .bind(&code)
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
+    if txn_count > 0 {
+        return Err(ep_i18n::err_with(
+            "finance.err.account_in_use",
+            txn_count.to_string(),
+        ));
+    }
+    let res = sqlx::query("DELETE FROM fin_account WHERE code = ?1")
+        .bind(&code)
+        .execute(pool)
+        .await
+        .map_err(server_err)?;
     if res.rows_affected() == 0 {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
-                .bind(&code)
-                .fetch_one(pool)
-                .await
-                .map_err(server_err)?;
-        if exists == 0 {
-            return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
-        }
+        return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
     }
     Ok(())
 }
@@ -1559,19 +1523,13 @@ pub async fn update_account(
 }
 
 #[cfg(feature = "ssr")]
-pub async fn list_accounts_inner(
-    pool: &SqlitePool,
-    include_archived: bool,
-) -> sqlx::Result<Vec<Account>> {
-    let flag: i64 = if include_archived { 1 } else { 0 };
+pub async fn list_accounts_inner(pool: &SqlitePool) -> sqlx::Result<Vec<Account>> {
     type Row = (String, String, String, String, f64, bool, i64);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT code, name, type, tone, balance, archived, created_at
            FROM fin_account
-          WHERE ?1 = 1 OR archived = 0
-          ORDER BY archived ASC, code ASC",
+          ORDER BY code ASC",
     )
-    .bind(flag)
     .fetch_all(pool)
     .await?;
     Ok(rows
@@ -1589,14 +1547,12 @@ pub async fn list_accounts_inner(
 }
 
 #[server(ListAccounts, "/api/_internal/fin", "Url", "list_accounts")]
-pub async fn list_accounts(include_archived: bool) -> Result<Vec<Account>, ServerFnError> {
+pub async fn list_accounts() -> Result<Vec<Account>, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state: ep_core::AppState = expect_context();
-        list_accounts_inner(&state.db, include_archived)
-            .await
-            .map_err(server_err)
+        list_accounts_inner(&state.db).await.map_err(server_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -1604,13 +1560,13 @@ pub async fn list_accounts(include_archived: bool) -> Result<Vec<Account>, Serve
     }
 }
 
-#[server(ArchiveAccount, "/api/_internal/fin", "Url", "archive_account")]
-pub async fn archive_account(code: String, archived: bool) -> Result<(), ServerFnError> {
+#[server(DeleteAccount, "/api/_internal/fin", "Url", "delete_account")]
+pub async fn delete_account(code: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state: ep_core::AppState = expect_context();
-        archive_account_inner(&state.db, code, archived).await
+        delete_account_inner(&state.db, code).await
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -1734,33 +1690,38 @@ pub async fn update_category_inner(
 }
 
 #[cfg(feature = "ssr")]
-pub async fn archive_category_inner(
-    pool: &SqlitePool,
-    code: String,
-    archived: bool,
-) -> Result<(), ServerFnError> {
+pub async fn delete_category_inner(pool: &SqlitePool, code: String) -> Result<(), ServerFnError> {
     let code = code.trim().to_string();
     if code.is_empty() {
         return Err(args_err("code is required"));
     }
-    let res =
-        sqlx::query("UPDATE fin_category SET archived = ?1 WHERE code = ?2 AND archived <> ?1")
-            .bind(archived)
+    let txn_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM fin_txn WHERE category_code = ?1")
             .bind(&code)
-            .execute(pool)
+            .fetch_one(pool)
             .await
             .map_err(server_err)?;
-    if res.rows_affected() == 0 {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
-                .bind(&code)
-                .fetch_one(pool)
-                .await
-                .map_err(server_err)?;
-        if exists == 0 {
-            return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
-        }
+    if txn_count > 0 {
+        return Err(ep_i18n::err_with(
+            "finance.err.category_in_use",
+            txn_count.to_string(),
+        ));
     }
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    sqlx::query("DELETE FROM fin_budget WHERE category_code = ?1")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    let res = sqlx::query("DELETE FROM fin_category WHERE code = ?1")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    if res.rows_affected() == 0 {
+        return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
+    }
+    tx.commit().await.map_err(server_err)?;
     Ok(())
 }
 
@@ -1802,13 +1763,13 @@ pub async fn update_category(
     }
 }
 
-#[server(ArchiveCategory, "/api/_internal/fin", "Url", "archive_category")]
-pub async fn archive_category(code: String, archived: bool) -> Result<(), ServerFnError> {
+#[server(DeleteCategory, "/api/_internal/fin", "Url", "delete_category")]
+pub async fn delete_category(code: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state: ep_core::AppState = expect_context();
-        archive_category_inner(&state.db, code, archived).await
+        delete_category_inner(&state.db, code).await
     }
     #[cfg(not(feature = "ssr"))]
     {

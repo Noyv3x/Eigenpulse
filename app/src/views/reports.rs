@@ -18,7 +18,7 @@ pub struct ReportsData {
     /// Reuses the finance `CategorySummary` shape — same fields, same
     /// pct=value/total*100 normalization, just a wider time window.
     pub category_30d: Vec<CategorySummary>,
-    /// All non-archived accounts with current balance, paired with their
+    /// All accounts with current balance, paired with their
     /// share of the total positive balance (rendered as the per-account
     /// Ring fill). Vec stays parallel to `accounts` by index.
     pub accounts: Vec<Account>,
@@ -72,7 +72,7 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         type AccRow = (String, String, String, String, f64);
         let accounts_q = sqlx::query_as::<_, AccRow>(
             "SELECT code, name, type, tone, balance
-               FROM fin_account WHERE archived = 0 ORDER BY code",
+               FROM fin_account ORDER BY code",
         )
         .fetch_all(pool);
 
@@ -157,8 +157,7 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         let accounts: Vec<Account> = acc_rows
             .into_iter()
             .map(|(code, name, r#type, tone, balance)| {
-                // Reports view scope: only non-archived accounts (WHERE archived = 0)
-                // and `created_at` is not rendered here; safe defaults.
+                // `created_at` is not rendered here; safe defaults.
                 Account {
                     code,
                     name,

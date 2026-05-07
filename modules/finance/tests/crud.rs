@@ -39,7 +39,7 @@ async fn make_test_pool() -> anyhow::Result<SqlitePool> {
     //    module_link, activity, notification, …) — the global migrator.
     ep_db::CORE_MIGRATOR.run(&pool).await?;
 
-    // 2. Finance module migrations (001_finance + 002_finance_crud) — applied
+    // 2. Finance module migrations — applied
     //    via the same idempotent ledger code-path that production uses.
     //    We call `MODULE.migrations()` directly rather than building a full
     //    `ModuleRegistry` because the registry pulls in axum + the rest of
@@ -142,8 +142,8 @@ fn strip_line_comments(sql: &str) -> String {
 }
 
 /// Insert one `fin_account` row at the given starting balance, returning
-/// nothing — call-sites assert on `fetch_balance` post-state. `archived = 0`,
-/// `tone = ''` mirror the seed defaults.
+/// nothing — call-sites assert on `fetch_balance` post-state. `tone = ''`
+/// mirrors the seed defaults.
 async fn seed_account(pool: &SqlitePool, code: &str, balance: f64) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO fin_account (code, name, type, tone, balance, archived) \
@@ -229,7 +229,7 @@ async fn pool_helper_applies_finance_migrations() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 2, "expected both finance migrations to be ledgered");
+    assert_eq!(n, 3, "expected all finance migrations to be ledgered");
 }
 
 /// Idempotency: running the migrations a second time should be a no-op,
@@ -241,13 +241,13 @@ async fn pool_helper_is_idempotent_on_double_apply() {
     apply_module_migrations(&pool, ep_finance::MODULE)
         .await
         .expect("second apply must be no-op");
-    // Still exactly two ledger rows.
+    // Still exactly three ledger rows.
     let n: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 2);
+    assert_eq!(n, 3);
 }
 
 /// `seed_account` + `fetch_balance` round-trip. Cheap fixture-helper test
@@ -260,6 +260,77 @@ async fn fixture_helpers_round_trip() {
     assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(100.0));
     assert_eq!(fetch_balance(&pool, "ACC-MISSING").await.unwrap(), None);
     assert_eq!(count_txns(&pool).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn delete_unused_account_removes_row() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-DEL", 12.0).await.unwrap();
+
+    ep_finance::delete_account_inner(&pool, "ACC-DEL".into())
+        .await
+        .expect("delete unused account");
+
+    assert_eq!(fetch_balance(&pool, "ACC-DEL").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn delete_account_rejects_rows_with_transactions() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-BUSY", 0.0).await.unwrap();
+    seed_category(&pool, "EXP", "Expense").await.unwrap();
+    seed_txn_directly(&pool, "FIN-DEL-A", "ACC-BUSY", "EXP", -8.0, "exp")
+        .await
+        .unwrap();
+
+    let res = ep_finance::delete_account_inner(&pool, "ACC-BUSY".into()).await;
+    assert!(res.is_err(), "account with txns must not be deleted");
+    assert_eq!(fetch_balance(&pool, "ACC-BUSY").await.unwrap(), Some(-8.0));
+}
+
+#[tokio::test]
+async fn delete_unused_category_removes_budgets_too() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_category(&pool, "CAT", "Category").await.unwrap();
+    ep_finance::set_budget_inner(&pool, "2026-05", "CAT", 500.0)
+        .await
+        .expect("budget");
+
+    ep_finance::delete_category_inner(&pool, "CAT".into())
+        .await
+        .expect("delete unused category");
+
+    let cat_exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = 'CAT')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let budget_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM fin_budget WHERE category_code = 'CAT'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(cat_exists, 0);
+    assert_eq!(budget_count, 0);
+}
+
+#[tokio::test]
+async fn delete_category_rejects_rows_with_transactions() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-CAT", 0.0).await.unwrap();
+    seed_category(&pool, "CAT", "Category").await.unwrap();
+    seed_txn_directly(&pool, "FIN-DEL-C", "ACC-CAT", "CAT", -8.0, "exp")
+        .await
+        .unwrap();
+
+    let res = ep_finance::delete_category_inner(&pool, "CAT".into()).await;
+    assert!(res.is_err(), "category with txns must not be deleted");
+    let cat_exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = 'CAT')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(cat_exists, 1);
 }
 
 // parse_occurred_at three-state: empty / valid / malformed.

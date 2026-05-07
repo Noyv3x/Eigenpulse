@@ -51,6 +51,10 @@ mod ssr_module {
                     "002_finance_crud",
                     include_str!("../migrations/002_finance_crud.sql"),
                 ),
+                (
+                    "003_finance_remove_archive_usage",
+                    include_str!("../migrations/003_finance_remove_archive_usage.sql"),
+                ),
             ]
         }
 

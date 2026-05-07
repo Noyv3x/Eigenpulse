@@ -105,7 +105,7 @@ pub struct MonthSummary {
     pub expense: f64,
     /// `income - expense` for the current month.
     pub savings: f64,
-    /// Sum of every non-archived account's current balance.
+    /// Sum of every account's current balance.
     pub balance: f64,
     /// Net (`income - expense`) over the last 7 days. Signed.
     pub balance_delta: f64,

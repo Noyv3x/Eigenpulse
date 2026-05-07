@@ -36,10 +36,10 @@ pub fn FinanceView() -> impl IntoView {
     let import_budgets = ServerAction::<ImportBudgetsFrom>::new();
     let create_account = ServerAction::<CreateAccount>::new();
     let update_account = ServerAction::<UpdateAccount>::new();
-    let archive_account = ServerAction::<ArchiveAccount>::new();
+    let delete_account = ServerAction::<DeleteAccount>::new();
     let create_category = ServerAction::<CreateCategory>::new();
     let update_category = ServerAction::<UpdateCategory>::new();
-    let archive_category = ServerAction::<ArchiveCategory>::new();
+    let delete_category = ServerAction::<DeleteCategory>::new();
     let update_txn = ServerAction::<UpdateTxn>::new();
     let add_transfer = ServerAction::<AddTransfer>::new();
     let txn_modal_open = RwSignal::new(false);
@@ -59,10 +59,10 @@ pub fn FinanceView() -> impl IntoView {
             import_budgets.version().get(),
             create_account.version().get(),
             update_account.version().get(),
-            archive_account.version().get(),
+            delete_account.version().get(),
             create_category.version().get(),
             update_category.version().get(),
-            archive_category.version().get(),
+            delete_category.version().get(),
             update_txn.version().get(),
             add_transfer.version().get(),
         ];
@@ -97,8 +97,8 @@ pub fn FinanceView() -> impl IntoView {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {fmt_server_err(&e)}</div></div> }.into_any(),
                     Ok(data) => render_ledger(
                         data, active, add, delete, set_budget, import_budgets,
-                        create_account, update_account, archive_account,
-                        create_category, update_category, archive_category,
+                        create_account, update_account, delete_account,
+                        create_category, update_category, delete_category,
                         update_txn, add_transfer,
                         txn_modal_open, txn_modal_mode,
                         merchant_filter, category_filter, date_from_filter, date_to_filter,
@@ -119,10 +119,10 @@ fn render_ledger(
     import_budgets: ServerAction<ImportBudgetsFrom>,
     create_account: ServerAction<CreateAccount>,
     update_account: ServerAction<UpdateAccount>,
-    archive_account: ServerAction<ArchiveAccount>,
+    delete_account: ServerAction<DeleteAccount>,
     create_category: ServerAction<CreateCategory>,
     update_category: ServerAction<UpdateCategory>,
-    archive_category: ServerAction<ArchiveCategory>,
+    delete_category: ServerAction<DeleteCategory>,
     update_txn: ServerAction<UpdateTxn>,
     add_transfer: ServerAction<AddTransfer>,
     txn_modal_open: RwSignal<bool>,
@@ -174,14 +174,9 @@ fn render_ledger(
     // Tab badge reflects visible rows (LIMIT 50, not month-scoped); the
     // month aggregate goes in the card sub-label.
     let txns_count = data.txns.len() as u32;
-    // load_ledger now ships archived accounts too (for the management Card
-    // unarchive affordance) — count only active for the tab badge.
-    let accounts_count = data.accounts.iter().filter(|a| !a.archived).count() as u32;
+    let accounts_count = data.accounts.len() as u32;
     let budgets_count = data.budgets.len() as u32;
-    // Categories badge counts only active rows — archived ones still ship
-    // (so historical txns can pick up their tone) but they don't drive the
-    // count.
-    let categories_count = data.categories.iter().filter(|c| !c.archived).count() as u32;
+    let categories_count = data.categories.len() as u32;
 
     let banner = render_banner(&data);
     // Pre-compute attribute strings — the `view!` macro rejects bare if/else
@@ -270,8 +265,8 @@ fn render_ledger(
         <Tabs tabs=tabs active=active/>
         {move || match active.get().as_str() {
             "budget" => render_budget(&data_for_budget, set_budget, import_budgets).into_any(),
-            "accounts" => render_accounts(&data_for_accounts, create_account, update_account, archive_account).into_any(),
-            "categories" => render_categories(&data_for_categories, create_category, update_category, archive_category).into_any(),
+            "accounts" => render_accounts(&data_for_accounts, create_account, update_account, delete_account).into_any(),
+            "categories" => render_categories(&data_for_categories, create_category, update_category, delete_category).into_any(),
             "reports" => render_reports(&data_for_reports).into_any(),
             _ => view! {
                 {render_txn_modal(
@@ -453,7 +448,7 @@ fn render_new_txn_form(
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
                         <select name="category_code" style=INPUT_STYLE>
-                            {categories.into_iter().filter(|c| !c.archived).enumerate().map(|(i, c)| {
+                            {categories.into_iter().enumerate().map(|(i, c)| {
                                 let code = c.code.clone();
                                 let label = format!("{} {}", c.name, c.code);
                                 view! { <option value=code selected={i == 0}>{label}</option> }
@@ -463,7 +458,7 @@ fn render_new_txn_form(
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.account")}</span>
                         <select name="account_code" style=INPUT_STYLE>
-                            {accounts.into_iter().filter(|a| !a.archived).enumerate().map(|(i, a)| {
+                            {accounts.into_iter().enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
                                 let label = format!("{} · {}", a.code, a.name);
                                 view! { <option value=code selected={i == 0}>{label}</option> }
@@ -505,7 +500,7 @@ fn render_transfer_form(
     accounts: Vec<Account>,
 ) -> impl IntoView {
     let locale = use_locale();
-    let active_accounts: Vec<Account> = accounts.into_iter().filter(|a| !a.archived).collect();
+    let active_accounts: Vec<Account> = accounts;
     let from_accounts = active_accounts.clone();
     let to_accounts = active_accounts;
     view! {
@@ -803,8 +798,7 @@ fn render_txn_row(
 
     // Category cell renders the transfer pill on tfr rows so the user sees
     // why the edit affordance is suppressed; non-tfr rows keep the existing
-    // category Tag (toned via cat_lookup, including archived ones for
-    // historical accuracy — E5).
+    // category Tag toned via cat_lookup.
     let cat_cell = if is_tfr {
         view! { <UiTag tone=Tone::Blue>{ep_i18n::t(locale, "finance.tag.transfer")}</UiTag> }
             .into_any()
@@ -853,10 +847,8 @@ fn render_txn_row(
     let edit_sub_merchant = t.merchant.clone();
     let cat_opts = cat_options.to_vec();
     let acc_opts = acc_options.to_vec();
-    // Edit dropdowns hide archived rows (the row's existing code stays
-    // selected via the value=, but you can't re-pick an archived one).
-    let cat_opts_active: Vec<Category> = cat_opts.iter().filter(|c| !c.archived).cloned().collect();
-    let acc_opts_active: Vec<Account> = acc_opts.iter().filter(|a| !a.archived).cloned().collect();
+    let cat_opts_active: Vec<Category> = cat_opts;
+    let acc_opts_active: Vec<Account> = acc_opts;
 
     let edit_form = if is_tfr {
         view! { <span></span> }.into_any()
@@ -1108,6 +1100,14 @@ fn render_budget(
                                                 else { format!("var(--{})", tone) };
                                 let pct_class = if pct > 100 { "amt-neg" } else { "dim" };
                                 let bar_width = (pct as i64).clamp(0, 100);
+                                let edit_period = period.clone();
+                                let edit_category = b.category_code.clone();
+                                let delete_period = period.clone();
+                                let delete_category = b.category_code.clone();
+                                let row_amount = format!("{:.2}", b.amount);
+                                let row_action = set_budget.clone();
+                                let delete_action = set_budget.clone();
+                                let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("code", &b.category_code)]);
                                 view! {
                                     <div>
                                         <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
@@ -1121,6 +1121,28 @@ fn render_budget(
                                             </div>
                                         </div>
                                         <div class="bar thick"><span style=format!("width:{}%;background:{}", bar_width, bar_color)></span></div>
+                                        <div class="hstack" style="gap:8px;margin-top:8px;justify-content:flex-end;flex-wrap:wrap">
+                                            <ActionForm action=row_action attr:class="hstack" attr:style="gap:6px;align-items:center">
+                                                <input type="hidden" name="period" value=edit_period/>
+                                                <input type="hidden" name="category_code" value=edit_category/>
+                                                <input name="amount" type="number" step="50" min="0.01"
+                                                       value=row_amount
+                                                       style=format!("width:110px;{}", INPUT_STYLE_MONO)/>
+                                                <button class="btn sm" type="submit">
+                                                    <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
+                                                </button>
+                                            </ActionForm>
+                                            <ActionForm action=delete_action attr:style="display:inline">
+                                                <input type="hidden" name="period" value=delete_period/>
+                                                <input type="hidden" name="category_code" value=delete_category/>
+                                                <input type="hidden" name="amount" value="0"/>
+                                                <button class="btn sm" type="submit"
+                                                        style="color:var(--rose-ink)"
+                                                        onclick=format!("return confirm('{}')", delete_confirm)>
+                                                    {t(locale, "finance.action.delete")}
+                                                </button>
+                                            </ActionForm>
+                                        </div>
                                     </div>
                                 }
                             }).collect_view()}
@@ -1158,7 +1180,7 @@ fn render_budget(
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
                                 <select name="category_code" style=INPUT_STYLE>
-                                    {categories_for_form.into_iter().filter(|c| !c.archived).map(|c| {
+                                    {categories_for_form.into_iter().map(|c| {
                                         let code = c.code.clone();
                                         let label = format!("{} {}", c.name, c.code);
                                         view! { <option value=code>{label}</option> }
@@ -1244,47 +1266,26 @@ fn render_accounts(
     d: &LedgerData,
     create_account: ServerAction<CreateAccount>,
     update_account: ServerAction<UpdateAccount>,
-    archive_account: ServerAction<ArchiveAccount>,
+    delete_account: ServerAction<DeleteAccount>,
 ) -> impl IntoView {
-    // load_ledger now ships archived accounts too. Split here so the main
-    // grid stays clean while the management Card still surfaces archived
-    // rows for unarchive (Categories-tab parity).
     let pairs: Vec<(Account, AccountStats)> = d
         .accounts
         .iter()
         .cloned()
         .zip(d.account_stats.iter().cloned())
         .collect();
-    let active_pairs: Vec<(Account, AccountStats)> =
-        pairs.iter().filter(|(a, _)| !a.archived).cloned().collect();
-    let archived_accounts: Vec<Account> = pairs
-        .iter()
-        .filter(|(a, _)| a.archived)
-        .map(|(a, _)| a.clone())
-        .collect();
     view! {
-        {render_account_manager(create_account, archived_accounts, archive_account)}
+        {render_account_manager(create_account)}
         <div class="grid-3" style="margin-top:20px">
-            {active_pairs.into_iter().map(|(a, s)| {
-                render_account_card(a, s, update_account, archive_account)
+            {pairs.into_iter().map(|(a, s)| {
+                render_account_card(a, s, update_account, delete_account)
             }).collect_view()}
         </div>
     }
 }
 
-/// Account management card: create form plus archived recovery section.
-fn render_account_manager(
-    create_account: ServerAction<CreateAccount>,
-    archived_accounts: Vec<Account>,
-    archive_account: ServerAction<ArchiveAccount>,
-) -> impl IntoView {
+fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl IntoView {
     let locale = use_locale();
-    let archived_count = archived_accounts.len();
-    let archived_summary = tf(
-        locale,
-        "finance.account.archived_count",
-        &[("count", &archived_count.to_string())],
-    );
     view! {
         <Card title=t(locale, "finance.account.manager.title") code="FIN-ACC-MGR" sub=t(locale, "finance.account.manager.sub")>
             <details>
@@ -1340,59 +1341,16 @@ fn render_account_manager(
                     </div>
                 </ActionForm>
             </details>
-            {(archived_count > 0).then(|| view! {
-                <details style="margin-top:12px;padding-top:12px;border-top:1px dashed var(--border)">
-                    <summary class="mono dim" style="cursor:pointer;font-size:11px;text-transform:uppercase;letter-spacing:0.06em">
-                        {archived_summary}
-                    </summary>
-                    <div class="vstack" style="gap:8px;margin-top:10px">
-                        {archived_accounts.into_iter().map(|a| render_archived_account_row(a, archive_account)).collect_view()}
-                    </div>
-                </details>
-            })}
         </Card>
     }
 }
 
-/// One row in the archived section: code + name + unarchive button. Lighter
-/// than the main account card — the user's primary task here is recovering
-/// from an accidental archive, not editing.
-fn render_archived_account_row(
-    a: Account,
-    archive_account: ServerAction<ArchiveAccount>,
-) -> impl IntoView {
-    let locale = use_locale();
-    let confirm_msg = tf(
-        locale,
-        "finance.account.confirm_unarchive",
-        &[("code", &a.code)],
-    );
-    let onclick = format!("return confirm('{}')", confirm_msg);
-    let code_for_form = a.code.clone();
-    let display_code = a.code.clone();
-    let display_name = a.name.clone();
-    let display_type = a.r#type.clone();
-    let balance_text = format!("¥{}", fmt_money(a.balance));
-    view! {
-        <div class="hstack" style="gap:10px;align-items:center;padding:6px 8px;background:var(--bg-2);border-radius:6px">
-            <span class="mono doc" style="min-width:80px">{display_code}</span>
-            <span style="flex:1">{display_name}<span class="mono dim" style="margin-left:6px;font-size:10.5px">{display_type}</span></span>
-            <span class="mono dim" style="font-size:11px">{balance_text}</span>
-            <ActionForm action=archive_account attr:style="display:inline">
-                <input type="hidden" name="code" value=code_for_form/>
-                <input type="hidden" name="archived" value="false"/>
-                <button class="btn sm" type="submit" onclick=onclick>{t(locale, "finance.account.cancel_archive")}</button>
-            </ActionForm>
-        </div>
-    }
-}
-
-/// Single account card with its inline edit form + archive button.
+/// Single account card with its inline edit form + delete button.
 fn render_account_card(
     a: Account,
     s: AccountStats,
     update_account: ServerAction<UpdateAccount>,
-    archive_account: ServerAction<ArchiveAccount>,
+    delete_account: ServerAction<DeleteAccount>,
 ) -> impl IntoView {
     let locale = use_locale();
     let tone = Tone::from_str(&a.tone);
@@ -1404,12 +1362,6 @@ fn render_account_card(
         ),
         None => t(locale, "finance.account.empty_activity").to_string(),
     };
-    let archive_label = if a.archived {
-        t(locale, "finance.account.cancel_archive")
-    } else {
-        t(locale, "finance.account.archive")
-    };
-    let archive_target = if a.archived { "false" } else { "true" };
     // Pre-bake the prefilled values so we never embed a `move ||` closure
     // inside `value=` (CLAUDE.md "Don't put a `move ||`-returning attribute
     // on a child element passed through a prop"). render_accounts re-runs
@@ -1421,13 +1373,11 @@ fn render_account_card(
     let card_title = a.name.clone();
     let card_code = a.code.clone();
     let card_sub = a.r#type.clone();
-    let archive_code = a.code.clone();
     let confirm_msg = tf(
         locale,
-        "finance.account.confirm_archive",
-        &[("action", archive_label), ("code", &a.code)],
+        "finance.account.confirm_delete",
+        &[("code", &a.code)],
     );
-    let onclick = format!("return confirm('{}')", confirm_msg);
     view! {
         <Card title=card_title code=card_code sub=card_sub>
             <div class="mono" style="font-size:24px;font-weight:600;letter-spacing:-0.02em">
@@ -1489,13 +1439,8 @@ fn render_account_card(
                         </div>
                     </ActionForm>
                 </details>
-                <ActionForm action=archive_account attr:style="display:inline">
-                    <input type="hidden" name="code" value=archive_code/>
-                    <input type="hidden" name="archived" value=archive_target/>
-                    <button class="btn ghost" type="submit"
-                            style="color:var(--rose-ink)"
-                            onclick=onclick>{archive_label}</button>
-                </ActionForm>
+                <RowDeleteAction action=delete_account value=a.code.clone() field="code"
+                                 confirm=confirm_msg label=t(locale, "finance.action.delete")/>
             </div>
         </Card>
     }
@@ -1505,7 +1450,7 @@ fn render_categories(
     d: &LedgerData,
     create_category: ServerAction<CreateCategory>,
     update_category: ServerAction<UpdateCategory>,
-    archive_category: ServerAction<ArchiveCategory>,
+    delete_category: ServerAction<DeleteCategory>,
 ) -> impl IntoView {
     let locale = use_locale();
     // Sort by sort_order then code so the management table matches what the
@@ -1572,12 +1517,11 @@ fn render_categories(
                             <th style="width:80px">{t(locale, "finance.field.tone")}</th>
                             <th class="num" style="width:64px">{t(locale, "finance.field.sort_order")}</th>
                             <th class="num" style="width:64px">{t(locale, "finance.field.used")}</th>
-                            <th style="width:64px">{t(locale, "finance.field.archived")}</th>
                             <th class="num" style="width:220px">{t(locale, "finance.field.ops")}</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {cats.into_iter().map(|c| render_category_row(c, &usage, update_category, archive_category)).collect_view()}
+                        {cats.into_iter().map(|c| render_category_row(c, &usage, update_category, delete_category)).collect_view()}
                     </tbody>
                 </table>
             </div>
@@ -1587,32 +1531,21 @@ fn render_categories(
 
 /// Single row of the category management table. Inline edit lives behind a
 /// per-row `<details>` to dodge text-node walker panics around ActionForm
-/// (CLAUDE.md "Wrap inline `{move || option.map(view!)}`…"). The archived
-/// state is round-tripped as a literal `"true"` / `"false"` hidden field —
-/// leptos URL-encoded codec accepts both.
+/// (CLAUDE.md "Wrap inline `{move || option.map(view!)}`…").
 fn render_category_row(
     c: Category,
     usage: &std::collections::HashMap<String, i64>,
     update_category: ServerAction<UpdateCategory>,
-    archive_category: ServerAction<ArchiveCategory>,
+    delete_category: ServerAction<DeleteCategory>,
 ) -> impl IntoView {
     let locale = use_locale();
     let tone_enum = Tone::from_str(&c.tone);
     let usage_count = usage.get(&c.code).copied().unwrap_or(0);
-    let row_class = if c.archived { "row-archived" } else { "" };
-    let archive_label = if c.archived {
-        t(locale, "finance.account.cancel_archive")
-    } else {
-        t(locale, "finance.category.archive")
-    };
-    let archive_target = if c.archived { "false" } else { "true" };
-    let archived_mark = if c.archived { "✓" } else { "" };
     let confirm_msg = tf(
         locale,
-        "finance.category.confirm_archive",
-        &[("action", archive_label), ("code", &c.code)],
+        "finance.category.confirm_delete",
+        &[("code", &c.code)],
     );
-    let onclick = format!("return confirm('{}')", confirm_msg);
     let code = c.code.clone();
     let name = c.name.clone();
     let tone_str = c.tone.clone();
@@ -1624,9 +1557,8 @@ fn render_category_row(
     } else {
         c.tone.clone()
     };
-    let archive_code = c.code.clone();
     view! {
-        <tr class=row_class>
+        <tr>
             <td>{display_name}</td>
             <td class="mono">{display_code}</td>
             <td>
@@ -1634,7 +1566,6 @@ fn render_category_row(
             </td>
             <td class="num mono">{c.sort_order}</td>
             <td class="num mono">{usage_count}</td>
-            <td class="mono dim">{archived_mark}</td>
             <td class="num">
                 <div class="hstack" style="gap:6px;justify-content:flex-end;flex-wrap:wrap">
                     <details>
@@ -1682,13 +1613,8 @@ fn render_category_row(
                             </div>
                         </ActionForm>
                     </details>
-                    <ActionForm action=archive_category attr:style="display:inline">
-                        <input type="hidden" name="code" value=archive_code/>
-                        <input type="hidden" name="archived" value=archive_target/>
-                        <button class="btn sm" type="submit"
-                                style="color:var(--rose-ink)"
-                                onclick=onclick>{archive_label}</button>
-                    </ActionForm>
+                    <RowDeleteAction action=delete_category value=c.code.clone() field="code"
+                                     confirm=confirm_msg label=t(locale, "finance.action.delete")/>
                 </div>
             </td>
         </tr>
