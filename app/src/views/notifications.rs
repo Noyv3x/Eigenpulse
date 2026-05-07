@@ -17,6 +17,19 @@ pub struct NotificationRow {
     pub read: bool,
 }
 
+#[cfg(feature = "ssr")]
+type NotificationQueryRow = (
+    i64,
+    i64,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
+
 #[server(ListNotifications, "/api/_internal/cfg", "Url", "list_notifications")]
 pub async fn list_notifications() -> Result<Vec<NotificationRow>, ServerFnError> {
     #[cfg(feature = "ssr")]
@@ -26,17 +39,7 @@ pub async fn list_notifications() -> Result<Vec<NotificationRow>, ServerFnError>
         }
         ep_auth::require_user_for_server_fn().await?;
         let state: ep_core::AppState = expect_context();
-        let rows: Vec<(
-            i64,
-            i64,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-        )> = sqlx::query_as(
+        let rows: Vec<NotificationQueryRow> = sqlx::query_as(
             "SELECT id, created_at, severity, module, title, body, link, doc_ref, read_at
                    FROM notification ORDER BY created_at DESC LIMIT 100",
         )

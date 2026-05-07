@@ -462,6 +462,10 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Leptos ActionForm fields map to server-fn parameters"
+)]
 #[server(AddTxn, "/api/_internal/fin", "Url", "add_txn")]
 pub async fn add_txn(
     merchant: String,
@@ -1048,6 +1052,10 @@ pub async fn update_txn_inner(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Leptos ActionForm fields map to server-fn parameters"
+)]
 #[server(UpdateTxn, "/api/_internal/fin", "Url", "update_txn")]
 pub async fn update_txn(
     doc_id: String,

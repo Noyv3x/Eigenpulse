@@ -1,4 +1,4 @@
-# Open follow-ups
+# Resolved follow-up archive
 
 ## #26 — settings/* hydration panic (`tachys::hydration::failed_to_cast_text_node`) — resolved
 
@@ -45,11 +45,11 @@ inserted differently in SSR vs. hydrate.
   server-side via `is_expired`/`is_revoked` on `PatDto`).
 - `ChannelDto` config_json leak (separate bug, fixed in `f3a31b9`).
 
-### Candidate fixes (ranked by cost)
+### Chosen Fix
 
-1. **Replace `Option<view!>` with `<Show when=…>` + always-present
-   wrapper.** Wrap each `{move || option.map(view!{…})}` in a stable
-   element that exists in both SSR and hydrate trees:
+The shipped fix is the stable-wrapper pattern: wrap each conditional
+`{move || option.map(view!{…})}` sibling in an element that exists in both
+SSR and hydrate trees:
 
    ```rust
    <span class="form-error-slot">
@@ -57,29 +57,8 @@ inserted differently in SSR vs. hydrate.
    </span>
    ```
 
-   Affects ~3 sites in `notifications.rs` + ~2 in `security.rs`.
-
-2. **Switch the matched-arm view returns from `.into_any()` to
-   `EitherOf3`/`EitherOf4`.** `.into_any()` type-erases each branch
-   independently; the `Either*` enums tell the framework the branches
-   share a slot.
-
-3. **Switch the entire two settings views from `<ActionForm>` to plain
-   `<form method="post" action="/api/_internal/cfg/{op}">` + server fns
-   that issue 303 redirects on success.** No reactive layer, no
-   hydration-time interaction with these pages — the form is purely
-   server-rendered. This loses optimistic UI + inline error display
-   but is bulletproof. Cheapest engineering, regressing functionality.
-
-4. **Upgrade Leptos.** `leptos = 0.7.8` is current latest patch on
-   crates.io. Leptos 0.8 likely improves hydration but is a breaking
-   bump (pre-0.8 → 0.8 needs `view!` updates and possibly Resource API
-   changes). Out of scope for a maintenance fix.
-
-### Recommended path
-
-Option 1 first (cheapest, surgical), then Option 2 if 1 doesn't fully
-silence the panic. Each iteration takes ~60s rebuild + Playwright test.
+This is implemented in `app/src/views/settings/{notifications,security}.rs`
+using `error-slot`, `test-notice-slot`, and `new-token-slot`.
 
 ### Reproduction
 

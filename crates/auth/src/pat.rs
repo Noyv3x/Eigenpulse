@@ -29,6 +29,18 @@ pub struct PatRow {
     pub revoked_at: Option<i64>,
 }
 
+type PatListRow = (
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+type PatAuthRow = (i64, String, String, Option<i64>, Option<i64>);
+
 pub fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
@@ -94,16 +106,7 @@ pub async fn generate_pat(
 }
 
 pub async fn list_pats(pool: &SqlitePool) -> anyhow::Result<Vec<PatRow>> {
-    let rows: Vec<(
-        i64,
-        String,
-        String,
-        String,
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-    )> = sqlx::query_as(
+    let rows: Vec<PatListRow> = sqlx::query_as(
         "SELECT id, name, prefix, scopes, created_at, expires_at, last_used_at, revoked_at
                FROM pat ORDER BY revoked_at IS NOT NULL, created_at DESC",
     )
@@ -154,7 +157,7 @@ pub async fn require_pat(State(state): State<AppState>, req: Request, next: Next
         _ => return unauthorized(),
     };
     let h = hash_token(&token);
-    let row: Option<(i64, String, String, Option<i64>, Option<i64>)> =
+    let row: Option<PatAuthRow> =
         sqlx::query_as("SELECT id, name, scopes, expires_at, revoked_at FROM pat WHERE hash = ?1")
             .bind(&h)
             .fetch_optional(&state.db)
@@ -191,6 +194,10 @@ fn unauthorized() -> Response {
 }
 
 /// Helper for handlers to verify the current request bears a required scope.
+#[allow(
+    clippy::result_large_err,
+    reason = "axum handlers consume Response directly"
+)]
 pub fn require_scope(pat: &AuthPat, scope: &str) -> Result<(), Response> {
     if pat.scopes.iter().any(|s| s == scope || s == "*") {
         Ok(())

@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
             "/pkg",
             tower_http::services::ServeDir::new(format!("{}/pkg", leptos_options.site_root)),
         )
-        .leptos_routes_with_context(&state, leptos_routes, move || provide_state(), {
+        .leptos_routes_with_context(&state, leptos_routes, provide_state, {
             let opts = leptos_options_for_shell.clone();
             move || crate::app::shell(opts.clone())
         })

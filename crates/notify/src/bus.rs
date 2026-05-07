@@ -45,14 +45,20 @@ impl NotifyBusTrait for NotifyBus {
         let _ = self.broadcaster.send(msg.clone());
 
         // 3) Fan-out to enabled channels.
-        let channels: Vec<(i64, String, String, String)> = sqlx::query_as(
+        let channels: Vec<(i64, String, String, String)> = match sqlx::query_as(
             "SELECT id, kind, config_json, min_severity
                FROM notify_channel
               WHERE enabled = 1",
         )
         .fetch_all(&self.db)
         .await
-        .unwrap_or_default();
+        {
+            Ok(channels) => channels,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load notification channels");
+                Vec::new()
+            }
+        };
 
         for (ch_id, kind, cfg, min_sev) in channels {
             let min = Severity::parse(&min_sev);
@@ -64,8 +70,16 @@ impl NotifyBusTrait for NotifyBus {
                 Err(e) => Err(e),
             };
             let ok = result.is_ok();
-            let err = result.err().map(|e| e.to_string());
-            let _ = sqlx::query(
+            let err = result.err().map(|e| {
+                tracing::warn!(
+                    channel_id = ch_id,
+                    kind = %kind,
+                    error = %e,
+                    "notification channel delivery failed"
+                );
+                safe_delivery_error(&kind)
+            });
+            if let Err(e) = sqlx::query(
                 "INSERT INTO notify_delivery (notification_id, channel_id, ok, error)
                  VALUES (?1, ?2, ?3, ?4)",
             )
@@ -74,7 +88,15 @@ impl NotifyBusTrait for NotifyBus {
             .bind(ok as i64)
             .bind(err)
             .execute(&self.db)
-            .await;
+            .await
+            {
+                tracing::warn!(
+                    notification_id = id,
+                    channel_id = ch_id,
+                    error = %e,
+                    "failed to record notification delivery"
+                );
+            }
         }
         Ok(id)
     }
@@ -82,6 +104,14 @@ impl NotifyBusTrait for NotifyBus {
     fn subscribe(&self) -> broadcast::Receiver<NotifyMessage> {
         self.broadcaster.subscribe()
     }
+}
+
+fn safe_delivery_error(kind: &str) -> String {
+    let kind = match kind {
+        "inapp" | "smtp" | "bark" | "telegram" | "discord" => kind,
+        _ => "unknown",
+    };
+    format!("{kind} 通道投递失败 · 详细错误已记录")
 }
 
 pub fn build_notifier(kind: &str, config_json: &str) -> anyhow::Result<Box<dyn Notifier>> {
@@ -95,4 +125,96 @@ pub fn build_notifier(kind: &str, config_json: &str) -> anyhow::Result<Box<dyn N
         "discord" => Box::new(crate::discord::DiscordNotifier::from_value(v)?),
         other => anyhow::bail!("unknown notifier kind: {other}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory sqlite");
+
+        sqlx::query(
+            "CREATE TABLE notification (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                severity TEXT NOT NULL,
+                module TEXT,
+                title TEXT NOT NULL,
+                body TEXT,
+                link TEXT,
+                doc_ref TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create notification table");
+        sqlx::query(
+            "CREATE TABLE notify_channel (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                config_json TEXT NOT NULL,
+                min_severity TEXT NOT NULL DEFAULT 'info'
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create notify_channel table");
+        sqlx::query(
+            "CREATE TABLE notify_delivery (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                notification_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                ok INTEGER NOT NULL,
+                error TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create notify_delivery table");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn dispatch_records_sanitized_delivery_errors() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO notify_channel (kind, name, config_json, min_severity)
+             VALUES ('telegram', 'tg', ?1, 'info')",
+        )
+        .bind(r#"{"bot_token":"SECRET_TOKEN"}"#)
+        .execute(&pool)
+        .await
+        .expect("insert channel");
+
+        let bus = NotifyBus::new(pool.clone());
+        let id = bus
+            .dispatch(NotifyMessage::info("probe"))
+            .await
+            .expect("dispatch notification");
+
+        let row: (i64, String) =
+            sqlx::query_as("SELECT ok, error FROM notify_delivery WHERE notification_id = ?1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("delivery row");
+
+        assert_eq!(row.0, 0);
+        assert_eq!(row.1, "telegram 通道投递失败 · 详细错误已记录");
+        assert!(!row.1.contains("SECRET_TOKEN"));
+    }
+
+    #[test]
+    fn safe_delivery_error_does_not_echo_unknown_kind() {
+        let err = safe_delivery_error("custom-webhook-with-secret-token");
+        assert_eq!(err, "unknown 通道投递失败 · 详细错误已记录");
+    }
 }

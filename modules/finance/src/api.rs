@@ -56,14 +56,24 @@ pub struct TxnDeleted {
     pub doc_id: String,
 }
 
+type TxnListRow = (
+    String,
+    i64,
+    String,
+    String,
+    String,
+    f64,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 async fn post_txn(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
     Json(input): Json<TxnInput>,
 ) -> Result<Json<TxnCreated>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     let merchant = input.merchant.trim().to_string();
     if merchant.is_empty() {
         return Err(error_json(
@@ -190,10 +200,8 @@ async fn list_txn(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Txn>>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:read") {
-        return Err(r);
-    }
-    let rows: Vec<(String, i64, String, String, String, f64, String, Option<String>, Option<String>)> = sqlx::query_as(
+    require_scope(&pat, "fin:read")?;
+    let rows: Vec<TxnListRow> = sqlx::query_as(
         "SELECT doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id
            FROM fin_txn ORDER BY occurred_at DESC LIMIT 50"
     ).fetch_all(&state.db).await.map_err(db_err_response)?;
@@ -219,9 +227,7 @@ async fn delete_txn(
     Extension(pat): Extension<AuthPat>,
     Path(doc_id): Path<String>,
 ) -> Result<Json<TxnDeleted>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     let existed = crate::server_fns::delete_txn_inner(&state.db, &doc_id)
         .await
         .map_err(|e| {
@@ -268,9 +274,7 @@ async fn patch_txn(
     Path(doc_id): Path<String>,
     Json(input): Json<PatchTxnInput>,
 ) -> Result<Json<TxnUpdated>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     type Row = (String, String, String, f64, Option<String>, Option<String>);
     let cur: Option<Row> = sqlx::query_as(
         "SELECT merchant, category_code, account_code, amount, note, linked_doc_id
@@ -337,9 +341,7 @@ async fn post_transfer(
     Extension(pat): Extension<AuthPat>,
     Json(input): Json<TransferInput>,
 ) -> Result<Json<TransferCreated>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     // Validation (FK + finite + distinct + non-empty) lives in
     // add_transfer_inner, so this handler is just request-shape mapping.
     let occurred_input = input.occurred_at.unwrap_or_default();
@@ -373,9 +375,7 @@ async fn list_account(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Account>>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:read") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:read")?;
     let rows = list_accounts_inner(&state.db)
         .await
         .map_err(db_err_response)?;
@@ -402,9 +402,7 @@ async fn post_account(
     Extension(pat): Extension<AuthPat>,
     Json(input): Json<CreateAccountInput>,
 ) -> Result<Json<AccountCreated>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     let acc = create_account_inner(
         &state.db,
         input.code.clone(),
@@ -432,9 +430,7 @@ async fn patch_account(
     Path(code): Path<String>,
     Json(input): Json<PatchAccountInput>,
 ) -> Result<Json<Account>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     type Row = (String, String, String);
     let cur: Option<Row> =
         sqlx::query_as("SELECT name, type, tone FROM fin_account WHERE code = ?1")
@@ -471,9 +467,7 @@ async fn delete_account(
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
 ) -> Result<Json<AccountDeleted>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     delete_account_inner(&state.db, code.clone())
         .await
         .map_err(server_err_to_response)?;
@@ -488,9 +482,7 @@ async fn list_category(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Category>>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:read") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:read")?;
     type Row = (String, String, String, i64, bool, i64);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT code, name, tone, sort_order, archived, created_at
@@ -532,9 +524,7 @@ async fn post_category(
     Extension(pat): Extension<AuthPat>,
     Json(input): Json<CreateCategoryInput>,
 ) -> Result<Json<CategoryCreated>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     let cat = create_category_inner(
         &state.db,
         input.code,
@@ -560,9 +550,7 @@ async fn patch_category(
     Path(code): Path<String>,
     Json(input): Json<PatchCategoryInput>,
 ) -> Result<Json<Category>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     type Row = (String, String, i64);
     let cur: Option<Row> =
         sqlx::query_as("SELECT name, tone, sort_order FROM fin_category WHERE code = ?1")
@@ -599,9 +587,7 @@ async fn delete_category(
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
 ) -> Result<Json<CategoryDeleted>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     delete_category_inner(&state.db, code.clone())
         .await
         .map_err(server_err_to_response)?;
@@ -629,9 +615,7 @@ async fn list_budget(
     Extension(pat): Extension<AuthPat>,
     Query(q): Query<ListBudgetQuery>,
 ) -> Result<Json<Vec<BudgetRow>>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:read") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:read")?;
     type Row = (String, String, f64);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT period, category_code, amount
@@ -664,9 +648,7 @@ async fn post_budget(
     Extension(pat): Extension<AuthPat>,
     Json(input): Json<PostBudgetInput>,
 ) -> Result<Json<BudgetRow>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     set_budget_inner(&state.db, &input.period, &input.category_code, input.amount)
         .await
         .map_err(server_err_to_response)?;
@@ -688,9 +670,7 @@ async fn delete_budget(
     Extension(pat): Extension<AuthPat>,
     Path((period, category_code)): Path<(String, String)>,
 ) -> Result<Json<BudgetDeleted>, Response> {
-    if let Err(r) = require_scope(&pat, "fin:write") {
-        return Err(r);
-    }
+    require_scope(&pat, "fin:write")?;
     sqlx::query("DELETE FROM fin_budget WHERE period = ?1 AND category_code = ?2")
         .bind(&period)
         .bind(&category_code)

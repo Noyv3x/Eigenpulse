@@ -7,6 +7,14 @@ use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, RowDeleteAction, TabSpec, Tabs
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 
+#[derive(Clone, Copy)]
+struct LedgerFilters {
+    merchant: RwSignal<String>,
+    category: RwSignal<String>,
+    date_from: RwSignal<String>,
+    date_to: RwSignal<String>,
+}
+
 /// Render a server-fn error for display: error-code variants
 /// (`err:finance.err.X[:payload]`) get translated to the active locale via
 /// the phf catalog; everything else (PAT-facing English contracts, system
@@ -66,7 +74,7 @@ pub fn FinanceView() -> impl IntoView {
             update_txn.version().get(),
             add_transfer.version().get(),
         ];
-        if prev.map_or(false, |p| p != cur) {
+        if prev.is_some_and(|p| p != cur) {
             ledger.refetch();
         }
         cur
@@ -283,10 +291,12 @@ fn render_ledger(
                     update_txn,
                     txn_modal_open,
                     txn_modal_mode,
-                    merchant_filter,
-                    category_filter,
-                    date_from_filter,
-                    date_to_filter,
+                    LedgerFilters {
+                        merchant: merchant_filter,
+                        category: category_filter,
+                        date_from: date_from_filter,
+                        date_to: date_to_filter,
+                    },
                 )}
             }.into_any(),
         }}
@@ -561,10 +571,7 @@ fn render_ledger_tab(
     update_txn: ServerAction<UpdateTxn>,
     txn_modal_open: RwSignal<bool>,
     txn_modal_mode: RwSignal<String>,
-    merchant_filter: RwSignal<String>,
-    category_filter: RwSignal<String>,
-    date_from_filter: RwSignal<String>,
-    date_to_filter: RwSignal<String>,
+    filters: LedgerFilters,
 ) -> impl IntoView {
     let locale = use_locale();
     let txns = d.txns.clone();
@@ -621,27 +628,27 @@ fn render_ledger_tab(
                         <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
                     </button>
                     <input type="text" placeholder=t(locale, "finance.filter.search")
-                           prop:value=move || merchant_filter.get()
-                           on:input=move |ev| merchant_filter.set(event_target_value(&ev))
+                           prop:value=move || filters.merchant.get()
+                           on:input=move |ev| filters.merchant.set(event_target_value(&ev))
                            style=format!("flex:1;min-width:160px;{}", INPUT_STYLE)/>
-                    <select prop:value=move || category_filter.get()
-                            on:change=move |ev| category_filter.set(event_target_value(&ev))
+                    <select prop:value=move || filters.category.get()
+                            on:change=move |ev| filters.category.set(event_target_value(&ev))
                             style=INPUT_STYLE>
                         <option value="">{t(locale, "finance.filter.all_categories")}</option>
-                        {cat_options.iter().cloned().map(|c| {
+                        {cat_options.iter().map(|c| {
                             let code = c.code.clone();
                             let label = format!("{} {}", c.name, c.code);
                             view! { <option value=code>{label}</option> }
                         }).collect_view()}
                     </select>
                     <input type="date"
-                           prop:value=move || date_from_filter.get()
-                           on:input=move |ev| date_from_filter.set(event_target_value(&ev))
+                           prop:value=move || filters.date_from.get()
+                           on:input=move |ev| filters.date_from.set(event_target_value(&ev))
                            style=INPUT_STYLE_MONO
                            title=t(locale, "finance.filter.date_from")/>
                     <input type="date"
-                           prop:value=move || date_to_filter.get()
-                           on:input=move |ev| date_to_filter.set(event_target_value(&ev))
+                           prop:value=move || filters.date_to.get()
+                           on:input=move |ev| filters.date_to.set(event_target_value(&ev))
                            style=INPUT_STYLE_MONO
                            title=t(locale, "finance.filter.date_to")/>
                     <a class="btn" download="finance-export.csv" href=export_href>
@@ -664,13 +671,13 @@ fn render_ledger_tab(
                         </thead>
                         <tbody>
                             {move || {
-                                let mq = merchant_filter.get().to_lowercase();
-                                let cq = category_filter.get();
+                                let mq = filters.merchant.get().to_lowercase();
+                                let cq = filters.category.get();
                                 // Date filter: convert YYYY-MM-DD to start-of-day unix
                                 // seconds, treating empty inputs as -∞ / +∞. The end
                                 // bound includes the entire end day (24h window).
-                                let from_ts = parse_date_floor(&date_from_filter.get());
-                                let to_ts = parse_date_ceiling(&date_to_filter.get());
+                                let from_ts = parse_date_floor(&filters.date_from.get());
+                                let to_ts = parse_date_ceiling(&filters.date_to.get());
                                 let cat_lookup = &cat_lookup;
                                 let cat_options = &cat_options;
                                 let acc_options = &acc_options;
@@ -791,7 +798,7 @@ fn render_txn_row(
     let link = t.linked_doc_id.clone();
     let cat_tone = cat_lookup
         .get(&t.category_code)
-        .map(|c| Tone::from_str(&c.tone))
+        .map(|c| Tone::parse(&c.tone))
         .unwrap_or(Tone::None);
     let cat_label = t.category_code.clone();
     let doc_id = t.doc_id.clone();
@@ -1105,8 +1112,8 @@ fn render_budget(
                                 let delete_period = period.clone();
                                 let delete_category = b.category_code.clone();
                                 let row_amount = format!("{:.2}", b.amount);
-                                let row_action = set_budget.clone();
-                                let delete_action = set_budget.clone();
+                                let row_action = set_budget;
+                                let delete_action = set_budget;
                                 let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("code", &b.category_code)]);
                                 view! {
                                     <div>
@@ -1353,7 +1360,7 @@ fn render_account_card(
     delete_account: ServerAction<DeleteAccount>,
 ) -> impl IntoView {
     let locale = use_locale();
-    let tone = Tone::from_str(&a.tone);
+    let tone = Tone::parse(&a.tone);
     let last_seen = match s.last_seen_at {
         Some(ts) => tf(
             locale,
@@ -1363,7 +1370,7 @@ fn render_account_card(
         None => t(locale, "finance.account.empty_activity").to_string(),
     };
     // Pre-bake the prefilled values so we never embed a `move ||` closure
-    // inside `value=` (CLAUDE.md "Don't put a `move ||`-returning attribute
+    // inside `value=` (AGENTS.md "Don't put a `move ||`-returning attribute
     // on a child element passed through a prop"). render_accounts re-runs
     // on each ledger refetch — that's a fresh value capture each time.
     let code = a.code.clone();
@@ -1531,7 +1538,7 @@ fn render_categories(
 
 /// Single row of the category management table. Inline edit lives behind a
 /// per-row `<details>` to dodge text-node walker panics around ActionForm
-/// (CLAUDE.md "Wrap inline `{move || option.map(view!)}`…").
+/// (AGENTS.md "Wrap inline `{move || option.map(view!)}`…").
 fn render_category_row(
     c: Category,
     usage: &std::collections::HashMap<String, i64>,
@@ -1539,7 +1546,7 @@ fn render_category_row(
     delete_category: ServerAction<DeleteCategory>,
 ) -> impl IntoView {
     let locale = use_locale();
-    let tone_enum = Tone::from_str(&c.tone);
+    let tone_enum = Tone::parse(&c.tone);
     let usage_count = usage.get(&c.code).copied().unwrap_or(0);
     let confirm_msg = tf(
         locale,

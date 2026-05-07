@@ -367,7 +367,7 @@ fn render_account_health(d: &ReportsData) -> impl IntoView {
               ])>
             <div class="vstack" style="gap:14px">
                 {rows.into_iter().map(|(a, pct)| {
-                    let tone = ep_core::Tone::from_str(&a.tone);
+                    let tone = ep_core::Tone::parse(&a.tone);
                     view! {
                         <div class="acc-row">
                             <div class="acc-row-meta">

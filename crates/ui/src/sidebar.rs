@@ -97,7 +97,6 @@ pub fn Sidebar() -> impl IntoView {
                             <ul class="nav-list">
                                 {items.into_iter().map(|n| {
                                     let path = n.path;
-                                    let pathname = pathname.clone();
                                     let active = move || {
                                         let p = pathname();
                                         if path == "/" { p == "/" } else { p == path || p.starts_with(&format!("{path}/")) }

@@ -31,6 +31,9 @@ pub struct ActivityRow {
     pub amount: Option<f64>,
 }
 
+#[cfg(feature = "ssr")]
+type ActivityQueryRow = (i64, String, String, String, Option<String>, Option<f64>);
+
 #[server(LoadDashboard, "/api/_internal/dsh", "Url", "load_dashboard")]
 pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
     #[cfg(feature = "ssr")]
@@ -55,7 +58,7 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
         };
         let budget_remain = (budget_total - expense).max(0.0);
 
-        let rows: Vec<(i64, String, String, String, Option<String>, Option<f64>)> = sqlx::query_as(
+        let rows: Vec<ActivityQueryRow> = sqlx::query_as(
             "SELECT occurred_at, module, doc_id, summary, link_doc, amount
                FROM activity ORDER BY occurred_at DESC LIMIT 12",
         )
