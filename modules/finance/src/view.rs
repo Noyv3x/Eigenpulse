@@ -42,6 +42,8 @@ pub fn FinanceView() -> impl IntoView {
     let archive_category = ServerAction::<ArchiveCategory>::new();
     let update_txn = ServerAction::<UpdateTxn>::new();
     let add_transfer = ServerAction::<AddTransfer>::new();
+    let txn_modal_open = RwSignal::new(false);
+    let txn_modal_mode = RwSignal::new(String::from("txn"));
     let merchant_filter = RwSignal::new(String::new());
     let category_filter = RwSignal::new(String::new());
     let date_from_filter = RwSignal::new(String::new());
@@ -79,9 +81,14 @@ pub fn FinanceView() -> impl IntoView {
                 title_cn=t(locale, "finance.page.title_cn")
                 sub=t(locale, "finance.page.sub")
                 actions=view! {
-                    <a class="btn primary" href="#fin-new-merchant">
+                    <button class="btn primary" type="button"
+                            on:click=move |_| {
+                                active.set(String::from("ledger"));
+                                txn_modal_mode.set(String::from("txn"));
+                                txn_modal_open.set(true);
+                            }>
                         <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
-                    </a>
+                    </button>
                 }.into_any()
             />
 
@@ -93,6 +100,7 @@ pub fn FinanceView() -> impl IntoView {
                         create_account, update_account, archive_account,
                         create_category, update_category, archive_category,
                         update_txn, add_transfer,
+                        txn_modal_open, txn_modal_mode,
                         merchant_filter, category_filter, date_from_filter, date_to_filter,
                     ).into_any(),
                 })}
@@ -117,6 +125,8 @@ fn render_ledger(
     archive_category: ServerAction<ArchiveCategory>,
     update_txn: ServerAction<UpdateTxn>,
     add_transfer: ServerAction<AddTransfer>,
+    txn_modal_open: RwSignal<bool>,
+    txn_modal_mode: RwSignal<String>,
     merchant_filter: RwSignal<String>,
     category_filter: RwSignal<String>,
     date_from_filter: RwSignal<String>,
@@ -264,9 +274,25 @@ fn render_ledger(
             "categories" => render_categories(&data_for_categories, create_category, update_category, archive_category).into_any(),
             "reports" => render_reports(&data_for_reports).into_any(),
             _ => view! {
-                {render_new_txn_form(add, data_for_ledger.categories.clone(), data_for_ledger.accounts.clone())}
-                {render_transfer_form(add_transfer, data_for_ledger.accounts.clone())}
-                {render_ledger_tab(&data_for_ledger, delete, update_txn, merchant_filter, category_filter, date_from_filter, date_to_filter)}
+                {render_txn_modal(
+                    add,
+                    add_transfer,
+                    data_for_ledger.categories.clone(),
+                    data_for_ledger.accounts.clone(),
+                    txn_modal_open,
+                    txn_modal_mode,
+                )}
+                {render_ledger_tab(
+                    &data_for_ledger,
+                    delete,
+                    update_txn,
+                    txn_modal_open,
+                    txn_modal_mode,
+                    merchant_filter,
+                    category_filter,
+                    date_from_filter,
+                    date_to_filter,
+                )}
             }.into_any(),
         }}
     }
@@ -328,6 +354,74 @@ const INPUT_STYLE: &str =
 const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
 const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
 
+fn render_txn_modal(
+    add: ServerAction<AddTxn>,
+    add_transfer: ServerAction<AddTransfer>,
+    categories: Vec<Category>,
+    accounts: Vec<Account>,
+    open: RwSignal<bool>,
+    mode: RwSignal<String>,
+) -> impl IntoView {
+    let locale = use_locale();
+    view! {
+        <div class="fin-modal-slot">
+            {move || {
+                if !open.get() {
+                    return view! { <span></span> }.into_any();
+                }
+                let is_transfer = mode.get() == "transfer";
+                let title = if is_transfer {
+                    t(locale, "finance.card.transfer.title")
+                } else {
+                    t(locale, "finance.card.new.title")
+                };
+                let sub = if is_transfer {
+                    t(locale, "finance.card.transfer.sub")
+                } else {
+                    t(locale, "finance.card.new.sub")
+                };
+                let txn_btn_class = if is_transfer { "btn ghost" } else { "btn primary" };
+                let transfer_btn_class = if is_transfer { "btn primary" } else { "btn ghost" };
+                view! {
+                    <div class="fin-modal-backdrop">
+                        <div class="fin-modal" role="dialog" aria-modal="true">
+                            <div class="fin-modal-head">
+                                <div>
+                                    <div class="card-title">
+                                        {title}
+                                        <span class="code">"FIN-OPS"</span>
+                                    </div>
+                                    <p class="card-sub">{sub}</p>
+                                </div>
+                                <button class="btn ghost sm" type="button"
+                                        aria-label=t(locale, "finance.action.cancel")
+                                        on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
+                            </div>
+                            <div class="fin-modal-body">
+                                <div class="hstack" style="gap:8px;margin-bottom:14px;flex-wrap:wrap">
+                                    <button class=txn_btn_class type="button"
+                                            on:click=move |_| mode.set(String::from("txn"))>
+                                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
+                                    </button>
+                                    <button class=transfer_btn_class type="button"
+                                            on:click=move |_| mode.set(String::from("transfer"))>
+                                        <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
+                                    </button>
+                                </div>
+                                {if is_transfer {
+                                    render_transfer_form(add_transfer, accounts.clone()).into_any()
+                                } else {
+                                    render_new_txn_form(add, categories.clone(), accounts.clone()).into_any()
+                                }}
+                            </div>
+                        </div>
+                    </div>
+                }.into_any()
+            }}
+        </div>
+    }
+}
+
 fn render_new_txn_form(
     add: ServerAction<AddTxn>,
     categories: Vec<Category>,
@@ -335,8 +429,7 @@ fn render_new_txn_form(
 ) -> impl IntoView {
     let locale = use_locale();
     view! {
-        <Card title=t(locale, "finance.card.new.title") code="FIN-NEW" sub=t(locale, "finance.card.new.sub")>
-            <ActionForm action=add attr:class="vstack" attr:style="gap:10px">
+            <ActionForm action=add attr:class="vstack fin-op-form" attr:style="gap:10px">
                 <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.merchant_desc")}</span>
@@ -403,7 +496,6 @@ fn render_new_txn_form(
                     </button>
                 </div>
             </ActionForm>
-        </Card>
     }
 }
 
@@ -417,8 +509,7 @@ fn render_transfer_form(
     let from_accounts = active_accounts.clone();
     let to_accounts = active_accounts;
     view! {
-        <Card title=t(locale, "finance.card.transfer.title") code="FIN-TFR-NEW" sub=t(locale, "finance.card.transfer.sub")>
-            <ActionForm action=add_transfer attr:class="vstack" attr:style="gap:10px">
+            <ActionForm action=add_transfer attr:class="vstack fin-op-form" attr:style="gap:10px">
                 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.from_account")}</span>
@@ -466,7 +557,6 @@ fn render_transfer_form(
                     </button>
                 </div>
             </ActionForm>
-        </Card>
     }
 }
 
@@ -474,6 +564,8 @@ fn render_ledger_tab(
     d: &LedgerData,
     delete: ServerAction<DeleteTxn>,
     update_txn: ServerAction<UpdateTxn>,
+    txn_modal_open: RwSignal<bool>,
+    txn_modal_mode: RwSignal<String>,
     merchant_filter: RwSignal<String>,
     category_filter: RwSignal<String>,
     date_from_filter: RwSignal<String>,
@@ -519,6 +611,20 @@ fn render_ledger_tab(
         <div class="grid-2" style="margin-top:20px">
             <Card title=t(locale, "finance.card.ledger.title") code="FIN-LGR-01" sub=sub>
                 <div class="hstack" style="gap:10px;margin-bottom:12px;flex-wrap:wrap">
+                    <button class="btn primary" type="button"
+                            on:click=move |_| {
+                                txn_modal_mode.set(String::from("txn"));
+                                txn_modal_open.set(true);
+                            }>
+                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
+                    </button>
+                    <button class="btn" type="button"
+                            on:click=move |_| {
+                                txn_modal_mode.set(String::from("transfer"));
+                                txn_modal_open.set(true);
+                            }>
+                        <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
+                    </button>
                     <input type="text" placeholder=t(locale, "finance.filter.search")
                            prop:value=move || merchant_filter.get()
                            on:input=move |ev| merchant_filter.set(event_target_value(&ev))
@@ -706,15 +812,12 @@ fn render_txn_row(
         view! { <UiTag tone=cat_tone>{cat_label}</UiTag> }.into_any()
     };
 
-    // Per-row editing toggle. The `<For key=…>` keying that would preserve
-    // this signal across refetches isn't applied here (we want filter
-    // chains to keep working with iter().filter()); the current design is
-    // "submit closes the form" so the refetch-then-recreate cycle is
-    // deliberate. The cancel button calls editing.set(false) explicitly.
+    // Per-row edit dialog. The row is recreated on refetch after submit, so
+    // the modal naturally closes without another client-side action.
     let editing = RwSignal::new(false);
 
-    // Action column varies by tfr-ness — non-tfr gets an inline edit
-    // toggle, tfr gets a tooltip-bearing placeholder.
+    // Action column varies by tfr-ness — non-tfr gets an edit dialog,
+    // tfr gets a tooltip-bearing placeholder.
     let action_cell = if is_tfr {
         view! {
             <span class="dim mono"
@@ -727,7 +830,7 @@ fn render_txn_row(
     } else {
         view! {
             <button class="btn sm" type="button"
-                    on:click=move |_| editing.update(|v| *v = !*v)>
+                    on:click=move |_| editing.set(true)>
                 {ep_i18n::t(locale, "finance.action.edit")}
             </button>
             <RowDeleteAction action=delete value=doc_id.clone()
@@ -746,6 +849,8 @@ fn render_txn_row(
     let edit_note = t.note.clone().unwrap_or_default();
     let edit_link = t.linked_doc_id.clone().unwrap_or_default();
     let edit_date = fmt_ts_yyyymmdd(t.occurred_at);
+    let edit_title_doc = t.doc_id.clone();
+    let edit_sub_merchant = t.merchant.clone();
     let cat_opts = cat_options.to_vec();
     let acc_opts = acc_options.to_vec();
     // Edit dropdowns hide archived rows (the row's existing code stays
@@ -757,62 +862,106 @@ fn render_txn_row(
         view! { <span></span> }.into_any()
     } else {
         view! {
-            <ActionForm action=update_txn attr:class="hstack" attr:style="gap:8px;flex-wrap:wrap;padding:10px">
-                <input type="hidden" name="doc_id" value=edit_doc_id/>
-                <label class="vstack" style="gap:2px;flex:2;min-width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.merchant")}</span>
-                    <input name="merchant" required value=edit_merchant style=INPUT_STYLE/>
-                </label>
-                <label class="vstack" style="gap:2px;width:110px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.amount")}</span>
-                    <input name="amount" type="number" step="0.01" min="0.01"
-                           value=edit_amount_str style=INPUT_STYLE_MONO/>
-                </label>
-                <label class="vstack" style="gap:2px;width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.category")}</span>
-                    <select name="category_code" style=INPUT_STYLE>
-                        {cat_opts_active.into_iter().map(|c| {
-                            let selected = c.code == edit_category;
-                            let code = c.code.clone();
-                            let label = format!("{} {}", c.name, c.code);
-                            view! { <option value=code selected=selected>{label}</option> }
-                        }).collect_view()}
-                    </select>
-                </label>
-                <label class="vstack" style="gap:2px;width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.account")}</span>
-                    <select name="account_code" style=INPUT_STYLE>
-                        {acc_opts_active.into_iter().map(|a| {
-                            let selected = a.code == edit_account;
-                            let code = a.code.clone();
-                            let label = format!("{} · {}", a.code, a.name);
-                            view! { <option value=code selected=selected>{label}</option> }
-                        }).collect_view()}
-                    </select>
-                </label>
-                <label class="vstack" style="gap:2px;width:130px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.date")}</span>
-                    <input name="occurred_at" type="date" value=edit_date style=INPUT_STYLE_MONO/>
-                </label>
-                <label class="vstack" style="gap:2px;flex:1;min-width:120px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.note")}</span>
-                    <input name="note" value=edit_note style=INPUT_STYLE/>
-                </label>
-                <label class="vstack" style="gap:2px;width:140px">
-                    <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.link_doc")}</span>
-                    <input name="linked_doc_id" value=edit_link style=INPUT_STYLE_MONO/>
-                </label>
-                <div class="hstack" style="gap:6px;align-items:center">
-                    <button class="btn primary sm" type="submit">{ep_i18n::t(locale, "finance.action.save")}</button>
-                    <button class="btn ghost sm" type="button"
-                            on:click=move |_| editing.set(false)>{ep_i18n::t(locale, "finance.action.cancel")}</button>
-                    <span class="error-slot">
-                        {move || update_txn.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{fmt_server_err(&e)}</span>
-                        })}
-                    </span>
+            <div class="fin-modal-slot">
+                {move || if editing.get() {
+                    let form_doc_id = edit_doc_id.clone();
+                    let form_merchant = edit_merchant.clone();
+                    let form_amount = edit_amount_str.clone();
+                    let form_category = edit_category.clone();
+                    let form_account = edit_account.clone();
+                    let form_note = edit_note.clone();
+                    let form_link = edit_link.clone();
+                    let form_date = edit_date.clone();
+                    let title_doc = edit_title_doc.clone();
+                    let sub_merchant = edit_sub_merchant.clone();
+                    let form_cat_opts = cat_opts_active.clone();
+                    let form_acc_opts = acc_opts_active.clone();
+                    view! {
+                        <div class="fin-modal-backdrop">
+                            <div class="fin-modal" role="dialog" aria-modal="true">
+                                <div class="fin-modal-head">
+                                    <div>
+                                        <div class="card-title">
+                                            {ep_i18n::t(locale, "finance.action.edit")}
+                                            <span class="code">{title_doc}</span>
+                                        </div>
+                                        <p class="card-sub">{sub_merchant}</p>
+                                    </div>
+                                    <button class="btn ghost sm" type="button"
+                                            aria-label=ep_i18n::t(locale, "finance.action.cancel")
+                                            on:click=move |_| editing.set(false)>{ep_i18n::t(locale, "finance.action.cancel")}</button>
+                                </div>
+                                <div class="fin-modal-body">
+                                    <ActionForm action=update_txn attr:class="vstack fin-op-form" attr:style="gap:10px">
+                                        <input type="hidden" name="doc_id" value=form_doc_id/>
+                                        <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.merchant")}</span>
+                                                <input name="merchant" required value=form_merchant style=INPUT_STYLE/>
+                                            </label>
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.amount")}</span>
+                                                <input name="amount" type="number" step="0.01" min="0.01"
+                                                       value=form_amount style=INPUT_STYLE_MONO/>
+                                            </label>
+                                        </div>
+                                        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.category")}</span>
+                                                <select name="category_code" style=INPUT_STYLE>
+                                                    {form_cat_opts.into_iter().map(move |c| {
+                                                        let selected = c.code == form_category.as_str();
+                                                        let code = c.code.clone();
+                                                        let label = format!("{} {}", c.name, c.code);
+                                                        view! { <option value=code selected=selected>{label}</option> }
+                                                    }).collect_view()}
+                                                </select>
+                                            </label>
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.account")}</span>
+                                                <select name="account_code" style=INPUT_STYLE>
+                                                    {form_acc_opts.into_iter().map(move |a| {
+                                                        let selected = a.code == form_account.as_str();
+                                                        let code = a.code.clone();
+                                                        let label = format!("{} · {}", a.code, a.name);
+                                                        view! { <option value=code selected=selected>{label}</option> }
+                                                    }).collect_view()}
+                                                </select>
+                                            </label>
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.date")}</span>
+                                                <input name="occurred_at" type="date" value=form_date style=INPUT_STYLE_MONO/>
+                                            </label>
+                                        </div>
+                                        <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.note")}</span>
+                                                <input name="note" value=form_note style=INPUT_STYLE/>
+                                            </label>
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.link_doc")}</span>
+                                                <input name="linked_doc_id" value=form_link style=INPUT_STYLE_MONO/>
+                                            </label>
+                                        </div>
+                                        <div class="hstack" style="gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                                            <span class="error-slot">
+                                                {move || update_txn.value().get().and_then(|r| r.err()).map(|e| view! {
+                                                    <span class="tag rose">{fmt_server_err(&e)}</span>
+                                                })}
+                                            </span>
+                                            <button class="btn ghost" type="button"
+                                                    on:click=move |_| editing.set(false)>{ep_i18n::t(locale, "finance.action.cancel")}</button>
+                                            <button class="btn primary" type="submit">{ep_i18n::t(locale, "finance.action.save")}</button>
+                                        </div>
+                                    </ActionForm>
+                                </div>
+                            </div>
+                        </div>
+                    }.into_any()
+                } else {
+                    view! { <span></span> }.into_any()
+                }}
                 </div>
-            </ActionForm>
         }.into_any()
     };
 
@@ -840,7 +989,7 @@ fn render_txn_row(
             </td>
         </tr>
         <tr class="edit-row" style:display=move || if editing.get() { "table-row" } else { "none" }>
-            <td colspan="8" style="background:var(--bg-2);border-top:1px dashed var(--border)">
+            <td colspan="8" style="padding:0;border:0">
                 {edit_form}
             </td>
         </tr>

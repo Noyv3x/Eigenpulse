@@ -394,6 +394,46 @@ body {
   display: flex; justify-content: space-between; align-items: center;
 }
 
+/* --- Finance operation dialog --- */
+.fin-modal-slot { display: contents; }
+.fin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(20px, 7vh, 64px) 16px 24px;
+  background: color-mix(in oklab, var(--bg) 62%, transparent);
+  backdrop-filter: blur(8px);
+}
+.fin-modal {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+}
+.fin-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.fin-modal-body { padding: 16px 18px 18px; }
+.fin-op-form input,
+.fin-op-form select { width: 100%; min-width: 0; }
+
+@media (max-width: 760px) {
+  .fin-modal-backdrop { align-items: stretch; padding: 10px; }
+  .fin-modal { max-height: calc(100vh - 20px); }
+  .fin-op-form [style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
+}
+
 /* --- KPI tiles --- */
 .kpi-grid {
   display: grid;

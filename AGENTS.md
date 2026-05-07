@@ -28,6 +28,10 @@ cargo check --workspace
 # (sqlite://data/eigenpulse.db?mode=rwc); `mode=rwc` creates the file on first open.
 EP_ADMIN_PASSWORD=dev cargo leptos watch       # http://127.0.0.1:3000
 
+# Existing local dev DBs may already be bootstrapped; EP_ADMIN_PASSWORD is
+# ignored after first boot. Known temporary dev login passwords:
+# dev_password or dev-password.
+
 # Production build → target/release/eigenpulse + target/site/{pkg,...}.
 cargo leptos build --release
 
