@@ -7,7 +7,6 @@
 //! Anything more contextual (statistical anomaly detection, multi-month
 //! seasonality, etc.) belongs in a separate analytics module, not here.
 
-use crate::model::Tag;
 use crate::server_fns::LedgerData;
 use ep_core::IconKind;
 use serde::{Deserialize, Serialize};
@@ -68,31 +67,7 @@ pub fn compute_suggestions(d: &LedgerData) -> Vec<Suggestion> {
         });
     }
 
-    // Rule 2 — orphan cross-module candidate. Fitness/learning expenses
-    // that aren't yet linked to a workout / book / course suggest a manual
-    // link (the user did the activity but forgot to record the doc id).
-    if let Some(orphan) = d.txns.iter().find(|t| {
-        t.linked_doc_id.is_none()
-            && (t.category_code == "HLT" || t.category_code == "EDU")
-            && Tag::parse(&t.tag) == Some(Tag::Exp)
-    }) {
-        let target_module = if orphan.category_code == "HLT" {
-            "Fitness"
-        } else {
-            "Learning"
-        };
-        out.push(Suggestion {
-            icon: IconKind::Link,
-            title: format!("{} · can link to {}", orphan.merchant, target_module),
-            meta: format!(
-                "{} category spending is not linked to a {} module doc ID",
-                orphan.category_code, target_module
-            ),
-            link: Some("/finance".into()),
-        });
-    }
-
-    // Rule 3 — investable surplus on any savings-type account beyond the
+    // Rule 2 — investable surplus on any savings-type account beyond the
     // floor. Filters by `r#type == "Savings"` rather than a hardcoded
     // `code == "ACC-02"` so the rule survives a user renaming or replacing
     // their savings account. Picks the highest-balance one when there are
@@ -240,17 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn orphan_link_rule_finds_unlinked_hlt_expense() {
-        let s = compute_suggestions(&fixture_data());
-        let link = s
-            .iter()
-            .find(|s| s.icon == IconKind::Link)
-            .expect("expected link rule hit");
-        assert!(link.title.contains("Keep Gym"));
-        assert!(link.title.contains("Fitness"));
-    }
-
-    #[test]
     fn surplus_rule_fires_above_floor() {
         let s = compute_suggestions(&fixture_data());
         let coin = s
@@ -268,8 +232,6 @@ mod tests {
         for b in &mut d.budgets {
             b.used = 0.0;
         }
-        // no orphan: link the txn
-        d.txns[0].linked_doc_id = Some("FIT-S-0001".into());
         // savings under floor
         d.accounts[1].balance = 5_000.0;
         let s = compute_suggestions(&d);

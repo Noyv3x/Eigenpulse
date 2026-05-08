@@ -83,16 +83,6 @@ mod ssr_module {
                     target: "DSH",
                     kind: "totals-feed",
                 },
-                ModuleLink {
-                    source: "FIN",
-                    target: "FIT",
-                    kind: "doc-ref",
-                },
-                ModuleLink {
-                    source: "FIN",
-                    target: "LRN",
-                    kind: "doc-ref",
-                },
                 // Transfer pairs are intra-FIN edges in module_link
                 // (kind='tfr-pair'); document the kind here for module-graph
                 // viz. Runtime is unaffected.

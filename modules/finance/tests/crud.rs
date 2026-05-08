@@ -436,7 +436,6 @@ async fn update_txn_balance_delta_same_account() {
             amount: -50.0,
             note: None,
             occurred_at_input: String::new(),
-            linked_doc_id: None,
         },
     )
     .await
@@ -472,7 +471,6 @@ async fn update_txn_cross_account() {
             amount: -100.0,
             note: None,
             occurred_at_input: String::new(),
-            linked_doc_id: None,
         },
     )
     .await

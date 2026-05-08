@@ -60,19 +60,19 @@ INSERT INTO fin_budget (period, category_code, amount) VALUES
 
 INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code, account_code, amount, tag, linked_doc_id) VALUES
  ('FIN-24091', unixepoch('2026-04-22 09:02:00'), 'Blue Bottle · 上海',  'F&B', 'ACC-01',  -42.00, 'exp', NULL),
- ('FIN-24090', unixepoch('2026-04-21 20:41:00'), 'Keep Gym · 月卡续费',  'HLT', 'ACC-01', -298.00, 'exp', 'FIT-P-002'),
+ ('FIN-24090', unixepoch('2026-04-21 20:41:00'), 'Keep Gym · 月卡续费',  'HLT', 'ACC-01', -298.00, 'exp', NULL),
  ('FIN-24089', unixepoch('2026-04-21 12:15:00'), '工资 · 入账',          'INC', 'ACC-01', 18400.00, 'inc', NULL),
- ('FIN-24088', unixepoch('2026-04-20 19:22:00'), 'Kindle · 《深度工作》','EDU', 'ACC-01',  -38.00, 'exp', 'LRN-B-014'),
+ ('FIN-24088', unixepoch('2026-04-20 19:22:00'), 'Kindle · 《深度工作》','EDU', 'ACC-01',  -38.00, 'exp', NULL),
  ('FIN-24087', unixepoch('2026-04-20 13:05:00'), '盒马 · 生鲜',          'HSE', 'ACC-01', -186.50, 'exp', NULL),
  ('FIN-24086', unixepoch('2026-04-19 15:44:00'), '转账 · 余额宝',        'TFR', 'ACC-02', 3000.00, 'tfr', NULL),
  ('FIN-24085', unixepoch('2026-04-19 11:12:00'), '滴滴出行',             'TRN', 'ACC-01',  -24.80, 'exp', NULL),
- ('FIN-24084', unixepoch('2026-04-18 21:10:00'), '蛋白粉 · 海淘',        'HLT', 'ACC-01', -428.00, 'exp', 'FIT-G-007');
+ ('FIN-24084', unixepoch('2026-04-18 21:10:00'), '蛋白粉 · 海淘',        'HLT', 'ACC-01', -428.00, 'exp', NULL);
 
 INSERT INTO seq (module, kind, last_value) VALUES ('FIN', 'doc:y24', 91);
 
 INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc) VALUES
  (unixepoch('2026-04-22 09:02:00'), 'FIN', 'FIN-24091', 'Blue Bottle · 上海',           -42.00, NULL),
- (unixepoch('2026-04-21 20:41:00'), 'FIN', 'FIN-24090', 'Keep Gym · 月卡续费',         -298.00, 'FIT-P-002'),
+ (unixepoch('2026-04-21 20:41:00'), 'FIN', 'FIN-24090', 'Keep Gym · 月卡续费',         -298.00, NULL),
  (unixepoch('2026-04-21 12:15:00'), 'FIN', 'FIN-24089', '工资 · 入账',                18400.00, NULL),
- (unixepoch('2026-04-20 19:22:00'), 'FIN', 'FIN-24088', 'Kindle · 《深度工作》',        -38.00, 'LRN-B-014'),
+ (unixepoch('2026-04-20 19:22:00'), 'FIN', 'FIN-24088', 'Kindle · 《深度工作》',        -38.00, NULL),
  (unixepoch('2026-04-20 13:05:00'), 'FIN', 'FIN-24087', '盒马 · 生鲜',                 -186.50, NULL);

@@ -474,7 +474,6 @@ pub async fn add_txn(
     amount: f64,
     tag: String,
     note: String,
-    linked_doc_id: String,
     occurred_at: String,
 ) -> Result<Txn, ServerFnError> {
     #[cfg(feature = "ssr")]
@@ -510,11 +509,6 @@ pub async fn add_txn(
             None
         } else {
             Some(note.clone())
-        };
-        let linked_opt = if linked_doc_id.trim().is_empty() {
-            None
-        } else {
-            Some(linked_doc_id.clone())
         };
 
         let state: ep_core::AppState = expect_context();
@@ -552,7 +546,7 @@ pub async fn add_txn(
         )
         .bind(&doc_id).bind(occurred).bind(&merchant).bind(&category_code)
         .bind(&account_code).bind(amount).bind(tag_kind.as_str())
-        .bind(&note_opt).bind(&linked_opt)
+        .bind(&note_opt).bind(Option::<String>::None)
         .execute(&mut *tx).await.map_err(server_err)?;
 
         sqlx::query("UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2")
@@ -570,15 +564,10 @@ pub async fn add_txn(
         .bind(&doc_id)
         .bind(&merchant)
         .bind(amount)
-        .bind(&linked_opt)
+        .bind(Option::<String>::None)
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
-
-        if let Some(link) = &linked_opt {
-            sqlx::query("INSERT OR IGNORE INTO module_link (source_doc, target_doc, kind) VALUES (?1, ?2, 'ref')")
-                .bind(&doc_id).bind(link).execute(&mut *tx).await.map_err(server_err)?;
-        }
 
         tx.commit().await.map_err(server_err)?;
 
@@ -600,7 +589,7 @@ pub async fn add_txn(
             amount,
             tag: tag_kind.as_str().to_string(),
             note: note_opt,
-            linked_doc_id: linked_opt,
+            linked_doc_id: None,
         })
     }
     #[cfg(not(feature = "ssr"))]
@@ -869,7 +858,6 @@ pub struct UpdateTxnFields {
     /// Wire form: empty → "keep existing", `"YYYY-MM-DD"` → that day 12:00
     /// local. Bad format → Args error.
     pub occurred_at_input: String,
-    pub linked_doc_id: Option<String>,
 }
 
 /// `tag` and `doc_id` are immutable. To change `tag`, delete and re-create
@@ -900,16 +888,16 @@ pub async fn update_txn_inner(
     // Read the existing row (and lock it implicitly under SQLite's deferred
     // tx). Capture old amount/account/tag/occurred so we can both refuse
     // tfr edits and compute balance deltas.
-    type OldRow = (f64, String, String, i64, Option<String>);
+    type OldRow = (f64, String, String, i64);
     let old: Option<OldRow> = sqlx::query_as(
-        "SELECT amount, account_code, tag, occurred_at, linked_doc_id
+        "SELECT amount, account_code, tag, occurred_at
            FROM fin_txn WHERE doc_id = ?1",
     )
     .bind(doc_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(server_err)?;
-    let (old_amount, old_account, old_tag, old_occurred, old_linked) = match old {
+    let (old_amount, old_account, old_tag, old_occurred) = match old {
         Some(r) => r,
         None => return Err(ep_i18n::err_with("finance.err.txn_not_found", doc_id)),
     };
@@ -987,8 +975,8 @@ pub async fn update_txn_inner(
     sqlx::query(
         "UPDATE fin_txn
             SET merchant = ?1, category_code = ?2, account_code = ?3,
-                amount = ?4, note = ?5, occurred_at = ?6, linked_doc_id = ?7
-          WHERE doc_id = ?8",
+                amount = ?4, note = ?5, occurred_at = ?6, linked_doc_id = NULL
+          WHERE doc_id = ?7",
     )
     .bind(&merchant)
     .bind(&fields.category_code)
@@ -996,46 +984,28 @@ pub async fn update_txn_inner(
     .bind(signed_amount)
     .bind(&fields.note)
     .bind(new_occurred)
-    .bind(&fields.linked_doc_id)
     .bind(doc_id)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
 
     sqlx::query(
-        "UPDATE activity SET summary = ?1, amount = ?2, link_doc = ?3, occurred_at = ?4
-          WHERE module = 'FIN' AND doc_id = ?5",
+        "UPDATE activity SET summary = ?1, amount = ?2, link_doc = NULL, occurred_at = ?3
+          WHERE module = 'FIN' AND doc_id = ?4",
     )
     .bind(&merchant)
     .bind(signed_amount)
-    .bind(&fields.linked_doc_id)
     .bind(new_occurred)
     .bind(doc_id)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
 
-    // module_link: edit only kind='ref' rows; kind='tfr-pair' is delete-only.
-    if old_linked != fields.linked_doc_id {
-        sqlx::query("DELETE FROM module_link WHERE source_doc = ?1 AND kind = 'ref'")
-            .bind(doc_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-        if let Some(target) = &fields.linked_doc_id {
-            if !target.trim().is_empty() {
-                sqlx::query(
-                    "INSERT OR IGNORE INTO module_link (source_doc, target_doc, kind)
-                     VALUES (?1, ?2, 'ref')",
-                )
-                .bind(doc_id)
-                .bind(target)
-                .execute(&mut *tx)
-                .await
-                .map_err(server_err)?;
-            }
-        }
-    }
+    sqlx::query("DELETE FROM module_link WHERE source_doc = ?1 AND kind = 'ref'")
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
 
     tx.commit().await.map_err(server_err)?;
 
@@ -1048,7 +1018,7 @@ pub async fn update_txn_inner(
         amount: signed_amount,
         tag: old_tag,
         note: fields.note,
-        linked_doc_id: fields.linked_doc_id,
+        linked_doc_id: None,
     })
 }
 
@@ -1065,7 +1035,6 @@ pub async fn update_txn(
     amount: f64,
     note: String,
     occurred_at: String,
-    linked_doc_id: String,
 ) -> Result<Txn, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
@@ -1075,11 +1044,6 @@ pub async fn update_txn(
             None
         } else {
             Some(note)
-        };
-        let linked_opt = if linked_doc_id.trim().is_empty() {
-            None
-        } else {
-            Some(linked_doc_id)
         };
         update_txn_inner(
             &state.db,
@@ -1091,7 +1055,6 @@ pub async fn update_txn(
                 amount,
                 note: note_opt,
                 occurred_at_input: occurred_at,
-                linked_doc_id: linked_opt,
             },
         )
         .await

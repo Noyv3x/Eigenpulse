@@ -42,7 +42,6 @@ pub struct TxnInput {
     pub amount: f64,
     pub tag: String,
     pub note: Option<String>,
-    pub linked_doc_id: Option<String>,
     pub occurred_at: Option<i64>,
 }
 
@@ -151,7 +150,7 @@ async fn post_txn(
     )
     .bind(&doc_id).bind(occurred).bind(&merchant).bind(&input.category_code)
     .bind(&input.account_code).bind(input.amount).bind(tag_kind.as_str())
-    .bind(&input.note).bind(&input.linked_doc_id)
+    .bind(&input.note).bind(Option::<String>::None)
     .execute(&mut *tx).await.map_err(db_err_response)?;
     sqlx::query("UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2")
         .bind(input.amount)
@@ -167,14 +166,10 @@ async fn post_txn(
     .bind(&doc_id)
     .bind(&merchant)
     .bind(input.amount)
-    .bind(&input.linked_doc_id)
+    .bind(Option::<String>::None)
     .execute(&mut *tx)
     .await
     .map_err(db_err_response)?;
-    if let Some(link) = &input.linked_doc_id {
-        sqlx::query("INSERT OR IGNORE INTO module_link (source_doc, target_doc, kind) VALUES (?1, ?2, 'ref')")
-            .bind(&doc_id).bind(link).execute(&mut *tx).await.map_err(db_err_response)?;
-    }
     tx.commit().await.map_err(db_err_response)?;
 
     if input.amount < -500.0 {
@@ -260,7 +255,6 @@ struct PatchTxnInput {
     pub amount: Option<f64>,
     pub note: Option<String>,
     pub occurred_at: Option<String>,
-    pub linked_doc_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,36 +269,29 @@ async fn patch_txn(
     Json(input): Json<PatchTxnInput>,
 ) -> Result<Json<TxnUpdated>, Response> {
     require_scope(&pat, "fin:write")?;
-    type Row = (String, String, String, f64, Option<String>, Option<String>);
+    type Row = (String, String, String, f64, Option<String>);
     let cur: Option<Row> = sqlx::query_as(
-        "SELECT merchant, category_code, account_code, amount, note, linked_doc_id
+        "SELECT merchant, category_code, account_code, amount, note
            FROM fin_txn WHERE doc_id = ?1",
     )
     .bind(&doc_id)
     .fetch_optional(&state.db)
     .await
     .map_err(db_err_response)?;
-    let Some((cm, cc, cac, ca, cn, cl)) = cur else {
+    let Some((cm, cc, cac, ca, cn)) = cur else {
         return Err(error_json(
             StatusCode::NOT_FOUND,
             "not_found",
             &format!("Transaction '{doc_id}' not found"),
         ));
     };
-    // For Optional<String> fields like note/linked_doc_id we can't tell
-    // "field omitted" from "field set to empty string" in JSON. Convention:
-    // missing key → keep current value; empty string → clear (note=NULL,
-    // linked=NULL). Implement by inspecting input.note: client sending null
-    // is the same as omission via Option<String>; sending "" clears.
+    // For optional text fields we can't tell "field omitted" from
+    // "field set to null" in this JSON shape. Convention: missing/null keeps
+    // current value; empty string clears note=NULL.
     let new_note: Option<String> = match input.note {
         Some(s) if s.is_empty() => None,
         Some(s) => Some(s),
         None => cn,
-    };
-    let new_linked: Option<String> = match input.linked_doc_id {
-        Some(s) if s.is_empty() => None,
-        Some(s) => Some(s),
-        None => cl,
     };
     let fields = UpdateTxnFields {
         merchant: input.merchant.unwrap_or(cm),
@@ -313,7 +300,6 @@ async fn patch_txn(
         amount: input.amount.unwrap_or(ca),
         note: new_note,
         occurred_at_input: input.occurred_at.unwrap_or_default(),
-        linked_doc_id: new_linked,
     };
     update_txn_inner(&state.db, &doc_id, fields)
         .await

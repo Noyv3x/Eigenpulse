@@ -454,7 +454,7 @@ fn render_new_txn_form(
                         </select>
                     </label>
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
                         <select name="category_code" style=INPUT_STYLE>
@@ -474,11 +474,6 @@ fn render_new_txn_form(
                                 view! { <option value=code selected={i == 0}>{label}</option> }
                             }).collect_view()}
                         </select>
-                    </label>
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.link_optional")}</span>
-                        <input name="linked_doc_id" placeholder="FIT-S-0412 / LRN-B-014"
-                               style=INPUT_STYLE_MONO/>
                     </label>
                 </div>
                 <div style="display:grid;grid-template-columns:2fr 2fr auto auto;gap:10px;align-items:end">
@@ -660,12 +655,11 @@ fn render_ledger_tab(
                         <thead>
                             <tr>
                                 <th style="width:76px">{t(locale, "finance.field.date")}</th>
-                                <th style="width:110px">{t(locale, "finance.field.link_doc")}</th>
+                                <th style="width:110px">"ID"</th>
                                 <th>{t(locale, "finance.field.merchant_desc")}</th>
                                 <th style="width:80px">{t(locale, "finance.field.category")}</th>
                                 <th style="width:80px">{t(locale, "finance.field.account")}</th>
                                 <th class="num" style="width:110px">{t(locale, "finance.field.amount")}</th>
-                                <th style="width:80px">{t(locale, "finance.field.link_doc")}</th>
                                 <th class="num" style="width:120px">{t(locale, "finance.field.ops")}</th>
                             </tr>
                         </thead>
@@ -795,7 +789,6 @@ fn render_txn_row(
         format!("−¥{}", fmt_money(t.amount.abs()))
     };
     let is_tfr = matches!(Tag::parse(&t.tag), Some(Tag::Tfr));
-    let link = t.linked_doc_id.clone();
     let cat_tone = cat_lookup
         .get(&t.category_code)
         .map(|c| Tone::parse(&c.tone))
@@ -848,7 +841,6 @@ fn render_txn_row(
     let edit_account = t.account_code.clone();
     let edit_category = t.category_code.clone();
     let edit_note = t.note.clone().unwrap_or_default();
-    let edit_link = t.linked_doc_id.clone().unwrap_or_default();
     let edit_date = fmt_ts_yyyymmdd(t.occurred_at);
     let edit_title_doc = t.doc_id.clone();
     let edit_sub_merchant = t.merchant.clone();
@@ -869,7 +861,6 @@ fn render_txn_row(
                     let form_category = edit_category.clone();
                     let form_account = edit_account.clone();
                     let form_note = edit_note.clone();
-                    let form_link = edit_link.clone();
                     let form_date = edit_date.clone();
                     let title_doc = edit_title_doc.clone();
                     let sub_merchant = edit_sub_merchant.clone();
@@ -932,14 +923,10 @@ fn render_txn_row(
                                                 <input name="occurred_at" type="date" value=form_date style=INPUT_STYLE_MONO/>
                                             </label>
                                         </div>
-                                        <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+                                        <div style="display:grid;grid-template-columns:1fr;gap:10px">
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.note")}</span>
                                                 <input name="note" value=form_note style=INPUT_STYLE/>
-                                            </label>
-                                            <label class="vstack" style="gap:4px">
-                                                <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.link_doc")}</span>
-                                                <input name="linked_doc_id" value=form_link style=INPUT_STYLE_MONO/>
                                             </label>
                                         </div>
                                         <div class="hstack" style="gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
@@ -975,12 +962,6 @@ fn render_txn_row(
             <td>{cat_cell}</td>
             <td class="mono dim">{t.account_code.clone()}</td>
             <td class=cls_amt>{amount_text}</td>
-            <td class="mono dim">
-                {match link {
-                    Some(l) => view! { <span><Icon kind=IconKind::Link size=10/> " " {l}</span> }.into_any(),
-                    None => view! { <span>"—"</span> }.into_any(),
-                }}
-            </td>
             <td class="num">
                 <div class="hstack" style="gap:4px;justify-content:flex-end;align-items:center">
                     {action_cell}
@@ -988,7 +969,7 @@ fn render_txn_row(
             </td>
         </tr>
         <tr class="edit-row" style:display=move || if editing.get() { "table-row" } else { "none" }>
-            <td colspan="8" style="padding:0;border:0">
+            <td colspan="7" style="padding:0;border:0">
                 {edit_form}
             </td>
         </tr>
@@ -1854,7 +1835,7 @@ fn csv_data_uri(txns: &[Txn]) -> String {
     use std::fmt::Write as _;
 
     let mut csv = String::with_capacity(80 + txns.len() * 96);
-    csv.push_str("doc_id,occurred_at,merchant,category,account,amount,tag,note,linked_doc_id\n");
+    csv.push_str("doc_id,occurred_at,merchant,category,account,amount,tag,note\n");
     for t in txns {
         let occurred = time::OffsetDateTime::from_unix_timestamp(t.occurred_at)
             .ok()
@@ -1865,7 +1846,7 @@ fn csv_data_uri(txns: &[Txn]) -> String {
             .unwrap_or_default();
         let _ = writeln!(
             csv,
-            "{},{},{},{},{},{:.2},{},{},{}",
+            "{},{},{},{},{},{:.2},{},{}",
             t.doc_id,
             occurred,
             csv_escape(&t.merchant),
@@ -1874,7 +1855,6 @@ fn csv_data_uri(txns: &[Txn]) -> String {
             t.amount,
             t.tag,
             csv_escape(t.note.as_deref().unwrap_or("")),
-            t.linked_doc_id.as_deref().unwrap_or(""),
         );
     }
     let encoded = percent_encode(&csv);
@@ -1955,7 +1935,7 @@ mod tests {
             amount: -12.3,
             tag: "exp".into(),
             note: Some("x\"y".into()),
-            linked_doc_id: Some("FIT-1".into()),
+            linked_doc_id: None,
         }];
 
         let uri = csv_data_uri(&txns);
@@ -1963,7 +1943,7 @@ mod tests {
         assert!(uri.starts_with("data:text/csv;charset=utf-8,doc_id%2Coccurred_at"));
         assert!(uri.contains("FIN-1%2C1970-01-01T00%3A00%3A00Z"));
         assert!(uri.contains("%22a%2Cb%22"));
-        assert!(uri.contains("-12.30%2Cexp%2C%22x%22%22y%22%2CFIT-1"));
+        assert!(uri.contains("-12.30%2Cexp%2C%22x%22%22y%22"));
     }
 
     #[test]
