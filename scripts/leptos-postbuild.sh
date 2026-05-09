@@ -22,9 +22,17 @@
 set -eu
 PKG_DIR="${1:-target/site/pkg}"
 NAME="${2:-eigenpulse}"
+if [ -z "$PKG_DIR" ] || [ -z "$NAME" ]; then
+    echo "leptos-postbuild: SITE_PKG_DIR and NAME must be non-empty" >&2
+    exit 2
+fi
 SRC="$PKG_DIR/$NAME.wasm"
 DST="$PKG_DIR/${NAME}_bg.wasm"
 
+if [ ! -d "$PKG_DIR" ]; then
+    echo "leptos-postbuild: package directory not found: $PKG_DIR" >&2
+    exit 1
+fi
 if [ ! -f "$SRC" ]; then
     # Fail loudly. If `cargo leptos build` errored partway through, the
     # wasm artifact won't exist; Dockerfile `RUN cargo leptos build && this`
@@ -39,4 +47,8 @@ if [ -f "$DST" ] && cmp -s "$SRC" "$DST"; then
     exit 0
 fi
 cp "$SRC" "$DST"
+if ! cmp -s "$SRC" "$DST"; then
+    echo "leptos-postbuild: failed to stage matching wasm alias at $DST" >&2
+    exit 1
+fi
 echo "leptos-postbuild: staged $DST as a copy of $SRC"

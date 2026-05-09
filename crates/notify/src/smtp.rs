@@ -32,6 +32,23 @@ pub struct SmtpNotifier {
 impl SmtpNotifier {
     pub fn from_value(v: serde_json::Value) -> anyhow::Result<Self> {
         let cfg: SmtpConfig = serde_json::from_value(v)?;
+        for (field, value) in [
+            ("host", cfg.host.as_str()),
+            ("username", cfg.username.as_str()),
+            ("password", cfg.password.as_str()),
+            ("from", cfg.from.as_str()),
+            ("to", cfg.to.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                anyhow::bail!("smtp config `{field}` is required");
+            }
+        }
+        cfg.from
+            .parse::<lettre::message::Mailbox>()
+            .map_err(|e| anyhow::anyhow!("smtp config `from` is invalid: {e}"))?;
+        cfg.to
+            .parse::<lettre::message::Mailbox>()
+            .map_err(|e| anyhow::anyhow!("smtp config `to` is invalid: {e}"))?;
         Ok(Self { cfg })
     }
 }

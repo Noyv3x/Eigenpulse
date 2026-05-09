@@ -42,3 +42,51 @@ pub async fn handler(
         },
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::handler;
+    use crate::test_support::{app_state, noop_notify};
+    use axum::{extract::State, Extension};
+    use ep_auth::AuthPat;
+
+    #[tokio::test]
+    async fn handler_returns_owner_and_authenticated_token_metadata() {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query(
+            "CREATE TABLE app_user (
+                id INTEGER PRIMARY KEY,
+                handle TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL
+            )",
+        )
+        .execute(&db)
+        .await
+        .expect("schema");
+        sqlx::query(
+            "INSERT INTO app_user (id, handle, name, role) VALUES (1, 'admin', 'Owner', 'OWNER')",
+        )
+        .execute(&db)
+        .await
+        .expect("user");
+        let state = app_state(db, noop_notify());
+        let pat = AuthPat {
+            id: 42,
+            name: "iOS Shortcuts".into(),
+            scopes: vec!["fin:write".into(), "notify:write".into()],
+        };
+
+        let axum::Json(resp) = handler(State(state), Extension(pat))
+            .await
+            .expect("whoami response");
+
+        assert_eq!(resp.user.handle, "admin");
+        assert_eq!(resp.user.name, "Owner");
+        assert_eq!(resp.user.role, "OWNER");
+        assert_eq!(resp.token.name, "iOS Shortcuts");
+        assert_eq!(resp.token.scopes, ["fin:write", "notify:write"]);
+    }
+}

@@ -74,7 +74,11 @@ pub const NAV: &[NavItem] = &[
 ];
 
 #[component]
-pub fn Sidebar() -> impl IntoView {
+pub fn Sidebar(
+    user_name: RwSignal<String>,
+    user_meta: RwSignal<String>,
+    avatar_text: RwSignal<String>,
+) -> impl IntoView {
     let loc = use_location();
     let pathname = move || loc.pathname.get();
     let locale = use_locale();
@@ -120,15 +124,98 @@ pub fn Sidebar() -> impl IntoView {
                 }).collect_view()}
             </div>
             <div class="sidebar-foot">
-                <div class="avatar">"L"</div>
+                <div class="avatar">{move || avatar_text.get()}</div>
                 <div class="avatar-meta">
-                    <div style="font-weight:500">"Leo Chen"</div>
-                    <small>"OWNER · UID-0001"</small>
+                    <div style="font-weight:500">{move || user_name.get()}</div>
+                    <small>{move || user_meta.get()}</small>
                 </div>
-                <a class="foot-btn" href="/logout" title=t!(locale, ui.sidebar.logout_title)>
-                    <Icon kind=IconKind::Menu size=14/>
-                </a>
+                <form method="post" action="/logout">
+                    <button class="foot-btn" type="submit" title=t!(locale, ui.sidebar.logout_title)>
+                        <Icon kind=IconKind::Menu size=14/>
+                    </button>
+                </form>
             </div>
         </aside>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NAV;
+    use ep_core::{IconKind, NavSection};
+    use std::collections::HashSet;
+
+    #[test]
+    fn nav_entries_have_unique_codes_paths_and_i18n_keys() {
+        let mut codes = HashSet::new();
+        let mut paths = HashSet::new();
+        let mut keys = HashSet::new();
+
+        for item in NAV {
+            assert!(codes.insert(item.code), "duplicate nav code {}", item.code);
+            assert!(paths.insert(item.path), "duplicate nav path {}", item.path);
+            assert!(
+                keys.insert(item.name_key),
+                "duplicate nav i18n key {}",
+                item.name_key
+            );
+        }
+    }
+
+    #[test]
+    fn nav_paths_are_safe_absolute_app_paths() {
+        for item in NAV {
+            assert!(
+                ep_core::safe_in_app_path(item.path).is_some(),
+                "unsafe nav path for {}: {}",
+                item.code,
+                item.path
+            );
+        }
+    }
+
+    #[test]
+    fn nav_keeps_registered_module_entries() {
+        let expected = [
+            (
+                "FIN",
+                "/finance",
+                "ui.sidebar.nav.fin",
+                IconKind::Finance,
+                NavSection::Modules,
+            ),
+            (
+                "FIT",
+                "/fitness",
+                "ui.sidebar.nav.fit",
+                IconKind::Fitness,
+                NavSection::Modules,
+            ),
+            (
+                "LRN",
+                "/learning",
+                "ui.sidebar.nav.lrn",
+                IconKind::Learning,
+                NavSection::Modules,
+            ),
+            (
+                "MOD",
+                "/modules",
+                "ui.sidebar.nav.mod",
+                IconKind::Modules,
+                NavSection::System,
+            ),
+        ];
+
+        for (code, path, name_key, icon, section) in expected {
+            let item = NAV
+                .iter()
+                .find(|item| item.code == code)
+                .unwrap_or_else(|| panic!("missing nav item {code}"));
+            assert_eq!(item.path, path);
+            assert_eq!(item.name_key, name_key);
+            assert_eq!(item.icon, icon);
+            assert_eq!(item.section, section);
+        }
     }
 }

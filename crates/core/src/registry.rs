@@ -1,4 +1,4 @@
-use crate::{AppState, Module, ModuleLink, NavEntry};
+use crate::{AppState, Module};
 use sqlx::SqlitePool;
 
 pub struct ModuleRegistry {
@@ -25,49 +25,11 @@ impl ModuleRegistry {
         self.items.iter().copied()
     }
 
-    pub fn find(&self, code: &str) -> Option<&'static dyn Module> {
-        self.iter().find(|m| m.code().eq_ignore_ascii_case(code))
-    }
-
     pub async fn run_migrations(&self, pool: &SqlitePool) -> anyhow::Result<()> {
         for m in self.iter() {
-            for (name, sql) in m.migrations() {
-                let already: Option<i64> = sqlx::query_scalar(
-                    "SELECT 1 FROM _ep_module_migration WHERE module = ?1 AND name = ?2",
-                )
-                .bind(m.code())
-                .bind(*name)
-                .fetch_optional(pool)
-                .await?;
-                if already.is_some() {
-                    continue;
-                }
-                let mut tx = pool.begin().await?;
-                // Allow module migrations to embed multiple top-level statements.
-                for stmt in split_sql(sql) {
-                    if stmt.trim().is_empty() {
-                        continue;
-                    }
-                    sqlx::query(&stmt).execute(&mut *tx).await?;
-                }
-                sqlx::query("INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)")
-                    .bind(m.code())
-                    .bind(*name)
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                tracing::info!(module = m.code(), name = name, "applied module migration");
-            }
+            run_module_migrations(pool, m).await?;
         }
         Ok(())
-    }
-
-    pub fn web_router(&self, state: AppState) -> axum::Router<AppState> {
-        let mut r = axum::Router::new();
-        for m in self.iter() {
-            r = r.merge(m.routes(state.clone()));
-        }
-        r
     }
 
     pub fn open_api_router(&self, state: AppState) -> axum::Router<AppState> {
@@ -78,46 +40,51 @@ impl ModuleRegistry {
         }
         r
     }
-
-    pub fn nav(&self) -> Vec<NavEntry> {
-        let mut entries: Vec<NavEntry> = self
-            .iter()
-            .map(|m| NavEntry {
-                code: m.code(),
-                name: m.name(),
-                name_cn: m.name_cn(),
-                icon: m.nav_icon(),
-                section: m.nav_section(),
-                path: route_path(m.code()),
-            })
-            .collect();
-        entries.sort_by_key(|e| e.section.order());
-        entries
-    }
-
-    pub fn all_links(&self) -> Vec<&'static ModuleLink> {
-        self.iter().flat_map(|m| m.links().iter()).collect()
-    }
-
-    pub fn all_scopes(&self) -> Vec<&'static str> {
-        let mut out: Vec<&'static str> = self
-            .iter()
-            .flat_map(|m| m.open_api_scopes().iter().copied())
-            .collect();
-        out.sort();
-        out.dedup();
-        out
-    }
 }
 
-fn route_path(code: &str) -> String {
-    match code {
-        "DSH" => "/".into(),
-        c => format!("/{}", c.to_ascii_lowercase()),
+/// Apply one module's migrations through the same filename-keyed ledger used
+/// by production startup.
+pub async fn run_module_migrations(pool: &SqlitePool, module: &dyn Module) -> anyhow::Result<()> {
+    for (name, sql) in module.migrations() {
+        let already: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM _ep_module_migration WHERE module = ?1 AND name = ?2",
+        )
+        .bind(module.code())
+        .bind(*name)
+        .fetch_optional(pool)
+        .await?;
+        if already.is_some() {
+            continue;
+        }
+        let mut tx = pool.begin().await?;
+        // Allow module migrations to embed multiple top-level statements.
+        for stmt in split_sql(sql) {
+            if stmt.trim().is_empty() {
+                continue;
+            }
+            sqlx::query(&stmt).execute(&mut *tx).await?;
+        }
+        sqlx::query("INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)")
+            .bind(module.code())
+            .bind(*name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        tracing::info!(
+            module = module.code(),
+            name = name,
+            "applied module migration"
+        );
     }
+    Ok(())
 }
 
-fn split_sql(sql: &str) -> Vec<String> {
+/// Split a SQLite migration script into top-level statements.
+///
+/// Semicolons inside string literals, quoted identifiers, and comments are
+/// preserved. This is intentionally small and SQLite-focused; it exists so the
+/// production registry and focused module tests apply migrations the same way.
+pub fn split_sql(sql: &str) -> Vec<String> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State {
         Normal,
@@ -163,12 +130,16 @@ fn split_sql(sql: &str) -> Vec<String> {
                 '-' if chars.peek() == Some(&'-') => {
                     state = State::LineComment;
                     buf.push(ch);
-                    buf.push(chars.next().expect("peeked line-comment marker"));
+                    if let Some(next) = chars.next() {
+                        buf.push(next);
+                    }
                 }
                 '/' if chars.peek() == Some(&'*') => {
                     state = State::BlockComment;
                     buf.push(ch);
-                    buf.push(chars.next().expect("peeked block-comment marker"));
+                    if let Some(next) = chars.next() {
+                        buf.push(next);
+                    }
                 }
                 _ => buf.push(ch),
             },
@@ -176,7 +147,9 @@ fn split_sql(sql: &str) -> Vec<String> {
                 buf.push(ch);
                 if ch == '\'' {
                     if chars.peek() == Some(&'\'') {
-                        buf.push(chars.next().expect("peeked escaped quote"));
+                        if let Some(next) = chars.next() {
+                            buf.push(next);
+                        }
                     } else {
                         state = State::Normal;
                     }
@@ -186,7 +159,9 @@ fn split_sql(sql: &str) -> Vec<String> {
                 buf.push(ch);
                 if ch == '"' {
                     if chars.peek() == Some(&'"') {
-                        buf.push(chars.next().expect("peeked escaped double quote"));
+                        if let Some(next) = chars.next() {
+                            buf.push(next);
+                        }
                     } else {
                         state = State::Normal;
                     }
@@ -213,7 +188,9 @@ fn split_sql(sql: &str) -> Vec<String> {
             State::BlockComment => {
                 buf.push(ch);
                 if ch == '*' && chars.peek() == Some(&'/') {
-                    buf.push(chars.next().expect("peeked block-comment close"));
+                    if let Some(next) = chars.next() {
+                        buf.push(next);
+                    }
                     state = State::Normal;
                 }
             }

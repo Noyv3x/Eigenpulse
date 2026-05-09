@@ -1,6 +1,6 @@
 use ep_core::IconKind;
-use ep_i18n::{t, tf, use_locale};
-use ep_ui::{kpi::Direction, Card, Icon, Kpi, PageHead};
+use ep_i18n::{server_fn_error_text, t, tf, use_locale};
+use ep_ui::{Card, Direction, Icon, Kpi, PageHead};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 // Gated to `ssr` because the only callers (`load_today` body and the
 // `#[cfg(not(feature = "ssr"))]` stub) both live behind the same flag.
 #[cfg(feature = "ssr")]
-use ep_core::fmt_ts_hm;
-#[cfg(feature = "ssr")]
 use ep_core::server_err;
+#[cfg(feature = "ssr")]
+use ep_core::{fmt_ts_hm, TodayActivityOrder};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TodayData {
@@ -37,43 +37,24 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
+        let st = ep_core::app_state_context()?;
         let pool = &st.db;
 
-        // We want "today" to match the user's wall clock, not UTC midnight.
-        // SQLite modifiers compose left-to-right against the running time
-        // string, so the order matters: `'now','localtime'` shifts the
-        // string to local time; `'start of day'` then rounds *that* down
-        // to local 00:00; `'utc'` converts back to UTC so `unixepoch()`
-        // returns the right epoch seconds.
-        // (`'now','start of day','localtime'` would round UTC first, then
-        //  shift, giving UTC midnight off by the local offset — the bug
-        //  the Codex stop-hook caught.)
-        let date: String = sqlx::query_scalar("SELECT date('now','localtime')")
-            .fetch_one(pool)
+        let today = ep_core::load_today_activity(pool, TodayActivityOrder::Asc, None)
             .await
             .map_err(server_err)?;
-        type Row = (i64, String, String, String, Option<f64>, Option<String>);
-        let rows: Vec<Row> = sqlx::query_as(
-            "SELECT occurred_at, module, doc_id, summary, amount, link_doc
-               FROM activity
-              WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
-              ORDER BY occurred_at ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(server_err)?;
 
-        let event_count = rows.len() as u32;
+        let event_count = today.rows.len() as u32;
         let mut fin_expense = 0.0;
         let mut fit_count: u32 = 0;
         let mut lrn_count: u32 = 0;
-        let items: Vec<TodayItem> = rows
+        let items: Vec<TodayItem> = today
+            .rows
             .into_iter()
-            .map(|(ts, module, doc_id, summary, amount, link)| {
-                match module.as_str() {
+            .map(|row| {
+                match row.module.as_str() {
                     "FIN" => {
-                        if let Some(a) = amount {
+                        if let Some(a) = row.amount {
                             if a < 0.0 {
                                 fin_expense += -a;
                             }
@@ -84,18 +65,18 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
                     _ => {}
                 }
                 TodayItem {
-                    time: fmt_ts_hm(Some(ts)),
-                    module,
-                    doc_id,
-                    summary,
-                    amount,
-                    link_doc: link,
+                    time: fmt_ts_hm(Some(row.occurred_at)),
+                    module: row.module,
+                    doc_id: row.doc_id,
+                    summary: row.summary,
+                    amount: row.amount,
+                    link_doc: row.link_doc,
                 }
             })
             .collect();
 
         Ok(TodayData {
-            date,
+            date: today.date,
             items,
             event_count,
             fin_expense,
@@ -118,7 +99,7 @@ pub fn TodayView() -> impl IntoView {
         <div class="view">
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
                 {move || today.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {e.to_string()}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_today(d).into_any(),
                 })}
             </Suspense>
@@ -144,7 +125,7 @@ fn render_today(d: TodayData) -> impl IntoView {
         <PageHead
             code="TDY-01"
             module=t(locale, "app.today.page.module")
-            title="Today"
+            title=t(locale, "app.today.page.title")
             title_cn=title_cn
             sub=t(locale, "app.today.page.subtitle")
         />
@@ -222,11 +203,10 @@ mod boundary_tests {
     /// inside `load_today`. The reversed form
     /// `unixepoch('now','start of day','localtime')` would compute UTC
     /// midnight first, then shift by the local TZ offset — putting the
-    /// boundary up to a full day off the user's actual local midnight. A
-    /// direct probe (commit 4a5d685's body) measured 16h drift under
-    /// `TZ=Asia/Shanghai`; this test ensures any future "simplification"
-    /// of the SQL trips an alarm rather than silently re-introducing the
-    /// bug.
+    /// boundary up to a full day off the user's actual local midnight. Manual
+    /// probes under `TZ=Asia/Shanghai` have shown multi-hour drift for the
+    /// reversed form; this test ensures any future "simplification" of the SQL
+    /// trips an alarm rather than silently re-introducing the bug.
     #[tokio::test(flavor = "current_thread")]
     async fn local_day_boundary_is_in_the_past() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();

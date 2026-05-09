@@ -7,36 +7,28 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_location;
 
 #[component]
-pub fn Topbar() -> impl IntoView {
+pub fn Topbar(sidebar_collapsed: RwSignal<bool>, mobile_nav_open: RwSignal<bool>) -> impl IntoView {
     let loc = use_location();
     let unread = use_unread_signal();
     let tweaks = use_tweaks();
-    // SSR pulls the per-request locale from leptos context (provided by
-    // `app/src/main.rs::provide_state`); hydrate falls back to DEFAULT
-    // because the SSR-rendered text is already correct in the DOM —
-    // closures here only re-fire on theme/unread updates, never on
-    // locale (which only changes via full reload).
+    // SSR pulls the per-request locale from leptos context; hydrate falls
+    // back to the pre-paint `<html lang>` written by theme-init/login shell.
+    // Locale changes still happen via full reload, so this value is stable
+    // for the lifetime of the hydrated app.
     let locale = use_locale();
 
-    let crumb = move || {
-        let p = loc.pathname.get();
-        let item = NAV
-            .iter()
-            .find(|n| {
-                if n.path == "/" {
-                    p == "/"
-                } else {
-                    p == n.path || p.starts_with(&format!("{}/", n.path))
-                }
-            })
-            .copied()
-            .unwrap_or(NAV[0]);
-        (item.code, item.name_key)
-    };
+    let crumb = move || crumb_for_path(&loc.pathname.get());
 
     view! {
         <div class="topbar">
-            <button class="icon-btn" title=t!(locale, ui.topbar.collapse_title)>
+            <button
+                class="icon-btn"
+                title=t!(locale, ui.topbar.collapse_title)
+                on:click=move |_| {
+                    sidebar_collapsed.update(|v| *v = !*v);
+                    mobile_nav_open.update(|v| *v = !*v);
+                }
+            >
                 <Icon kind=IconKind::Menu size=16/>
             </button>
             <div class="topbar-title">
@@ -52,11 +44,6 @@ pub fn Topbar() -> impl IntoView {
                 }}
             </div>
             <div class="topbar-spacer"></div>
-            <div class="search">
-                <Icon kind=IconKind::Search size=14/>
-                <span>{t!(locale, ui.topbar.search_placeholder)}</span>
-                <kbd>"⌘K"</kbd>
-            </div>
             <button
                 class="icon-btn lang-toggle mono"
                 title=t!(locale, ui.topbar.lang_toggle.title)
@@ -90,9 +77,50 @@ pub fn Topbar() -> impl IntoView {
                 <Icon kind=IconKind::Bell size=16/>
                 {move || (unread.get() > 0).then(|| view! { <span class="dot"></span> })}
             </a>
-            <button class="icon-btn" title=t!(locale, ui.topbar.help_title)>
-                <Icon kind=IconKind::Help size=16/>
-            </button>
         </div>
+    }
+}
+
+fn crumb_for_path(path: &str) -> (&'static str, &'static str) {
+    if path == "/notifications" || path.starts_with("/notifications/") {
+        return ("NOT", "ui.topbar.notifications_crumb");
+    }
+    let item = NAV
+        .iter()
+        .find(|n| {
+            if n.path == "/" {
+                path == "/"
+            } else {
+                path == n.path || path.starts_with(&format!("{}/", n.path))
+            }
+        })
+        .copied()
+        .unwrap_or(NAV[0]);
+    (item.code, item.name_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crumb_for_path;
+
+    #[test]
+    fn breadcrumb_maps_notifications_without_sidebar_nav_entry() {
+        assert_eq!(
+            crumb_for_path("/notifications"),
+            ("NOT", "ui.topbar.notifications_crumb")
+        );
+        assert_eq!(
+            crumb_for_path("/notifications/archive"),
+            ("NOT", "ui.topbar.notifications_crumb")
+        );
+    }
+
+    #[test]
+    fn breadcrumb_keeps_sidebar_routes_and_falls_back_to_dashboard() {
+        assert_eq!(
+            crumb_for_path("/finance/ledger"),
+            ("FIN", "ui.sidebar.nav.fin")
+        );
+        assert_eq!(crumb_for_path("/unknown"), ("DSH", "ui.sidebar.nav.dsh"));
     }
 }

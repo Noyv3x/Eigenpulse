@@ -1,16 +1,17 @@
-use crate::model::{Account, Category, Tag, Txn};
+use crate::model::{Account, Category, Txn};
 use crate::server_fns::{
-    add_transfer_inner, create_account_inner, create_category_inner, delete_account_inner,
-    delete_category_inner, list_accounts_inner, set_budget_inner, update_account_inner,
-    update_category_inner, update_txn_inner, UpdateTxnFields,
+    add_transfer_inner, add_txn_inner, create_account_inner, create_category_inner,
+    delete_account_inner, delete_category_inner, dispatch_large_expense_notification,
+    list_accounts_inner, set_budget_inner, update_account_inner, update_category_inner,
+    update_txn_inner, AddTxnFields, UpdateTxnFields,
 };
-use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
-use ep_auth::{pat::require_scope, AuthPat};
-use ep_core::{AppState, NotifyMessage, Severity};
+use ep_auth::{require_scope, AuthPat};
+use ep_core::{ApiJson, ApiQuery, AppState};
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,7 @@ pub struct TxnInput {
     pub amount: f64,
     pub tag: String,
     pub note: Option<String>,
+    pub linked_doc_id: Option<String>,
     pub occurred_at: Option<i64>,
 }
 
@@ -70,125 +72,31 @@ type TxnListRow = (
 async fn post_txn(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Json(input): Json<TxnInput>,
+    ApiJson(input): ApiJson<TxnInput>,
 ) -> Result<Json<TxnCreated>, Response> {
     require_scope(&pat, "fin:write")?;
-    let merchant = input.merchant.trim().to_string();
-    if merchant.is_empty() {
-        return Err(error_json(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "merchant is required",
-        ));
-    }
-    let tag_kind = match Tag::parse(input.tag.trim()) {
-        Some(k) => k,
-        None => {
-            return Err(error_json(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                &format!("tag must be one of exp/inc/tfr, got '{}'", input.tag),
-            ))
-        }
-    };
-    if !input.amount.is_finite() {
-        return Err(error_json(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "amount must be a finite number",
-        ));
-    }
-    if input.account_code.trim().is_empty() {
-        return Err(error_json(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "account_code is required",
-        ));
-    }
-    if input.category_code.trim().is_empty() {
-        return Err(error_json(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "category_code is required",
-        ));
-    }
-    let (cat_exists, acc_exists): (i64, i64) = tokio::try_join!(
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
-            .bind(&input.category_code)
-            .fetch_one(&state.db),
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
-            .bind(&input.account_code)
-            .fetch_one(&state.db),
-    )
-    .map_err(db_err_response)?;
-    if cat_exists == 0 {
-        return Err(error_json(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            &format!("unknown category_code '{}'", input.category_code),
-        ));
-    }
-    if acc_exists == 0 {
-        return Err(error_json(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            &format!("unknown account_code '{}'", input.account_code),
-        ));
-    }
-
     let occurred = input
         .occurred_at
         .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp());
 
-    let mut tx = state.db.begin().await.map_err(db_err_response)?;
-    let doc_id = ep_core::next_doc_id(&mut tx, "FIN", ep_core::DocIdShape::YearSerial5)
-        .await
-        .map_err(db_err_response)?;
-    sqlx::query(
-        "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+    let txn = add_txn_inner(
+        &state.db,
+        AddTxnFields {
+            merchant: input.merchant,
+            category_code: input.category_code,
+            account_code: input.account_code,
+            amount: input.amount,
+            tag: input.tag,
+            note: input.note,
+            linked_doc_id: input.linked_doc_id,
+            occurred_at: occurred,
+        },
     )
-    .bind(&doc_id).bind(occurred).bind(&merchant).bind(&input.category_code)
-    .bind(&input.account_code).bind(input.amount).bind(tag_kind.as_str())
-    .bind(&input.note).bind(Option::<String>::None)
-    .execute(&mut *tx).await.map_err(db_err_response)?;
-    sqlx::query("UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2")
-        .bind(input.amount)
-        .bind(&input.account_code)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err_response)?;
-    sqlx::query(
-        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc)
-         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5)",
-    )
-    .bind(occurred)
-    .bind(&doc_id)
-    .bind(&merchant)
-    .bind(input.amount)
-    .bind(Option::<String>::None)
-    .execute(&mut *tx)
     .await
-    .map_err(db_err_response)?;
-    tx.commit().await.map_err(db_err_response)?;
+    .map_err(server_err_to_response)?;
+    dispatch_large_expense_notification(&state.notify, &txn).await;
 
-    if input.amount < -500.0 {
-        let n = NotifyMessage {
-            severity: Severity::Warn,
-            module: Some("FIN".into()),
-            title: format!("Large expense · {}", merchant),
-            body: Some(format!(
-                "¥{:.2} ({})",
-                input.amount.abs(),
-                input.category_code
-            )),
-            link: Some("/finance".into()),
-            doc_ref: Some(doc_id.clone()),
-        };
-        let _ = state.notify.dispatch(n).await;
-    }
-
-    Ok(Json(TxnCreated { doc_id }))
+    Ok(Json(TxnCreated { doc_id: txn.doc_id }))
 }
 
 async fn list_txn(
@@ -223,6 +131,7 @@ async fn delete_txn(
     Path(doc_id): Path<String>,
 ) -> Result<Json<TxnDeleted>, Response> {
     require_scope(&pat, "fin:write")?;
+    let doc_id = crate::server_fns::normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     let existed = crate::server_fns::delete_txn_inner(&state.db, &doc_id)
         .await
         .map_err(|e| {
@@ -234,11 +143,10 @@ async fn delete_txn(
             )
         })?;
     if !existed {
-        return Err(error_json(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("no fin_txn with doc_id '{}'", doc_id),
-        ));
+        return Err(server_err_to_response(ep_i18n::err_with(
+            "finance.err.txn_not_found",
+            &doc_id,
+        )));
     }
     Ok(Json(TxnDeleted { doc_id }))
 }
@@ -266,9 +174,10 @@ async fn patch_txn(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
     Path(doc_id): Path<String>,
-    Json(input): Json<PatchTxnInput>,
+    ApiJson(input): ApiJson<PatchTxnInput>,
 ) -> Result<Json<TxnUpdated>, Response> {
     require_scope(&pat, "fin:write")?;
+    let doc_id = crate::server_fns::normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     type Row = (String, String, String, f64, Option<String>);
     let cur: Option<Row> = sqlx::query_as(
         "SELECT merchant, category_code, account_code, amount, note
@@ -279,17 +188,15 @@ async fn patch_txn(
     .await
     .map_err(db_err_response)?;
     let Some((cm, cc, cac, ca, cn)) = cur else {
-        return Err(error_json(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("Transaction '{doc_id}' not found"),
-        ));
+        return Err(server_err_to_response(ep_i18n::err_with(
+            "finance.err.txn_not_found",
+            &doc_id,
+        )));
     };
     // For optional text fields we can't tell "field omitted" from
     // "field set to null" in this JSON shape. Convention: missing/null keeps
-    // current value; empty string clears note=NULL.
+    // current value; blank/whitespace clears note=NULL.
     let new_note: Option<String> = match input.note {
-        Some(s) if s.is_empty() => None,
         Some(s) => Some(s),
         None => cn,
     };
@@ -325,7 +232,7 @@ struct TransferCreated {
 async fn post_transfer(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Json(input): Json<TransferInput>,
+    ApiJson(input): ApiJson<TransferInput>,
 ) -> Result<Json<TransferCreated>, Response> {
     require_scope(&pat, "fin:write")?;
     // Validation (FK + finite + distinct + non-empty) lives in
@@ -386,7 +293,7 @@ struct AccountCreated {
 async fn post_account(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Json(input): Json<CreateAccountInput>,
+    ApiJson(input): ApiJson<CreateAccountInput>,
 ) -> Result<Json<AccountCreated>, Response> {
     require_scope(&pat, "fin:write")?;
     let acc = create_account_inner(
@@ -414,9 +321,10 @@ async fn patch_account(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
-    Json(input): Json<PatchAccountInput>,
+    ApiJson(input): ApiJson<PatchAccountInput>,
 ) -> Result<Json<Account>, Response> {
     require_scope(&pat, "fin:write")?;
+    let code = code.trim().to_string();
     type Row = (String, String, String);
     let cur: Option<Row> =
         sqlx::query_as("SELECT name, type, tone FROM fin_account WHERE code = ?1")
@@ -425,11 +333,10 @@ async fn patch_account(
             .await
             .map_err(db_err_response)?;
     let Some((cur_name, cur_type, cur_tone)) = cur else {
-        return Err(error_json(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("Account '{code}' not found"),
-        ));
+        return Err(server_err_to_response(ep_i18n::err_with(
+            "finance.err.account_not_found",
+            &code,
+        )));
     };
     let acc = update_account_inner(
         &state.db,
@@ -454,6 +361,7 @@ async fn delete_account(
     Path(code): Path<String>,
 ) -> Result<Json<AccountDeleted>, Response> {
     require_scope(&pat, "fin:write")?;
+    let code = code.trim().to_string();
     delete_account_inner(&state.db, code.clone())
         .await
         .map_err(server_err_to_response)?;
@@ -508,7 +416,7 @@ struct CategoryCreated {
 async fn post_category(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Json(input): Json<CreateCategoryInput>,
+    ApiJson(input): ApiJson<CreateCategoryInput>,
 ) -> Result<Json<CategoryCreated>, Response> {
     require_scope(&pat, "fin:write")?;
     let cat = create_category_inner(
@@ -534,9 +442,10 @@ async fn patch_category(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
-    Json(input): Json<PatchCategoryInput>,
+    ApiJson(input): ApiJson<PatchCategoryInput>,
 ) -> Result<Json<Category>, Response> {
     require_scope(&pat, "fin:write")?;
+    let code = code.trim().to_string();
     type Row = (String, String, i64);
     let cur: Option<Row> =
         sqlx::query_as("SELECT name, tone, sort_order FROM fin_category WHERE code = ?1")
@@ -545,11 +454,10 @@ async fn patch_category(
             .await
             .map_err(db_err_response)?;
     let Some((cur_name, cur_tone, cur_sort)) = cur else {
-        return Err(error_json(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            &format!("Category '{code}' not found"),
-        ));
+        return Err(server_err_to_response(ep_i18n::err_with(
+            "finance.err.category_not_found",
+            &code,
+        )));
     };
     let cat = update_category_inner(
         &state.db,
@@ -574,6 +482,7 @@ async fn delete_category(
     Path(code): Path<String>,
 ) -> Result<Json<CategoryDeleted>, Response> {
     require_scope(&pat, "fin:write")?;
+    let code = code.trim().to_string();
     delete_category_inner(&state.db, code.clone())
         .await
         .map_err(server_err_to_response)?;
@@ -599,15 +508,17 @@ struct BudgetRow {
 async fn list_budget(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Query(q): Query<ListBudgetQuery>,
+    ApiQuery(q): ApiQuery<ListBudgetQuery>,
 ) -> Result<Json<Vec<BudgetRow>>, Response> {
     require_scope(&pat, "fin:read")?;
+    let period =
+        crate::server_fns::normalize_budget_period(&q.period).map_err(server_err_to_response)?;
     type Row = (String, String, f64);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT period, category_code, amount
            FROM fin_budget WHERE period = ?1 ORDER BY category_code",
     )
-    .bind(&q.period)
+    .bind(&period)
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
@@ -632,15 +543,18 @@ struct PostBudgetInput {
 async fn post_budget(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
-    Json(input): Json<PostBudgetInput>,
+    ApiJson(input): ApiJson<PostBudgetInput>,
 ) -> Result<Json<BudgetRow>, Response> {
     require_scope(&pat, "fin:write")?;
-    set_budget_inner(&state.db, &input.period, &input.category_code, input.amount)
+    let period = crate::server_fns::normalize_budget_period(&input.period)
+        .map_err(server_err_to_response)?;
+    let category_code = input.category_code.trim().to_string();
+    set_budget_inner(&state.db, &period, &category_code, input.amount)
         .await
         .map_err(server_err_to_response)?;
     Ok(Json(BudgetRow {
-        period: input.period,
-        category_code: input.category_code,
+        period,
+        category_code,
         amount: input.amount,
     }))
 }
@@ -657,6 +571,11 @@ async fn delete_budget(
     Path((period, category_code)): Path<(String, String)>,
 ) -> Result<Json<BudgetDeleted>, Response> {
     require_scope(&pat, "fin:write")?;
+    let period =
+        crate::server_fns::normalize_budget_period(&period).map_err(server_err_to_response)?;
+    let category_code = ep_core::trim_to_option(&category_code).ok_or_else(|| {
+        server_err_to_response(ep_i18n::err("finance.err.category_code_required"))
+    })?;
     sqlx::query("DELETE FROM fin_budget WHERE period = ?1 AND category_code = ?2")
         .bind(&period)
         .bind(&category_code)
@@ -673,9 +592,17 @@ async fn delete_budget(
 // Error mapping
 // ---------------------------------------------------------------------------
 
-/// `Args` → 400 (user-visible message); everything else → logged 500.
+/// Domain `Args` errors keep their i18n code/message; everything else is
+/// logged and hidden behind a generic 500.
 fn server_err_to_response(e: ServerFnError) -> Response {
     if let ServerFnError::Args(msg) = &e {
+        if let Some((code, payload)) = ep_i18n::parse_err(&e) {
+            return error_json(
+                status_for_i18n_error(code),
+                code,
+                &message_for_i18n_error(code, payload),
+            );
+        }
         return error_json(StatusCode::BAD_REQUEST, "bad_request", msg);
     }
     tracing::warn!(error = %e, "fin api helper error");
@@ -684,6 +611,23 @@ fn server_err_to_response(e: ServerFnError) -> Response {
         "internal",
         "database error",
     )
+}
+
+fn status_for_i18n_error(code: &str) -> StatusCode {
+    if code.ends_with("_not_found") {
+        StatusCode::NOT_FOUND
+    } else if code.ends_with("_taken") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+fn message_for_i18n_error(code: &str, payload: Option<&str>) -> String {
+    match payload {
+        Some(payload) => ep_i18n::tf(ep_i18n::Locale::En, code, &[("payload", payload)]),
+        None => ep_i18n::t(ep_i18n::Locale::En, code).to_string(),
+    }
 }
 
 /// 500 wrapper that logs server-side; the response message stays generic.
@@ -697,13 +641,30 @@ fn db_err_response<E: std::fmt::Display>(e: E) -> Response {
 }
 
 fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
-    let body = serde_json::json!({
-        "error": { "code": code, "message": message }
-    });
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        body.to_string(),
-    )
-        .into_response()
+    ep_core::api_error_response(status, code, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn i18n_server_errors_map_to_api_statuses_and_messages() {
+        assert_eq!(
+            status_for_i18n_error("finance.err.txn_not_found"),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_for_i18n_error("finance.err.account_code_taken"),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_for_i18n_error("finance.err.amount_must_be_nonzero"),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            message_for_i18n_error("finance.err.txn_not_found", Some("FIN-1")),
+            "Transaction 'FIN-1' not found"
+        );
+    }
 }

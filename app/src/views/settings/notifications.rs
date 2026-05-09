@@ -1,12 +1,12 @@
 use ep_core::IconKind;
-use ep_i18n::{t, use_locale};
+use ep_i18n::{server_fn_error_text, t, use_locale};
 use ep_ui::{Card, Icon, PageHead, RowDeleteAction, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::server_err;
+use ep_core::server_err;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Public-facing channel summary. **Never** carries `config_json` —
@@ -22,12 +22,76 @@ pub struct ChannelDto {
     pub created_at: i64,
 }
 
+#[cfg(feature = "ssr")]
+fn normalize_channel_input(
+    kind: String,
+    name: String,
+    config_json: String,
+    min_severity: String,
+) -> Result<(String, String, String, String), ServerFnError> {
+    let kind = kind.trim().to_ascii_lowercase();
+    if !["inapp", "smtp", "bark", "telegram", "discord"].contains(&kind.as_str()) {
+        return Err(ep_i18n::err_with(
+            "app.settings.notifications.err_kind_unknown",
+            &kind,
+        ));
+    }
+
+    let name = ep_core::trim_to_option(&name)
+        .ok_or_else(|| ep_i18n::err("app.settings.notifications.err_name_required"))?;
+    if name.chars().count() > ep_notify::MAX_CHANNEL_NAME_CHARS {
+        return Err(ep_i18n::err_with(
+            "app.settings.notifications.err_name_too_long",
+            ep_notify::MAX_CHANNEL_NAME_CHARS,
+        ));
+    }
+
+    let raw_min_severity = min_severity.trim();
+    let min_severity = ep_core::Severity::try_parse(raw_min_severity)
+        .ok_or_else(|| {
+            ep_i18n::err_with(
+                "app.settings.notifications.err_min_severity_unknown",
+                raw_min_severity,
+            )
+        })?
+        .as_str()
+        .to_string();
+
+    let config_json = config_json.trim().to_string();
+    if serde_json::from_str::<serde_json::Value>(&config_json).is_err() {
+        return Err(ep_i18n::err(
+            "app.settings.notifications.err_config_json_invalid",
+        ));
+    }
+    if let Err(e) = ep_notify::build_notifier(&kind, &config_json) {
+        tracing::warn!(kind = %kind, error = %e, "invalid notify channel config");
+        return Err(ep_i18n::err_with(
+            "app.settings.notifications.err_config_json_kind",
+            &kind,
+        ));
+    }
+
+    Ok((kind, name, config_json, min_severity))
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_channel_id(id: i64) -> Result<i64, ServerFnError> {
+    if id > 0 {
+        Ok(id)
+    } else {
+        Err(ep_i18n::err_with(
+            "app.settings.notifications.err_channel_not_found",
+            id.to_string(),
+        ))
+    }
+}
+
 #[server(ListChannels, "/api/_internal/cfg", "Url", "list_channels")]
 pub async fn list_channels() -> Result<Vec<ChannelDto>, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
+        let st = ep_core::app_state_context()?;
         let rows = ep_notify::list_channels(&st.db).await.map_err(server_err)?;
         Ok(rows
             .into_iter()
@@ -57,13 +121,9 @@ pub async fn create_channel(
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        if !["inapp", "smtp", "bark", "telegram", "discord"].contains(&kind.as_str()) {
-            return Err(ServerFnError::Args(format!("unknown kind: {kind}")));
-        }
-        if serde_json::from_str::<serde_json::Value>(&config_json).is_err() {
-            return Err(ServerFnError::Args("config_json must be valid JSON".into()));
-        }
-        let st: ep_core::AppState = expect_context();
+        let (kind, name, config_json, min_severity) =
+            normalize_channel_input(kind, name, config_json, min_severity)?;
+        let st = ep_core::app_state_context()?;
         ep_notify::create_channel(&st.db, &kind, &name, &config_json, &min_severity)
             .await
             .map_err(server_err)
@@ -74,15 +134,111 @@ pub async fn create_channel(
     }
 }
 
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_channel_input_trims_and_canonicalizes() {
+        let (kind, name, config_json, min_severity) = normalize_channel_input(
+            " INAPP ".into(),
+            "  Local inbox  ".into(),
+            "  {}  ".into(),
+            " WARN ".into(),
+        )
+        .expect("valid input");
+
+        assert_eq!(kind, "inapp");
+        assert_eq!(name, "Local inbox");
+        assert_eq!(config_json, "{}");
+        assert_eq!(min_severity, "warn");
+    }
+
+    #[test]
+    fn normalize_channel_input_accepts_severity_aliases() {
+        let (_, _, _, min_severity) = normalize_channel_input(
+            "inapp".into(),
+            "Local inbox".into(),
+            "{}".into(),
+            " CRITICAL ".into(),
+        )
+        .expect("valid critical alias");
+
+        assert_eq!(min_severity, "crit");
+    }
+
+    #[test]
+    fn normalize_channel_input_rejects_blank_name() {
+        let err = normalize_channel_input("inapp".into(), "   ".into(), "{}".into(), "info".into())
+            .expect_err("blank name should fail");
+
+        assert_eq!(
+            ep_i18n::parse_err(&err).map(|(code, _)| code),
+            Some("app.settings.notifications.err_name_required")
+        );
+    }
+
+    #[test]
+    fn normalize_channel_input_rejects_overlong_name() {
+        let err = normalize_channel_input(
+            "inapp".into(),
+            "x".repeat(ep_notify::MAX_CHANNEL_NAME_CHARS + 1),
+            "{}".into(),
+            "info".into(),
+        )
+        .expect_err("overlong name should fail");
+
+        assert_eq!(
+            ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("app.settings.notifications.err_name_too_long", "64"))
+        );
+    }
+
+    #[test]
+    fn normalize_channel_input_rejects_mismatched_config() {
+        let err =
+            normalize_channel_input("telegram".into(), "Ops".into(), "{}".into(), "info".into())
+                .expect_err("missing telegram fields should fail");
+
+        assert_eq!(
+            ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some((
+                "app.settings.notifications.err_config_json_kind",
+                "telegram"
+            ))
+        );
+    }
+
+    #[test]
+    fn normalize_channel_id_rejects_non_positive_ids() {
+        assert_eq!(normalize_channel_id(42).unwrap(), 42);
+
+        let err = normalize_channel_id(0).expect_err("invalid id");
+        assert_eq!(
+            ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("app.settings.notifications.err_channel_not_found", "0"))
+        );
+    }
+}
+
 #[server(DeleteChannel, "/api/_internal/cfg", "Url", "delete_channel")]
 pub async fn delete_channel(id: i64) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
-        ep_notify::delete_channel(&st.db, id)
+        let id = normalize_channel_id(id)?;
+        let st = ep_core::app_state_context()?;
+        let deleted = ep_notify::delete_channel(&st.db, id)
             .await
-            .map_err(server_err)
+            .map_err(server_err)?;
+        if deleted {
+            Ok(())
+        } else {
+            Err(ep_i18n::err_with(
+                "app.settings.notifications.err_channel_not_found",
+                id.to_string(),
+            ))
+        }
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -95,15 +251,22 @@ pub async fn toggle_channel(id: i64) -> Result<bool, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
-        let new_enabled: i64 = sqlx::query_scalar(
+        let id = normalize_channel_id(id)?;
+        let st = ep_core::app_state_context()?;
+        let new_enabled: Option<i64> = sqlx::query_scalar(
             "UPDATE notify_channel SET enabled = NOT enabled WHERE id = ?1 RETURNING enabled",
         )
         .bind(id)
-        .fetch_one(&st.db)
+        .fetch_optional(&st.db)
         .await
         .map_err(server_err)?;
-        Ok(new_enabled != 0)
+        match new_enabled {
+            Some(new_enabled) => Ok(new_enabled != 0),
+            None => Err(ep_i18n::err_with(
+                "app.settings.notifications.err_channel_not_found",
+                id.to_string(),
+            )),
+        }
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -116,22 +279,28 @@ pub async fn test_channel(id: i64) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
-        let row: (String, String) =
+        let id = normalize_channel_id(id)?;
+        let st = ep_core::app_state_context()?;
+        let row: Option<(String, String)> =
             sqlx::query_as("SELECT kind, config_json FROM notify_channel WHERE id = ?1")
                 .bind(id)
-                .fetch_one(&st.db)
+                .fetch_optional(&st.db)
                 .await
                 .map_err(server_err)?;
+        let Some(row) = row else {
+            return Err(ep_i18n::err_with(
+                "app.settings.notifications.err_channel_not_found",
+                id.to_string(),
+            ));
+        };
         // The notifier `Err` from lettre/reqwest can include the SMTP connection
         // string with password, the Bark device-key URL, the Telegram bot URL
-        // (`api.telegram.org/bot<TOKEN>/sendMessage`), or the Discord webhook URL —
-        // i.e. the very secrets stored in `config_json`. Forwarding it via
-        // `server_err` would surface those secrets in the browser. Log the full
-        // detail server-side and return a generic, channel-typed message.
+        // (`api.telegram.org/bot<TOKEN>/sendMessage`), or the Discord webhook URL.
+        // Log that detail server-side and return only a localized, channel-typed
+        // message over the server-fn wire.
         ep_notify::test_channel(&row.0, &row.1).await.map_err(|e| {
             tracing::warn!(channel_id = id, kind = %row.0, error = %e, "notify channel test failed");
-            server_err(format!("{} channel test failed; details were logged on the server", row.0))
+            ep_i18n::err_with("app.settings.notifications.err_test_channel", &row.0)
         })
     }
     #[cfg(not(feature = "ssr"))]
@@ -167,7 +336,7 @@ pub fn NotificationChannelsView() -> impl IntoView {
             <PageHead
                 code="CFG-NOT-01"
                 module=t(locale, "app.settings.notifications.page.module")
-                title="Notifications"
+                title=t(locale, "app.settings.notifications.page.title")
                 title_cn=t(locale, "app.settings.notifications.page.title_cn")
                 sub=t(locale, "app.settings.notifications.page.sub")
             />
@@ -215,7 +384,7 @@ pub fn NotificationChannelsView() -> impl IntoView {
                         // <ActionForm> rewrites the slot. See docs/follow-ups.md #26.
                         <span class="error-slot">
                             {move || create.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{e.to_string()}</span>
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
                             })}
                         </span>
                     </div>
@@ -225,7 +394,7 @@ pub fn NotificationChannelsView() -> impl IntoView {
             <div class="test-notice-slot">
                 {move || test_msg.get().map(|r| match r {
                     Ok(_) => view! { <p style="margin:12px 0;color:var(--primary-ink)" class="mono">{t(locale, "app.settings.notifications.test_ok")}</p> }.into_any(),
-                    Err(e) => view! { <p style="margin:12px 0;color:var(--rose-ink)" class="mono">{t(locale, "app.settings.notifications.test_failed")} {e.to_string()}</p> }.into_any(),
+                    Err(e) => view! { <p style="margin:12px 0;color:var(--rose-ink)" class="mono">{t(locale, "app.settings.notifications.test_failed")} {server_fn_error_text(&e)}</p> }.into_any(),
                 })}
             </div>
 
@@ -234,7 +403,7 @@ pub fn NotificationChannelsView() -> impl IntoView {
             <Card title=t(locale, "app.settings.notifications.card.list") code="CFG-NOT-LST">
                 <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:120px">{t(locale, "app.common.loading")}</div> }>
                     {move || channels.get().map(|res| match res {
-                        Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {e.to_string()}</p> }.into_any(),
+                        Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</p> }.into_any(),
                         Ok(rows) if rows.is_empty() => view! { <p class="muted">{t(locale, "app.settings.notifications.empty")}</p> }.into_any(),
                         Ok(rows) => view! {
                             <table class="tbl">

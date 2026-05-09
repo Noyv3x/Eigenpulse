@@ -9,8 +9,11 @@ services:
     volumes:
       - ep-data:/data
     environment:
-      EP_SECRET:         "${EP_SECRET:?set EP_SECRET to a 64+ character hex value}"
       EP_ADMIN_PASSWORD: "${EP_ADMIN_PASSWORD:?required for first boot}"
+      # Optional. If EP_SECRET is not set, the binary reads or creates
+      # EP_SECRET_FILE under /data so the signing key survives container restarts.
+      EP_SECRET:         "${EP_SECRET:-}"
+      EP_SECRET_FILE:    "${EP_SECRET_FILE:-/data/secret.key}"
       # Set to "1" only if you serve over HTTPS (public reverse proxy with TLS).
       # Leave unset for LAN/NAS HTTP access so the session cookie can persist.
       EP_COOKIE_SECURE:  "${EP_COOKIE_SECURE:-0}"

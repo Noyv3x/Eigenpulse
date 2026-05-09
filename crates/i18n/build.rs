@@ -6,7 +6,7 @@
 //! violation, or nested-JSON schema — the build is the right place to
 //! enforce these invariants.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -102,6 +102,15 @@ fn main() {
             "i18n: locale key sets diverge.\n  only in zh-CN: {only_zh:?}\n  only in en: {only_en:?}"
         );
     }
+    for key in zh_keys {
+        let zh_placeholders = placeholders(catalogs["zh-CN"].get(key).expect("zh key exists"));
+        let en_placeholders = placeholders(catalogs["en"].get(key).expect("en key exists"));
+        if zh_placeholders != en_placeholders {
+            panic!(
+                "i18n: placeholder set diverges for key `{key}`.\n  zh-CN: {zh_placeholders:?}\n  en: {en_placeholders:?}"
+            );
+        }
+    }
 
     write_generated(&catalogs["zh-CN"], &catalogs["en"]);
 }
@@ -158,6 +167,38 @@ fn namespace_for_crate(name: &str) -> String {
         "mod_marketplace" => "marketplace".into(),
         other => other.into(),
     }
+}
+
+fn placeholders(template: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end_rel) = template[i + 1..].find('}') {
+                let name = &template[i + 1..i + 1 + end_rel];
+                if is_placeholder_name(name) {
+                    out.insert(name.to_string());
+                }
+                i += 1 + end_rel + 1;
+                continue;
+            }
+        }
+        let Some(ch) = template[i..].chars().next() else {
+            break;
+        };
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn is_placeholder_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn write_generated(zh: &BTreeMap<String, String>, en: &BTreeMap<String, String>) {

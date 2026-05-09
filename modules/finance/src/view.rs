@@ -1,11 +1,15 @@
 use crate::model::{Account, AccountStats, Category, MonthBucket, Tag, Txn, ACCOUNT_TYPES, TONES};
 use crate::server_fns::*;
-use ep_core::{fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, IconKind, Tone};
-use ep_i18n::{parse_err, t, tf, use_locale};
-use ep_ui::kpi::Direction;
-use ep_ui::{Card, ChartBars, Icon, Kpi, PageHead, RowDeleteAction, TabSpec, Tabs, Tag as UiTag};
+use ep_core::{
+    fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, unix_to_ymdhm, ymd_to_unix_midnight,
+    IconKind, Tone,
+};
+use ep_i18n::{server_fn_error_text, t, tf, use_locale};
+use ep_ui::{
+    escape_js_single_quoted, Card, ChartBars, Direction, Icon, Kpi, PageHead, RowDeleteAction,
+    TabSpec, Tabs, Tag as UiTag,
+};
 use leptos::prelude::*;
-use leptos::server_fn::ServerFnError;
 
 #[derive(Clone, Copy)]
 struct LedgerFilters {
@@ -13,24 +17,6 @@ struct LedgerFilters {
     category: RwSignal<String>,
     date_from: RwSignal<String>,
     date_to: RwSignal<String>,
-}
-
-/// Render a server-fn error for display: error-code variants
-/// (`err:finance.err.X[:payload]`) get translated to the active locale via
-/// the phf catalog; everything else (PAT-facing English contracts, system
-/// errors) falls through to `Display`. Pulls the locale from leptos
-/// context, which the SSR `locale_layer` middleware seeded.
-fn fmt_server_err(e: &ServerFnError) -> String {
-    if let Some((code, payload)) = parse_err(e) {
-        let locale = use_locale();
-        // Bind to a local so the slice we pass to `tf` outlives the call —
-        // an inline `&[("payload", p)]` ties the temp's lifetime to the
-        // expression rather than the function body.
-        let pair = [("payload", payload.unwrap_or(""))];
-        let args: &[(&str, &str)] = if payload.is_some() { &pair } else { &[] };
-        return tf(locale, code, args);
-    }
-    e.to_string()
 }
 
 #[component]
@@ -85,7 +71,7 @@ pub fn FinanceView() -> impl IntoView {
             <PageHead
                 code="FIN-01"
                 module=t(locale, "finance.page.module")
-                title="Finance"
+                title=t(locale, "finance.page.title")
                 title_cn=t(locale, "finance.page.title_cn")
                 sub=t(locale, "finance.page.sub")
                 actions=view! {
@@ -102,7 +88,7 @@ pub fn FinanceView() -> impl IntoView {
 
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
                 {move || ledger.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {fmt_server_err(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(data) => render_ledger(
                         data, active, add, delete, set_budget, import_budgets,
                         create_account, update_account, delete_account,
@@ -310,12 +296,12 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
     let savings_pct = (m.savings_rate * 100.0).round() as u32;
     // Net-worth tone tracks the most recent week: + → green/healthy,
     // 0 → flat/neutral, − → rose/watch.
-    let (worth_tone, worth_label) = if m.balance_delta > 0.0 {
-        (Tone::Green, "Healthy")
+    let (worth_tone, worth_label_key) = if m.balance_delta > 0.0 {
+        (Tone::Green, "finance.banner.status.healthy")
     } else if m.balance_delta == 0.0 {
-        (Tone::None, "Flat")
+        (Tone::None, "finance.banner.status.flat")
     } else {
-        (Tone::Rose, "Watch")
+        (Tone::Rose, "finance.banner.status.watch")
     };
     view! {
         <div class="module-banner">
@@ -323,7 +309,7 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
                     <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">{t(locale, "finance.banner.net_worth")}</span>
-                    <UiTag tone=worth_tone dot=true>{worth_label}</UiTag>
+                    <UiTag tone=worth_tone dot=true>{t(locale, worth_label_key)}</UiTag>
                 </div>
                 <div class="mono" style="font-size:32px;font-weight:600;letter-spacing:-0.02em;line-height:1.1">
                     "¥" {fmt_money(m.balance)}
@@ -439,6 +425,7 @@ fn render_new_txn_form(
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.merchant_desc")}</span>
                         <input id="fin-new-merchant" name="merchant" required
+                               maxlength=MAX_TXN_MERCHANT_CHARS.to_string()
                                placeholder=t(locale, "finance.placeholder.merchant") style=INPUT_STYLE/>
                     </label>
                     <label class="vstack" style="gap:4px">
@@ -479,7 +466,8 @@ fn render_new_txn_form(
                 <div style="display:grid;grid-template-columns:2fr 2fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
-                        <input name="note" placeholder="…" style=INPUT_STYLE/>
+                        <input name="note" maxlength=MAX_TXN_NOTE_CHARS.to_string()
+                               placeholder="…" style=INPUT_STYLE/>
                     </label>
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.date_default")}</span>
@@ -488,7 +476,7 @@ fn render_new_txn_form(
                     </label>
                     <span class="error-slot" style="align-self:center">
                         {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{fmt_server_err(&e)}</span>
+                            <span class="tag rose">{server_fn_error_text(&e)}</span>
                         })}
                     </span>
                     <button class="btn primary" type="submit" style="align-self:center">
@@ -545,11 +533,12 @@ fn render_transfer_form(
                 <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
-                        <input name="note" placeholder=t(locale, "finance.placeholder.transfer_note") style=INPUT_STYLE/>
+                        <input name="note" maxlength=MAX_TXN_NOTE_CHARS.to_string()
+                               placeholder=t(locale, "finance.placeholder.transfer_note") style=INPUT_STYLE/>
                     </label>
                     <span class="error-slot" style="align-self:center">
                         {move || add_transfer.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{fmt_server_err(&e)}</span>
+                            <span class="tag rose">{server_fn_error_text(&e)}</span>
                         })}
                     </span>
                     <button class="btn primary" type="submit" style="align-self:center">
@@ -584,9 +573,9 @@ fn render_ledger_tab(
     // whenever the resource refetches (add / delete), so the export link picks
     // up new rows automatically — no reactive attribute needed.
     let export_href = csv_data_uri(&txns);
-    // Same lifetime story for AI suggestions: compute now while we still
+    // Same lifetime story for rule suggestions: compute now while we still
     // hold `&d`, hand the owned `Vec<Suggestion>` to the view macro.
-    let suggestions = crate::suggestions::compute_suggestions(d);
+    let suggestions = crate::suggestions::compute_suggestions(d, locale);
 
     // The table is "most recent 50, all-time" — the sub-label has to
     // surface that and the month-specific count without conflating them.
@@ -719,7 +708,7 @@ fn render_ledger_tab(
                     }}
                 </Card>
 
-                <Card title=t(locale, "finance.card.ai.title") code="FIN-AI-01" sub=t(locale, "finance.card.ai.sub")>
+                <Card title=t(locale, "finance.card.suggestions.title") code="FIN-RUL-01" sub=t(locale, "finance.card.suggestions.sub")>
                     <div class="vstack" style="gap:10px">
                         {render_suggestions(suggestions)}
                     </div>
@@ -732,7 +721,8 @@ fn render_ledger_tab(
 fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoView {
     let locale = use_locale();
     if items.is_empty() {
-        return view! { <p class="muted">{t(locale, "finance.card.ai.empty")}</p> }.into_any();
+        return view! { <p class="muted">{t(locale, "finance.card.suggestions.empty")}</p> }
+            .into_any();
     }
     // Wrap each row in an anchor when the rule provided a link target so the
     // suggestion is one click instead of a "look at this" toast. Inline
@@ -887,7 +877,9 @@ fn render_txn_row(
                                         <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.merchant")}</span>
-                                                <input name="merchant" required value=form_merchant style=INPUT_STYLE/>
+                                                <input name="merchant" required
+                                                       maxlength=MAX_TXN_MERCHANT_CHARS.to_string()
+                                                       value=form_merchant style=INPUT_STYLE/>
                                             </label>
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.amount")}</span>
@@ -926,13 +918,14 @@ fn render_txn_row(
                                         <div style="display:grid;grid-template-columns:1fr;gap:10px">
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.note")}</span>
-                                                <input name="note" value=form_note style=INPUT_STYLE/>
+                                                <input name="note" maxlength=MAX_TXN_NOTE_CHARS.to_string()
+                                                       value=form_note style=INPUT_STYLE/>
                                             </label>
                                         </div>
                                         <div class="hstack" style="gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
                                             <span class="error-slot">
                                                 {move || update_txn.value().get().and_then(|r| r.err()).map(|e| view! {
-                                                    <span class="tag rose">{fmt_server_err(&e)}</span>
+                                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
                                                 })}
                                             </span>
                                             <button class="btn ghost" type="button"
@@ -977,13 +970,11 @@ fn render_txn_row(
 }
 
 /// Format a unix-second timestamp to `YYYY-MM-DD` (UTC). Used by the inline
-/// edit form's `<input type="date">`. Pure math — `from_unix_timestamp` is
-/// safe on wasm32 (no `now`-style clock dependency).
+/// edit form's `<input type="date">`.
 fn fmt_ts_yyyymmdd(ts: i64) -> String {
-    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(ts) else {
-        return String::new();
-    };
-    format!("{:04}-{:02}-{:02}", dt.year(), dt.month() as u8, dt.day())
+    unix_to_ymdhm(ts)
+        .map(|(y, m, d, _, _)| format!("{y:04}-{m:02}-{d:02}"))
+        .unwrap_or_default()
 }
 
 fn render_budget(
@@ -1067,7 +1058,7 @@ fn render_budget(
                                 </ActionForm>
                                 <span class="error-slot">
                                     {move || import_budgets.value().get().and_then(|r| r.err()).map(|e| view! {
-                                        <span class="tag rose">{fmt_server_err(&e)}</span>
+                                        <span class="tag rose">{server_fn_error_text(&e)}</span>
                                     })}
                                 </span>
                             </div>
@@ -1126,7 +1117,7 @@ fn render_budget(
                                                 <input type="hidden" name="amount" value="0"/>
                                                 <button class="btn sm" type="submit"
                                                         style="color:var(--rose-ink)"
-                                                        onclick=format!("return confirm('{}')", delete_confirm)>
+                                                        onclick=format!("return confirm('{}')", escape_js_single_quoted(&delete_confirm))>
                                                     {t(locale, "finance.action.delete")}
                                                 </button>
                                             </ActionForm>
@@ -1160,7 +1151,7 @@ fn render_budget(
                     <ActionForm action=set_budget attr:class="vstack" attr:style="gap:10px">
                         <div style="display:grid;grid-template-columns:1fr 1.5fr 1fr auto;gap:10px;align-items:end">
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>"Period"</span>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.period")}</span>
                                 <input name="period" type="month"
                                        value=editor_period required
                                        style=INPUT_STYLE_MONO/>
@@ -1186,7 +1177,7 @@ fn render_budget(
                         </div>
                         <span class="error-slot">
                             {move || set_budget.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{fmt_server_err(&e)}</span>
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
                             })}
                         </span>
                     </ActionForm>
@@ -1283,10 +1274,10 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
                 <ActionForm action=create_account attr:class="vstack" attr:style="gap:10px;margin-top:12px">
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"code"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code")}</span>
                             <input name="code" required maxlength="16" placeholder="ACC-99"
                                    pattern="[-A-Z0-9]{2,16}"
-                                   title="2..=16 chars, uppercase letters / digits / hyphen only"
+                                   title=t(locale, "finance.account.title_code_pattern")
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
@@ -1323,7 +1314,7 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
                         </button>
                         <span class="error-slot">
                             {move || create_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{fmt_server_err(&e)}</span>
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
                             })}
                         </span>
                     </div>
@@ -1421,7 +1412,7 @@ fn render_account_card(
                             </button>
                             <span class="error-slot">
                                 {move || update_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                    <span class="tag rose">{fmt_server_err(&e)}</span>
+                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
                                 })}
                             </span>
                         </div>
@@ -1456,10 +1447,10 @@ fn render_categories(
                 <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;margin-top:12px">
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>"code"</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code")}</span>
                             <input name="code" required maxlength="8" placeholder="EDU"
                                    pattern="[A-Z&]{1,8}"
-                                   title="1..=8 chars, uppercase letters / & only"
+                                   title=t(locale, "finance.category.title_code_pattern")
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
@@ -1489,7 +1480,7 @@ fn render_categories(
                         </button>
                         <span class="error-slot">
                             {move || create_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{fmt_server_err(&e)}</span>
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
                             })}
                         </span>
                     </div>
@@ -1501,7 +1492,7 @@ fn render_categories(
                     <thead>
                         <tr>
                             <th>{t(locale, "finance.field.name")}</th>
-                            <th style="width:80px">"code"</th>
+                            <th style="width:80px">{t(locale, "finance.field.code")}</th>
                             <th style="width:80px">{t(locale, "finance.field.tone")}</th>
                             <th class="num" style="width:64px">{t(locale, "finance.field.sort_order")}</th>
                             <th class="num" style="width:64px">{t(locale, "finance.field.used")}</th>
@@ -1565,7 +1556,7 @@ fn render_category_row(
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code_readonly")}</span>
                                 <input type="text" disabled value=code
-                                       title="Category code cannot be changed"
+                                       title=t(locale, "finance.category.title_code_readonly")
                                        style=INPUT_STYLE_MONO/>
                             </label>
                             <label class="vstack" style="gap:4px">
@@ -1595,7 +1586,7 @@ fn render_category_row(
                                 </button>
                                 <span class="error-slot">
                                     {move || update_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                        <span class="tag rose">{fmt_server_err(&e)}</span>
+                                        <span class="tag rose">{server_fn_error_text(&e)}</span>
                                     })}
                                 </span>
                             </div>
@@ -1788,13 +1779,13 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, f64)> {
 /// that day in UTC. Empty / malformed input yields `None`. Pure math, safe
 /// on wasm32.
 fn parse_date_floor(s: &str) -> Option<i64> {
-    parse_date_components(s).map(|(y, m, d)| date_to_unix(y, m, d, 0))
+    parse_date_components(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 0))
 }
 
 /// Same as `parse_date_floor` but at the END of the day (23:59:59 UTC) so
 /// `t.occurred_at <= to_ts` is an inclusive day filter.
 fn parse_date_ceiling(s: &str) -> Option<i64> {
-    parse_date_components(s).map(|(y, m, d)| date_to_unix(y, m, d, 86_399))
+    parse_date_components(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 86_399))
 }
 
 fn parse_date_components(s: &str) -> Option<(i32, u8, u8)> {
@@ -1811,21 +1802,8 @@ fn parse_date_components(s: &str) -> Option<(i32, u8, u8)> {
     Some((y, m, d))
 }
 
-fn date_to_unix(year: i32, month: u8, day: u8, offset_seconds: i64) -> i64 {
-    // Reuse `time::Date` to avoid hand-rolling leap-year arithmetic. Pure
-    // math (no `now`-style call), so it's wasm-safe and matches the
-    // `fmt_ts_*` helpers' precedent.
-    let Ok(month_enum) = time::Month::try_from(month) else {
-        return 0;
-    };
-    let date = match time::Date::from_calendar_date(year, month_enum, day) {
-        Ok(d) => d,
-        Err(_) => return 0,
-    };
-    let dt = date
-        .with_hms(0, 0, 0)
-        .unwrap_or_else(|_| time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT));
-    dt.assume_utc().unix_timestamp() + offset_seconds
+fn date_to_unix(year: i32, month: u8, day: u8, offset_seconds: i64) -> Option<i64> {
+    ymd_to_unix_midnight(year, month, day).map(|ts| ts + offset_seconds)
 }
 
 // CSV export — pure-Rust so the same code path runs on SSR (initial href is
@@ -1837,12 +1815,8 @@ fn csv_data_uri(txns: &[Txn]) -> String {
     let mut csv = String::with_capacity(80 + txns.len() * 96);
     csv.push_str("doc_id,occurred_at,merchant,category,account,amount,tag,note\n");
     for t in txns {
-        let occurred = time::OffsetDateTime::from_unix_timestamp(t.occurred_at)
-            .ok()
-            .and_then(|d| {
-                d.format(&time::format_description::well_known::Rfc3339)
-                    .ok()
-            })
+        let occurred = unix_to_ymdhm(t.occurred_at)
+            .map(|(y, m, d, hh, mm)| format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:00Z"))
             .unwrap_or_default();
         let _ = writeln!(
             csv,
@@ -1865,13 +1839,17 @@ fn csv_data_uri(txns: &[Txn]) -> String {
 }
 
 fn csv_escape(s: &str) -> String {
-    if !s.bytes().any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r')) {
-        return s.to_string();
+    let field = neutralize_csv_formula(s);
+    if !field
+        .bytes()
+        .any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r'))
+    {
+        return field;
     }
 
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::with_capacity(field.len() + 2);
     out.push('"');
-    for ch in s.chars() {
+    for ch in field.chars() {
         if ch == '"' {
             out.push_str("\"\"");
         } else {
@@ -1880,6 +1858,17 @@ fn csv_escape(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn neutralize_csv_formula(s: &str) -> String {
+    if s.chars()
+        .find(|ch| !matches!(ch, ' ' | '\t'))
+        .is_some_and(|ch| matches!(ch, '=' | '+' | '-' | '@'))
+    {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    }
 }
 
 fn percent_encode(s: &str) -> String {
@@ -1913,6 +1902,24 @@ mod tests {
     #[test]
     fn csv_escape_quotes_and_doubles_inner_quotes() {
         assert_eq!(csv_escape("a,\"b\"\n"), "\"a,\"\"b\"\"\n\"");
+    }
+
+    #[test]
+    fn csv_escape_neutralizes_spreadsheet_formula_prefixes() {
+        for raw in [
+            "=1+1",
+            "+cmd",
+            "-10+20",
+            "@SUM(1,2)",
+            " \t=HYPERLINK(\"x\")",
+        ] {
+            let escaped = csv_escape(raw);
+            assert!(
+                escaped.starts_with('\'') || escaped.starts_with("\"'"),
+                "raw={raw}, escaped={escaped}"
+            );
+        }
+        assert_eq!(csv_escape("Coffee - lunch"), "Coffee - lunch");
     }
 
     #[test]
@@ -1965,6 +1972,8 @@ mod tests {
         // Empty / malformed → None
         assert_eq!(parse_date_floor(""), None);
         assert_eq!(parse_date_floor("2024-13-01"), None);
+        assert_eq!(parse_date_floor("2023-02-29"), None);
+        assert_eq!(parse_date_floor("2024-02-30"), None);
         assert_eq!(parse_date_floor("not-a-date"), None);
     }
 

@@ -23,9 +23,17 @@ pub struct TelegramNotifier {
 
 impl TelegramNotifier {
     pub fn from_value(v: serde_json::Value) -> anyhow::Result<Self> {
-        Ok(Self {
-            cfg: serde_json::from_value(v)?,
-        })
+        fn require_non_empty(value: &str, field: &str) -> anyhow::Result<()> {
+            if value.trim().is_empty() {
+                anyhow::bail!("telegram config `{field}` is required");
+            }
+            Ok(())
+        }
+
+        let cfg: TelegramConfig = serde_json::from_value(v)?;
+        require_non_empty(&cfg.bot_token, "bot_token")?;
+        require_non_empty(&cfg.chat_id, "chat_id")?;
+        Ok(Self { cfg })
     }
 }
 

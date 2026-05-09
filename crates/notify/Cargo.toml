@@ -9,17 +9,17 @@ license     = { workspace = true }
 default = []
 ssr     = [
     "dep:tokio", "dep:sqlx", "dep:reqwest", "dep:lettre",
-    "dep:tracing", "ep-core/ssr", "ep-db/ssr"
+    "dep:tracing",
+    "dep:ep-core", "dep:serde", "dep:serde_json", "dep:anyhow", "dep:async-trait",
+    "ep-core/ssr"
 ]
 
 [dependencies]
-ep-core    = { workspace = true }
-ep-db      = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-thiserror  = { workspace = true }
-anyhow     = { workspace = true }
-async-trait = { workspace = true }
+ep-core    = { workspace = true, optional = true }
+serde      = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+anyhow     = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
 
 tokio      = { workspace = true, optional = true }
 sqlx       = { workspace = true, optional = true }

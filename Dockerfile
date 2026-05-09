@@ -9,17 +9,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config libssl-dev clang lld mold ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
-RUN cargo install cargo-leptos --locked
+RUN cargo install cargo-leptos --locked --version 0.3.6
 RUN rustup target add wasm32-unknown-unknown
 # wasm-opt no-op shim. cargo-leptos 0.3.6 always tries to run wasm-opt and has
-# no opt-out flag. Its bundled downloader (LEPTOS_WASM_OPT_VERSION=version_123/
-# 129) has no aarch64 prebuilt and hangs on --platform linux/arm64. The Debian
+# no opt-out flag. Its bundled downloader (LEPTOS_WASM_OPT_VERSION version_123
+# in the pinned release; version_129 in adjacent cargo-leptos builds) has no
+# aarch64 prebuilt and hangs on --platform linux/arm64. The Debian
 # `binaryen` apt package is too old to validate sign-ext WASM features Rust
 # 1.95 emits ("unexpected false: all used features should be allowed"). The
-# rustc LLVM pass already runs -Oz; the bundle is ~1.2 MB raw vs ~815 KB after
-# wasm-opt -Oz, but gzip closes most of that gap.
+# rustc LLVM already runs -Oz; gzip size is monitored as a performance signal,
+# not used as a hard gate.
 COPY wasm-opt-shim.sh /usr/local/cargo/bin/wasm-opt-version_123/wasm-opt
-RUN chmod +x /usr/local/cargo/bin/wasm-opt-version_123/wasm-opt
+COPY wasm-opt-shim.sh /usr/local/cargo/bin/wasm-opt-version_129/wasm-opt
+RUN chmod +x /usr/local/cargo/bin/wasm-opt-version_123/wasm-opt \
+    /usr/local/cargo/bin/wasm-opt-version_129/wasm-opt
 WORKDIR /app
 
 ########## planner ##########
@@ -54,6 +57,7 @@ ENV LEPTOS_OUTPUT_NAME=eigenpulse \
     LEPTOS_SITE_PKG_DIR=pkg \
     LEPTOS_SITE_ADDR=0.0.0.0:3000 \
     DATABASE_URL=sqlite:///data/eigenpulse.db?mode=rwc \
+    EP_SECRET_FILE=/data/secret.key \
     RUST_LOG=info
 VOLUME ["/data"]
 EXPOSE 3000

@@ -4,16 +4,16 @@
 //! reload so SSR sees the new cookie. Trades a ~200 ms reload for a
 //! minimal wasm bundle (no reactive context, no ICU runtime).
 
-pub mod cookie;
-pub mod errors;
-pub mod locale;
-pub mod server_fns;
+mod cookie;
+mod errors;
+mod locale;
+mod server_fns;
 
 #[cfg(feature = "hydrate")]
-pub mod client;
+mod client;
 
 #[cfg(feature = "ssr")]
-pub mod middleware;
+mod middleware;
 
 pub use crate::cookie::build_set_cookie;
 pub use crate::errors::{err, err_with, parse_err, ERR_PREFIX};
@@ -27,6 +27,9 @@ pub use crate::client::switch_locale_via_reload;
 pub use crate::middleware::locale_layer;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+#[cfg(test)]
+mod key_scan_tests;
 
 pub fn t(locale: Locale, key: &str) -> &'static str {
     let map = match locale {
@@ -51,9 +54,14 @@ pub fn t(locale: Locale, key: &str) -> &'static str {
 /// reallocates per call).
 pub fn tf(locale: Locale, key: &str, args: &[(&str, &str)]) -> String {
     let template = t(locale, key);
+    interpolate_template(template, args)
+}
+
+fn interpolate_template(template: &str, args: &[(&str, &str)]) -> String {
     if args.is_empty() || !template.contains('{') {
         return template.to_string();
     }
+
     let mut out = String::with_capacity(template.len());
     let bytes = template.as_bytes();
     let mut i = 0;
@@ -68,11 +76,35 @@ pub fn tf(locale: Locale, key: &str, args: &[(&str, &str)]) -> String {
                 }
             }
         }
-        let ch = template[i..].chars().next().unwrap();
+        let Some(ch) = template[i..].chars().next() else {
+            break;
+        };
         out.push(ch);
         i += ch.len_utf8();
     }
     out
+}
+
+/// Render a `ServerFnError` for UI display. Errors created through
+/// `ep_i18n::err[_with]` are translated in the active locale. Plain
+/// argument errors keep their message; internal server errors render a
+/// generic localized message so database paths, SQL text, or third-party
+/// client details do not leak into the browser.
+pub fn server_fn_error_text(e: &leptos::server_fn::ServerFnError) -> String {
+    let Some((code, payload)) = parse_err(e) else {
+        return match e {
+            leptos::server_fn::ServerFnError::ServerError(_) => {
+                t(use_locale(), "app.common.server_error").to_string()
+            }
+            _ => e.to_string(),
+        };
+    };
+    let locale = use_locale();
+    if let Some(payload) = payload {
+        tf(locale, code, &[("payload", payload)])
+    } else {
+        t(locale, code).to_string()
+    }
 }
 
 /// `t!(locale, app.dashboard.title)` → `t(locale, "app.dashboard.title")`.
@@ -120,14 +152,14 @@ pub fn use_locale() -> Locale {
     {
         use std::sync::OnceLock;
         static CACHED: OnceLock<Locale> = OnceLock::new();
-        return *CACHED.get_or_init(|| {
+        *CACHED.get_or_init(|| {
             web_sys::window()
                 .and_then(|w| w.document())
                 .and_then(|d| d.document_element())
                 .and_then(|el| el.get_attribute("lang"))
                 .map(|lang| Locale::parse_or_default(&lang))
                 .unwrap_or(Locale::DEFAULT)
-        });
+        })
     }
     #[cfg(not(feature = "hydrate"))]
     Locale::DEFAULT
@@ -148,6 +180,46 @@ mod tests {
         let s = tf(Locale::En, "ep_i18n.test.placeholder", &[("x", "VAL")]);
         assert!(!s.is_empty());
         assert!(!s.contains("{x}"));
+    }
+
+    #[test]
+    fn interpolate_template_replaces_known_placeholders() {
+        let s = interpolate_template(
+            "Hello {name}, {count} new items",
+            &[("name", "Ada"), ("count", "3")],
+        );
+        assert_eq!(s, "Hello Ada, 3 new items");
+    }
+
+    #[test]
+    fn interpolate_template_preserves_unknown_and_unclosed_placeholders() {
+        let s = interpolate_template(
+            "你好 {name}, keep {unknown} and {dangling",
+            &[("name", "Ada")],
+        );
+        assert_eq!(s, "你好 Ada, keep {unknown} and {dangling");
+    }
+
+    #[test]
+    fn server_fn_error_text_translates_i18n_args_error() {
+        let e = err_with("app.common.unknown_locale", "xx");
+        let s = server_fn_error_text(&e);
+        assert!(s.contains("xx"));
+        assert!(!s.contains("err:"));
+    }
+
+    #[test]
+    fn server_fn_error_text_falls_back_for_plain_error() {
+        let e = leptos::server_fn::ServerFnError::Args("plain failure".into());
+        assert!(server_fn_error_text(&e).contains("plain failure"));
+    }
+
+    #[test]
+    fn server_fn_error_text_hides_internal_server_errors() {
+        let e = leptos::server_fn::ServerFnError::ServerError("sqlite://secret/path failed".into());
+        let s = server_fn_error_text(&e);
+        assert_eq!(s, "服务器内部错误");
+        assert!(!s.contains("secret"));
     }
 
     #[test]

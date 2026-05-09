@@ -11,6 +11,17 @@ env:
   RUST_BACKTRACE: short
 
 jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
   # Fast feedback — exits within ~3 min on a warm cache.
   check:
     name: cargo check (ssr + hydrate)
@@ -31,16 +42,72 @@ jobs:
         run: cargo check --workspace --locked
       - name: cargo check -p eigenpulse --features ssr
         run: cargo check -p eigenpulse --features ssr --no-default-features --locked
-      - name: cargo check -p ep-app-client (wasm32, hydrate)
-        run: cargo check -p ep-app-client --target wasm32-unknown-unknown --features hydrate --no-default-features --locked
+      - name: cargo check -p eigenpulse (wasm32, hydrate)
+        run: cargo check -p eigenpulse --lib --target wasm32-unknown-unknown --features hydrate --no-default-features --locked
+      - name: hydrate dependency guard
+        run: |
+          cargo tree -p eigenpulse --target wasm32-unknown-unknown --features hydrate --no-default-features --edges normal --locked > hydrate-tree.txt
+          if grep -E '(^|[[:space:]])(sqlx|reqwest|lettre|argon2|axum|tokio) v[0-9]' hydrate-tree.txt; then
+            echo "SSR-only dependency leaked into the wasm32 hydrate graph"
+            exit 1
+          fi
+      - name: cargo check password reset example
+        run: cargo check -p ep-auth --features ssr --example reset_password --locked
+      - name: cargo check no-default leaf crates
+        run: |
+          for pkg in ep-core ep-db ep-ui ep-marketplace ep-finance ep-fitness ep-learning ep-i18n ep-api ep-auth ep-notify; do
+            cargo check -p "$pkg" --no-default-features --locked
+          done
+      - name: static asset and shortcut syntax
+        run: |
+          node --check assets/sw.js
+          node --check assets/theme-init.js
+          sh -n scripts/leptos-postbuild.sh
+          sh -n wasm-opt-shim.sh
+          printf 'wasm' > /tmp/ep-test.wasm
+          sh wasm-opt-shim.sh -Oz /tmp/ep-test.wasm -o /tmp/ep-test-out.wasm
+          cmp /tmp/ep-test.wasm /tmp/ep-test-out.wasm
+          if sh wasm-opt-shim.sh -Oz /tmp/ep-missing.wasm -o /tmp/ep-test-out.wasm; then
+            echo "wasm-opt-shim unexpectedly accepted a missing input"
+            exit 1
+          fi
+          ep_pkg="$(mktemp -d)"
+          if sh scripts/leptos-postbuild.sh "$ep_pkg" eigenpulse; then
+            echo "leptos-postbuild unexpectedly accepted a missing wasm"
+            exit 1
+          fi
+          printf 'wasm' > "$ep_pkg/eigenpulse.wasm"
+          sh scripts/leptos-postbuild.sh "$ep_pkg" eigenpulse
+          cmp "$ep_pkg/eigenpulse.wasm" "$ep_pkg/eigenpulse_bg.wasm"
+          bash -n examples/shortcuts/test.sh
+          python3 -m json.tool examples/shortcuts/quick-expense.json > /dev/null
+          python3 -m json.tool examples/shortcuts/quick-notify.json > /dev/null
 
-  # Unit tests across the workspace (excludes app/tests/smoke.rs which
-  # the `smoke` job below runs separately because it needs cargo-leptos).
-  # All tests assume `--features ssr` since the only test-bearing modules
-  # (auth/argon, auth/session, core/fmt, app/views/today) are all
-  # ssr-gated.
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      - name: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: cargo clippy -p eigenpulse --features ssr
+        run: cargo clippy -p eigenpulse --features ssr --no-default-features --all-targets --locked -- -D warnings
+      - name: cargo clippy SSR leaf crates
+        run: cargo clippy -p ep-core -p ep-db -p ep-ui -p ep-marketplace -p ep-finance -p ep-fitness -p ep-learning -p ep-i18n -p ep-api -p ep-auth -p ep-notify --features ssr --no-default-features --all-targets --locked -- -D warnings
+
+  # Tests across the workspace plus SSR-only harnesses that default
+  # workspace features do not exercise. app/tests/smoke.rs is still
+  # reserved for the `smoke` job below because it needs cargo-leptos.
   unit-tests:
-    name: cargo test --lib
+    name: cargo test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,19 +117,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: tests
-      - name: cargo test --lib --features ssr (workspace)
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+      - name: cargo test SSR module unit tests
         run: |
-          cargo test -p ep-core --lib --locked
+          cargo test -p ep-api --lib --features ssr --no-default-features --locked
           cargo test -p ep-auth --lib --features ssr --no-default-features --locked
+          cargo test -p ep-db --lib --features ssr --no-default-features --locked
           cargo test -p ep-finance --lib --features ssr --no-default-features --locked
           cargo test -p ep-fitness --lib --features ssr --no-default-features --locked
-          cargo test -p eigenpulse --lib --features ssr --no-default-features --locked
+          cargo test -p ep-learning --lib --features ssr --no-default-features --locked
+      - name: cargo test SSR binary unit tests
+        run: cargo test -p eigenpulse --features ssr --no-default-features --bin eigenpulse --locked
+      - name: cargo test finance CRUD integration
+        run: cargo test -p ep-finance --features ssr --no-default-features --test crud --locked
 
   # End-to-end smoke against the SSR binary. Builds full leptos site
   # (SSR binary + wasm hydrate bundle), runs leptos-postbuild to stage
   # the `_bg.wasm` alias the in-browser hydrate loader expects, then
-  # the smoke test spawns the binary and walks login -> dashboard ->
-  # PAT 401 paths.
+  # the smoke test spawns the binary, verifies the alias is served, and
+  # walks login -> dashboard -> PAT 401 paths.
   smoke:
     name: cargo leptos build + smoke test
     runs-on: ubuntu-latest
@@ -107,7 +181,6 @@ jobs:
       - name: Probe healthz
         run: |
           docker run -d --name ep-ci -p 3000:3000 \
-            -e EP_SECRET="$(openssl rand -hex 64)" \
             -e EP_ADMIN_PASSWORD='ci-test-pw' \
             eigenpulse:ci
           for i in $(seq 1 20); do

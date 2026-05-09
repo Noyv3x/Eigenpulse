@@ -40,10 +40,12 @@ typically because some sibling `<form>` produced by `<ActionForm>` is
 inserted differently in SSR vs. hydrate.
 
 **Verified non-causes**:
-- WASM filename mismatch (separate bug, fixed in commit `6033891`).
+- WASM filename mismatch (separate bug; guarded by `scripts/leptos-postbuild.sh`
+  and the smoke test's `/pkg/eigenpulse_bg.wasm` request).
 - `time::OffsetDateTime::now_utc()` in view code (already moved
   server-side via `is_expired`/`is_revoked` on `PatDto`).
-- `ChannelDto` config_json leak (separate bug, fixed in `f3a31b9`).
+- `ChannelDto` config_json leak (separate bug; `ep_notify::list_channels()`
+  and the settings DTO no longer expose `config_json`).
 
 ### Chosen Fix
 

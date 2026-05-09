@@ -24,6 +24,8 @@ in an example PAT that immediately becomes a phishing risk.
 2. Open **Settings → 安全管理** (`/settings/security`).
 3. Click **生成 PAT**, give it a name (e.g. `iOS Shortcuts`), and grant the
    minimum scopes you need:
+   - `activity:read` — read the cross-module Today feed
+   - `fin:read` — list recent Finance transactions
    - `fin:write` — record expenses / income
    - `notify:write` — push notifications
    - `*` only if you want one token to do everything (less safe)
@@ -38,8 +40,12 @@ Don't fight an iOS UI when curl can prove the server side in one line:
 ```bash
 export EP_BASE='http://192.168.1.50:3000'      # your instance
 export EP_TOKEN='ep_pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+export EP_ACCOUNT_CODE='YOUR_ACCOUNT_CODE'     # existing Finance account
+export EP_CATEGORY_CODE='YOUR_CATEGORY_CODE'   # existing Finance category
 
 ./test.sh whoami        # prints user + granted scopes
+./test.sh today         # reads the Today feed
+./test.sh list-txn      # lists recent Finance transactions
 ./test.sh expense       # posts a small test expense
 ./test.sh notify        # pushes a test notification
 ```
@@ -65,7 +71,7 @@ listed under `steps[]`. Each step's `action` field maps to the Shortcuts
 action of the same name; `bind` is the variable name to assign the output
 to so later steps can reference it.
 
-The HTTP call (step 6) uses these settings:
+The HTTP call (`Get Contents of URL`, step 11 in `quick-expense.json`) uses these settings:
 
 - **URL**: `<EP_BASE>/api/v1/fin/txn`
 - **Method**: `POST`
@@ -93,10 +99,10 @@ Required scope: `fin:write` (for read use `fin:read`).
 ```jsonc
 {
   "merchant":      "Blue Bottle · 上海",  // required, non-empty
-  "category_code": "F&B",                 // F&B / TRN / HLT / EDU / HSE / OTH / INC / TFR
-  "account_code":  "ACC-01",              // ACC-01 (主卡) / ACC-02 (余额宝) / ACC-03 (投资) / ACC-04 (现金)
+  "category_code": "FOOD",                // existing fin_category.code
+  "account_code":  "CASH",                // existing fin_account.code
   "amount":        -42.0,                 // negative = expense, positive = income
-  "tag":           "exp",                 // exp / inc / tfr
+  "tag":           "exp",                 // exp / inc; transfers use /api/v1/fin/transfer
   "note":          "Latte · 16oz",        // optional
   "linked_doc_id": "FIT-S-0412",          // optional — cross-link to fitness/learning
   "occurred_at":   1745209320              // optional; unix seconds, defaults to now
@@ -119,7 +125,7 @@ Required scope: `notify:write`.
   "body":     "明早 7:00 健身",  // optional
   "severity": "info",          // info | warn | crit (default: info)
   "module":   "FIT",           // optional — source module code
-  "link":     "/fitness",      // optional — in-app deep link
+  "link":     "/fitness",      // optional — in-app absolute path only
   "doc_ref":  "FIT-S-0412"     // optional — single doc id
 }
 ```
@@ -130,21 +136,20 @@ notification channels (站内 / SMTP / Bark / Telegram / Discord) whose
 
 ### `GET /api/v1/whoami` — sanity check
 
-Any scope (including `*`) lets you call this. Returns the bound user and the
-token's granted scopes — useful as the first action of any new shortcut to
-confirm the request actually authenticated.
+Any valid PAT can call this; no specific scope is required. Returns the bound
+user and the token's granted scopes — useful as the first action of any new
+shortcut to confirm the request actually authenticated.
 
 ```bash
 curl -sH "Authorization: Bearer $EP_TOKEN" "$EP_BASE/api/v1/whoami" | jq .
-# → {"user":{"handle":"leo","name":"Leo Chen","role":"OWNER"},
+# → {"user":{"handle":"admin","name":"Owner","role":"OWNER"},
 #    "token":{"name":"iOS Shortcuts","scopes":["fin:write","notify:write"]}}
 ```
 
 ### `GET /api/v1/today` — today's activity feed
 
-No specific scope check, but a valid PAT is required. Returns the same items
-you see on the in-app **Today** view. Handy for a Lock-Screen widget that just
-shows the latest doc id.
+Requires `activity:read`. Returns the same items you see on the in-app
+**Today** view. Handy for a Lock-Screen widget that just shows the latest doc id.
 
 ## Troubleshooting
 
@@ -152,9 +157,9 @@ shows the latest doc id.
 `/settings/security`; the **最近使用** column updates on every successful
 request.
 
-**`403 requires scope: fin:write`** — token doesn't have the needed scope.
-Generate a new one (you can have many) with the right scopes; old one stays
-usable for what it was authorized for.
+**`403 requires scope: ...`** — token doesn't have the needed scope. Generate a
+new one (you can have many) with the right scopes; old one stays usable for what
+it was authorized for.
 
 **Shortcut hangs at "Get Contents of URL"** — `EP_BASE` not reachable from the
 phone (most often: shortcut tested over cellular but server is LAN-only). Add

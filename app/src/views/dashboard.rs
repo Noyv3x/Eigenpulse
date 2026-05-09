@@ -1,23 +1,24 @@
 use ep_core::{fmt_int, IconKind};
-// `fmt_ts_hm` and `server_err` are consumed only inside the
+// `fmt_ts_hm` is consumed only inside the
 // `#[cfg(feature = "ssr")]` body of `load_dashboard`; importing them at
 // module scope would warn on the wasm32 hydrate target where the body is
 // replaced by an `ssr-only` stub.
 #[cfg(feature = "ssr")]
 use ep_core::{fmt_ts_hm, server_err};
-use ep_i18n::{t, use_locale};
-use ep_ui::{kpi::Direction, Card, Icon, Kpi, PageHead, SectionLabel, Tag};
+use ep_i18n::{server_fn_error_text, t, use_locale};
+use ep_ui::{Card, Direction, Icon, Kpi, PageHead, SectionLabel, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DashboardData {
-    pub today_count_done: u32,
-    pub today_count_total: u32,
     pub savings: f64,
     pub budget_pct: u32,
     pub budget_remain: f64,
+    pub today_events: u32,
+    pub weekly_workouts: u32,
+    pub weekly_learning: u32,
     pub recent: Vec<ActivityRow>,
 }
 
@@ -39,24 +40,60 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let state: ep_core::AppState = expect_context();
+        let state = ep_core::app_state_context()?;
         let pool = &state.db;
         let income: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn WHERE amount > 0 AND tag='inc' AND occurred_at >= unixepoch('now','start of month')"
-        ).fetch_one(pool).await.map_err(server_err)?;
+            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn
+              WHERE amount > 0 AND tag='inc'
+                AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
         let expense: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn WHERE tag = 'exp' AND occurred_at >= unixepoch('now','start of month')"
-        ).fetch_one(pool).await.map_err(server_err)?;
+            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
+              WHERE tag = 'exp'
+                AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
         let savings = income - expense;
         let budget_total: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_budget WHERE period = strftime('%Y-%m','now')"
-        ).fetch_one(pool).await.map_err(server_err)?;
+            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_budget
+              WHERE period = strftime('%Y-%m','now','localtime')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
         let budget_pct = if budget_total > 0.0 {
             (expense / budget_total * 100.0).round() as u32
         } else {
             0
         };
         let budget_remain = (budget_total - expense).max(0.0);
+        let today_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity
+              WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
+        let weekly_workouts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM fit_workout
+              WHERE occurred_at >= unixepoch('now','localtime','-6 days','start of day','utc')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
+        let weekly_learning: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity
+              WHERE module = 'LRN'
+                AND occurred_at >= unixepoch('now','localtime','-6 days','start of day','utc')",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
 
         let rows: Vec<ActivityQueryRow> = sqlx::query_as(
             "SELECT occurred_at, module, doc_id, summary, link_doc, amount
@@ -78,17 +115,18 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             .collect();
 
         Ok(DashboardData {
-            today_count_done: 2,
-            today_count_total: 8,
             savings,
             budget_pct,
             budget_remain,
+            today_events: today_events.max(0) as u32,
+            weekly_workouts: weekly_workouts.max(0) as u32,
+            weekly_learning: weekly_learning.max(0) as u32,
             recent,
         })
     }
     #[cfg(not(feature = "ssr"))]
     {
-        Err(ServerFnError::ServerError("ssr-only".into()))
+        Err(ep_core::server_err("ssr-only"))
     }
 }
 
@@ -101,20 +139,14 @@ pub fn DashboardView() -> impl IntoView {
             <PageHead
                 code="DSH-01"
                 module=t(locale, "app.dashboard.page.module")
-                title="Hello, Leo"
+                title=t(locale, "app.dashboard.page.title")
                 title_cn=t(locale, "app.dashboard.page.title_cn")
                 sub=t(locale, "app.dashboard.page.subtitle")
-                actions=view! {
-                    <>
-                        <button class="btn"><Icon kind=IconKind::Export size=14/>{t(locale, "app.dashboard.btn.export_weekly")}</button>
-                        <button class="btn primary"><Icon kind=IconKind::Plus size=14/>{t(locale, "app.dashboard.btn.new_record")}</button>
-                    </>
-                }.into_any()
             />
 
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
                 {move || r.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {e.to_string()}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_body(d).into_any(),
                 })}
             </Suspense>
@@ -128,17 +160,18 @@ fn render_body(d: DashboardData) -> impl IntoView {
     view! {
         <div class="kpi-grid">
             <Kpi code="FIN-K01" label=t(locale, "app.dashboard.kpi.monthly_savings") value=format!("¥{}", fmt_int(d.savings))
-                 delta=t(locale, "app.dashboard.kpi.savings_delta") dir=Direction::Up/>
+                 delta=t(locale, "app.dashboard.kpi.current_month") dir=Direction::Flat/>
             <Kpi code="FIN-K02" label=t(locale, "app.dashboard.kpi.budget_usage") value=format!("{}", d.budget_pct) unit="%"
                  delta=format!("¥{} {}", fmt_int(d.budget_remain), t(locale, "app.dashboard.kpi.budget_remain_suffix")) dir=Direction::Flat/>
-            <Kpi code="FIT-K01" label=t(locale, "app.dashboard.kpi.weekly_workouts") value="5/6"
-                 delta=t(locale, "app.dashboard.kpi.workout_delta") dir=Direction::Up/>
-            <Kpi code="FIT-K02" label=t(locale, "app.dashboard.kpi.resting_heart_rate") value="58" unit="bpm"
-                 delta=t(locale, "app.dashboard.kpi.heart_rate_delta") dir=Direction::Down/>
-            <Kpi code="LRN-K01" label=t(locale, "app.dashboard.kpi.weekly_learning") value="12.4" unit="h"
-                 delta=t(locale, "app.dashboard.kpi.learning_delta") dir=Direction::Up/>
-            <Kpi code="SLP-K01" label=t(locale, "app.dashboard.kpi.avg_sleep") value="7.4" unit="h"
-                 delta=t(locale, "app.dashboard.kpi.sleep_delta") dir=Direction::Up/>
+            <Kpi code="TDY-K01" label=t(locale, "app.dashboard.kpi.today_events") value=format!("{}", d.today_events)
+                 unit=t(locale, "app.dashboard.unit.entries").to_string()
+                 delta=t(locale, "app.dashboard.kpi.since_midnight") dir=Direction::Flat/>
+            <Kpi code="FIT-K01" label=t(locale, "app.dashboard.kpi.weekly_workouts") value=format!("{}", d.weekly_workouts)
+                 unit=t(locale, "app.dashboard.unit.times").to_string()
+                 delta=t(locale, "app.dashboard.kpi.last_7_days") dir=Direction::Flat/>
+            <Kpi code="LRN-K01" label=t(locale, "app.dashboard.kpi.weekly_learning") value=format!("{}", d.weekly_learning)
+                 unit=t(locale, "app.dashboard.unit.entries").to_string()
+                 delta=t(locale, "app.dashboard.kpi.last_7_days") dir=Direction::Flat/>
         </div>
 
         <SectionLabel index="§ 02".to_string()>{t(locale, "app.dashboard.activity.title")}</SectionLabel>
@@ -157,7 +190,16 @@ fn render_body(d: DashboardData) -> impl IntoView {
                         </tr>
                     </thead>
                     <tbody>
-                        {recent.into_iter().map(|r| {
+                        {if recent.is_empty() {
+                            view! {
+                                <tr>
+                                    <td colspan="6" class="muted">{t(locale, "app.dashboard.activity.empty")}</td>
+                                </tr>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <>
+                                    {recent.into_iter().map(|r| {
                             let tone = match r.module.as_str() {
                                 "FIN" => ep_core::Tone::Amber,
                                 "FIT" => ep_core::Tone::Green,
@@ -184,7 +226,10 @@ fn render_body(d: DashboardData) -> impl IntoView {
                                     {amt}
                                 </tr>
                             }
-                        }).collect_view()}
+                                    }).collect_view()}
+                                </>
+                            }.into_any()
+                        }}
                     </tbody>
                 </table>
             </div>

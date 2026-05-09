@@ -7,7 +7,8 @@ license     = { workspace = true }
 
 [features]
 default = []
-ssr     = ["dep:axum", 
+ssr = [
+    "dep:axum",
     "ep-core/ssr", "ep-ui/ssr", "ep-i18n/ssr",
     "leptos/ssr",
 ]
@@ -22,7 +23,5 @@ ep-ui      = { workspace = true }
 ep-i18n    = { workspace = true }
 
 leptos        = { workspace = true }
-axum  = { workspace = true, optional = true }
-leptos_meta   = { workspace = true }
+axum          = { workspace = true, optional = true }
 leptos_router = { workspace = true }
-serde         = { workspace = true }

@@ -35,9 +35,16 @@ pub struct DiscordNotifier {
 
 impl DiscordNotifier {
     pub fn from_value(v: serde_json::Value) -> anyhow::Result<Self> {
-        Ok(Self {
-            cfg: serde_json::from_value(v)?,
-        })
+        let cfg: DiscordConfig = serde_json::from_value(v)?;
+        if cfg.webhook_url.trim().is_empty() {
+            anyhow::bail!("discord config `webhook_url` is required");
+        }
+        let webhook_url = reqwest::Url::parse(cfg.webhook_url.trim())
+            .map_err(|e| anyhow::anyhow!("discord config `webhook_url` is invalid: {e}"))?;
+        if !matches!(webhook_url.scheme(), "http" | "https") {
+            anyhow::bail!("discord config `webhook_url` must use http or https");
+        }
+        Ok(Self { cfg })
     }
 }
 

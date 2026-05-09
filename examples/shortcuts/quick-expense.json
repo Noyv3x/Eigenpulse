@@ -20,7 +20,7 @@
     {
       "n": 1,
       "action": "Comment",
-      "text": "Set your instance URL and PAT (created at /settings/security with scope fin:write). Edit these once; everything else uses Magic Variables."
+      "text": "Set your instance URL, PAT, and your own finance account/category codes. Fresh installs do not ship demo accounts/categories."
     },
     {
       "n": 2,
@@ -39,7 +39,7 @@
       "action": "Ask for Input",
       "bind": "Amount",
       "input_type": "Number",
-      "prompt": "金额 (¥) — 支出留正数，下一步选标签",
+      "prompt": "金额 (¥) — 支出留正数，下一步选支出/收入",
       "default": "0"
     },
     {
@@ -56,37 +56,22 @@
       "prompt": "类型",
       "items": [
         { "label": "支出 (exp)",  "value": "exp" },
-        { "label": "收入 (inc)",  "value": "inc" },
-        { "label": "转账 (tfr)",  "value": "tfr" }
+        { "label": "收入 (inc)",  "value": "inc" }
       ]
     },
     {
       "n": 7,
-      "action": "Choose from Menu",
+      "action": "Ask for Input",
       "bind": "Category",
-      "prompt": "类别",
-      "items": [
-        { "label": "餐饮 F&B",   "value": "F&B" },
-        { "label": "交通 TRN",   "value": "TRN" },
-        { "label": "健身 HLT",   "value": "HLT" },
-        { "label": "学习 EDU",   "value": "EDU" },
-        { "label": "居家 HSE",   "value": "HSE" },
-        { "label": "其他 OTH",   "value": "OTH" },
-        { "label": "收入 INC",   "value": "INC" },
-        { "label": "转账 TFR",   "value": "TFR" }
-      ]
+      "input_type": "Text",
+      "prompt": "类别代码 (使用你在 Finance 中创建的 fin_category.code)"
     },
     {
       "n": 8,
-      "action": "Choose from Menu",
+      "action": "Ask for Input",
       "bind": "Account",
-      "prompt": "账户",
-      "items": [
-        { "label": "招商主卡 ACC-01", "value": "ACC-01" },
-        { "label": "余额宝 ACC-02",   "value": "ACC-02" },
-        { "label": "投资 ACC-03",     "value": "ACC-03" },
-        { "label": "现金 ACC-04",     "value": "ACC-04" }
-      ]
+      "input_type": "Text",
+      "prompt": "账户代码 (使用你在 Finance 中创建的 fin_account.code)"
     },
     {
       "n": 9,
@@ -135,10 +120,10 @@
   ],
   "request_body_schema": {
     "merchant":      "string, required",
-    "category_code": "string, one of F&B/TRN/HLT/EDU/HSE/OTH/INC/TFR",
-    "account_code":  "string, one of ACC-01/02/03/04",
+    "category_code": "string, existing fin_category.code",
+    "account_code":  "string, existing fin_account.code",
     "amount":        "number; negative = expense, positive = income",
-    "tag":           "string, one of exp/inc/tfr",
+    "tag":           "string, one of exp/inc; use /api/v1/fin/transfer for transfers",
     "note":          "string, optional",
     "linked_doc_id": "string, optional (e.g. FIT-S-0412 to cross-link)",
     "occurred_at":   "integer unix seconds, optional (defaults to server now)"

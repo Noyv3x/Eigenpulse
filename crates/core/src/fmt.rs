@@ -38,42 +38,102 @@ pub fn fmt_money(v: f64) -> String {
 /// invalid timestamps. Pure math — safe in wasm32 view code (no `now_utc`).
 pub fn fmt_ts_date(ts: Option<i64>) -> String {
     let Some(t) = ts else { return "—".into() };
-    time::OffsetDateTime::from_unix_timestamp(t)
-        .ok()
-        .map(|d| format!("{:04}-{:02}-{:02}", d.year(), d.month() as u8, d.day()))
+    unix_to_ymdhm(t)
+        .map(|(y, m, d, _, _)| format!("{y:04}-{m:02}-{d:02}"))
         .unwrap_or_else(|| "—".into())
 }
 
 /// Format an `Option<unix_seconds>` as `MM-DD HH:MM`. Same wasm32-safety note.
 pub fn fmt_ts_minute(ts: Option<i64>) -> String {
     let Some(t) = ts else { return "—".into() };
-    time::OffsetDateTime::from_unix_timestamp(t)
-        .ok()
-        .map(|d| {
-            format!(
-                "{:02}-{:02} {:02}:{:02}",
-                d.month() as u8,
-                d.day(),
-                d.hour(),
-                d.minute()
-            )
-        })
+    unix_to_ymdhm(t)
+        .map(|(_, m, d, hh, mm)| format!("{m:02}-{d:02} {hh:02}:{mm:02}"))
         .unwrap_or_else(|| "—".into())
 }
 
 /// Format an `Option<unix_seconds>` as `MM-DD`. Empty string for None / invalid
 /// (callers that need an em-dash placeholder use `fmt_ts_date`).
 pub fn fmt_ts_md(ts: Option<i64>) -> String {
-    ts.and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
-        .map(|d| format!("{:02}-{:02}", d.month() as u8, d.day()))
+    ts.and_then(unix_to_ymdhm)
+        .map(|(_, m, d, _, _)| format!("{m:02}-{d:02}"))
         .unwrap_or_default()
 }
 
 /// Format an `Option<unix_seconds>` as `HH:MM`. Empty string for None / invalid.
 pub fn fmt_ts_hm(ts: Option<i64>) -> String {
-    ts.and_then(|t| time::OffsetDateTime::from_unix_timestamp(t).ok())
-        .map(|d| format!("{:02}:{:02}", d.hour(), d.minute()))
+    ts.and_then(unix_to_ymdhm)
+        .map(|(_, _, _, hh, mm)| format!("{hh:02}:{mm:02}"))
         .unwrap_or_default()
+}
+
+/// Convert unix seconds to UTC `(year, month, day, hour, minute)`.
+///
+/// Howard Hinnant's civil-date algorithm, using Euclidean division so negative
+/// timestamps before 1970 still work. Keeps hydrate-side date formatting small
+/// and avoids pulling the full `time` crate into the WASM bundle.
+pub fn unix_to_ymdhm(ts: i64) -> Option<(i32, u8, u8, u8, u8)> {
+    const MIN: i64 = -62_167_219_200; // 0000-01-01T00:00:00Z
+    const MAX: i64 = 253_402_300_799; // 9999-12-31T23:59:59Z
+    if !(MIN..=MAX).contains(&ts) {
+        return None;
+    }
+
+    let days = ts.div_euclid(86_400);
+    let secs = ts.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days)?;
+    let hour = (secs / 3_600) as u8;
+    let minute = ((secs % 3_600) / 60) as u8;
+    Some((year, month, day, hour, minute))
+}
+
+pub fn ymd_to_unix_midnight(year: i32, month: u8, day: u8) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400)
+}
+
+fn civil_from_days(days: i64) -> Option<(i32, u8, u8)> {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    let year = i32::try_from(year).ok()?;
+    Some((year, m as u8, d as u8))
+}
+
+fn days_from_civil(year: i32, month: u8, day: u8) -> Option<i64> {
+    if day > days_in_month(year, month)? {
+        return None;
+    }
+    let y = i64::from(year) - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(month);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn days_in_month(year: i32, month: u8) -> Option<u8> {
+    Some(match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return None,
+    })
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 #[cfg(test)]
@@ -141,5 +201,14 @@ mod tests {
         let ts = TS_2024_05_01_UTC + 9 * 3600 + 15 * 60;
         assert_eq!(fmt_ts_minute(Some(ts)), "05-01 09:15");
         assert_eq!(fmt_ts_minute(None), "—");
+    }
+
+    #[test]
+    fn unix_to_ymdhm_handles_epoch_leap_days_and_negative_timestamps() {
+        assert_eq!(unix_to_ymdhm(0), Some((1970, 1, 1, 0, 0)));
+        assert_eq!(unix_to_ymdhm(1_582_934_400), Some((2020, 2, 29, 0, 0)));
+        assert_eq!(unix_to_ymdhm(-1), Some((1969, 12, 31, 23, 59)));
+        assert_eq!(ymd_to_unix_midnight(2024, 2, 29), Some(1_709_164_800));
+        assert_eq!(ymd_to_unix_midnight(2023, 2, 29), None);
     }
 }

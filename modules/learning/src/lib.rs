@@ -1,14 +1,12 @@
-pub mod model;
-pub mod server_fns;
-pub mod view;
+mod model;
+mod server_fns;
+mod view;
 
-pub use model::*;
-pub use server_fns::*;
 pub use view::LearningView;
 
 #[cfg(feature = "ssr")]
 mod ssr_module {
-    use ep_core::{AppState, IconKind, Module, ModuleLink, NavSection};
+    use ep_core::Module;
 
     pub struct LearningModule;
     pub static MODULE: &dyn Module = &LearningModule;
@@ -17,49 +15,103 @@ mod ssr_module {
         fn code(&self) -> &'static str {
             "LRN"
         }
-        fn name(&self) -> &'static str {
-            "Learning"
-        }
-        fn name_cn(&self) -> &'static str {
-            "\u{5b66}\u{4e60}\u{7ba1}\u{7406}"
-        }
-        fn nav_section(&self) -> NavSection {
-            NavSection::Modules
-        }
-        fn nav_icon(&self) -> IconKind {
-            IconKind::Learning
-        }
-        fn glyph(&self) -> &'static str {
-            "lrn"
-        }
-        fn description(&self) -> &'static str {
-            "\u{8bfe}\u{7a0b}\u{3001}\u{9605}\u{8bfb}\u{3001}\u{7b14}\u{8bb0}\u{3001}Anki \u{96c6}\u{6210}"
-        }
-        fn version(&self) -> &'static str {
-            "0.1.0"
-        }
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[(
-                "001_learning",
-                include_str!("../migrations/001_learning.sql"),
-            )]
-        }
-        fn routes(&self, _state: AppState) -> axum::Router<AppState> {
-            axum::Router::new()
-        }
-        fn links(&self) -> &'static [ModuleLink] {
             &[
-                ModuleLink {
-                    source: "LRN",
-                    target: "DSH",
-                    kind: "totals-feed",
-                },
-                ModuleLink {
-                    source: "LRN",
-                    target: "FIN",
-                    kind: "doc-ref",
-                },
+                (
+                    "001_learning",
+                    include_str!("../migrations/001_learning.sql"),
+                ),
+                (
+                    "002_remove_demo_seed",
+                    include_str!("../migrations/002_remove_demo_seed.sql"),
+                ),
             ]
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::MODULE;
+        use std::collections::BTreeSet;
+
+        #[test]
+        fn every_migration_file_is_registered() {
+            let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let migration_dir = manifest_dir.join("migrations");
+            let files: BTreeSet<String> = std::fs::read_dir(&migration_dir)
+                .unwrap_or_else(|e| panic!("read {}: {e}", migration_dir.display()))
+                .map(|entry| {
+                    entry
+                        .expect("migration dir entry")
+                        .path()
+                        .file_stem()
+                        .expect("migration file stem")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let registered: BTreeSet<String> = MODULE
+                .migrations()
+                .iter()
+                .map(|(name, _)| (*name).to_string())
+                .collect();
+
+            assert_eq!(registered, files);
+        }
+
+        async fn migrated_pool() -> sqlx::SqlitePool {
+            let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+            sqlx::query(
+                "CREATE TABLE seq (
+                    module TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    last_value INTEGER NOT NULL,
+                    PRIMARY KEY (module, kind)
+                )",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TABLE _ep_module_migration (
+                    module TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    applied_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    PRIMARY KEY (module, name)
+                )",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            ep_core::run_module_migrations(&pool, MODULE)
+                .await
+                .expect("module migrations");
+            pool
+        }
+
+        #[tokio::test]
+        async fn migrations_remove_demo_learning_records_but_keep_sequences() {
+            let pool = migrated_pool().await;
+            for table in ["lrn_note", "lrn_book", "lrn_course"] {
+                let sql = format!("SELECT COUNT(*) FROM {table}");
+                let count: i64 = sqlx::query_scalar(&sql).fetch_one(&pool).await.unwrap();
+                assert_eq!(count, 0, "{table} should not retain demo rows");
+            }
+
+            let seqs: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT kind, last_value FROM seq WHERE module = 'LRN' ORDER BY kind",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                seqs,
+                vec![
+                    ("type:B".to_string(), 14),
+                    ("type:C".to_string(), 11),
+                    ("type:N".to_string(), 221),
+                ]
+            );
         }
     }
 }

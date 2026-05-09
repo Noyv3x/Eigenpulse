@@ -17,7 +17,8 @@ pub async fn bootstrap_admin(pool: &SqlitePool) -> anyhow::Result<()> {
     }
     let hash = crate::hash_password(&password)?;
     sqlx::query(
-        "INSERT INTO app_user (id, password_hash) VALUES (1, ?1)
+        "INSERT INTO app_user (id, handle, name, role, password_hash)
+         VALUES (1, 'admin', 'Owner', 'OWNER', ?1)
          ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash",
     )
     .bind(&hash)

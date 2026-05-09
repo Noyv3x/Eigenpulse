@@ -12,7 +12,7 @@ pub fn Card(
 ) -> impl IntoView {
     let class = format!("card {}", class.unwrap_or_default());
     let title_clone = title.clone();
-    let has_head = title.is_some() || actions.is_some();
+    let has_head = title.is_some() || code.is_some() || sub.is_some() || actions.is_some();
     view! {
         <div class=class>
             {has_head.then(|| view! {

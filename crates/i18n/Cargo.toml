@@ -15,10 +15,10 @@ ssr = [
     "dep:sqlx",
     "dep:tracing",
     "dep:leptos_axum",
+    "dep:ep-auth",
     "leptos/ssr",
     "ep-core/ssr",
     "ep-auth/ssr",
-    "ep-db/ssr",
 ]
 hydrate = [
     "leptos/hydrate",
@@ -29,14 +29,13 @@ hydrate = [
 
 [dependencies]
 ep-core    = { workspace = true }
-ep-auth    = { workspace = true }
-ep-db      = { workspace = true }
 
 leptos     = { workspace = true }
 phf        = { version = "0.11", default-features = false }
 serde      = { workspace = true }
 
 # SSR-only
+ep-auth    = { workspace = true, optional = true }
 axum        = { workspace = true, optional = true }
 axum-extra  = { workspace = true, optional = true }
 cookie      = { workspace = true, optional = true }

@@ -14,10 +14,8 @@ hydrate = ["leptos/hydrate", "ep-core/hydrate", "ep-i18n/hydrate", "dep:web-sys"
 ep-core      = { workspace = true }
 ep-i18n      = { workspace = true }
 leptos       = { workspace = true }
-leptos_meta  = { workspace = true }
 leptos_router = { workspace = true }
 serde        = { workspace = true }
-serde_json   = { workspace = true }
 
 web-sys      = { workspace = true, optional = true, features = ["Window", "Storage", "Document", "HtmlDocument", "HtmlElement", "Element"] }
 wasm-bindgen = { workspace = true, optional = true }

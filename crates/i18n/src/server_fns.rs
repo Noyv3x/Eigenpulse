@@ -1,13 +1,23 @@
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
-use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use crate::locale::Locale;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SetLocale {
-    pub locale: String,
+#[cfg(feature = "ssr")]
+const MAX_LOCALE_CODE_CHARS: usize = 16;
+
+#[cfg(feature = "ssr")]
+fn parse_locale_input(locale: &str) -> Result<Locale, ServerFnError> {
+    let locale = locale.trim();
+    Locale::parse(locale).ok_or_else(|| {
+        let payload = if locale.chars().count() > MAX_LOCALE_CODE_CHARS {
+            "too-long".to_string()
+        } else {
+            locale.to_string()
+        };
+        crate::errors::err_with("app.common.unknown_locale", payload)
+    })
 }
 
 /// Persist the user's locale to `app_user.locale` and append a Set-Cookie
@@ -18,10 +28,9 @@ pub async fn set_user_locale(locale: String) -> Result<(), ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
 
-        let parsed = Locale::parse(&locale)
-            .ok_or_else(|| crate::errors::err_with("app.common.unknown_locale", &locale))?;
+        let parsed = parse_locale_input(&locale)?;
 
-        let state: ep_core::AppState = expect_context();
+        let state = ep_core::app_state_context()?;
         sqlx::query("UPDATE app_user SET locale = ?1 WHERE id = 1")
             .bind(parsed.as_code())
             .execute(&state.db)
@@ -42,4 +51,25 @@ pub async fn set_user_locale(locale: String) -> Result<(), ServerFnError> {
     }
     #[cfg(not(feature = "ssr"))]
     Err(ep_core::server_err("ssr-only"))
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_locale_input_trims_supported_codes() {
+        assert_eq!(parse_locale_input(" zh-CN ").unwrap(), Locale::ZhCn);
+        assert_eq!(parse_locale_input(" en-US ").unwrap(), Locale::En);
+    }
+
+    #[test]
+    fn parse_locale_input_caps_unknown_payload() {
+        let err = parse_locale_input(&"x".repeat(MAX_LOCALE_CODE_CHARS + 1))
+            .expect_err("overlong locale should fail");
+        assert_eq!(
+            crate::errors::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("app.common.unknown_locale", "too-long"))
+        );
+    }
 }

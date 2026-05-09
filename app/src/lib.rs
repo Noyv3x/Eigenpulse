@@ -1,7 +1,7 @@
-//! Eigenpulse — Leptos `App` shell shared by SSR (server binary) and Hydrate (`app-client`).
+//! Eigenpulse — Leptos `App` shell shared by the SSR binary and hydrate bundle.
 
-pub mod app;
-pub mod views;
+mod app;
+mod views;
 
 pub use app::{shell, App};
 
@@ -12,6 +12,11 @@ pub fn hydrate() {
     leptos::mount::hydrate_body(App);
 
     if let Some(win) = web_sys::window() {
-        let _ = win.navigator().service_worker().register("/static/sw.js");
+        let options = web_sys::RegistrationOptions::new();
+        options.set_scope("/");
+        let _ = win
+            .navigator()
+            .service_worker()
+            .register_with_options("/static/sw.js", &options);
     }
 }

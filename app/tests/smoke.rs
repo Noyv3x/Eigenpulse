@@ -1,6 +1,7 @@
 //! End-to-end smoke test against the SSR binary.
 //!
-//! Run with: `cargo test --features ssr -p eigenpulse --test smoke -- --nocapture`
+//! Run with:
+//! `cargo leptos build --release && ./scripts/leptos-postbuild.sh && cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked -- --nocapture`
 //!
 //! Requires: `cargo leptos build --release` has produced `target/site/`
 //! beforehand (the binary needs the static site root). The test spawns the
@@ -137,6 +138,19 @@ fn full_flow() {
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().unwrap(), "ok");
 
+    // Hydration artifact alias must be present after scripts/leptos-postbuild.sh.
+    // Without this file, SSR pages render but the browser silently falls back to
+    // a non-hydrated snapshot.
+    let r = client
+        .get(server.url("/pkg/eigenpulse_bg.wasm"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(
+        !r.bytes().unwrap().is_empty(),
+        "hydration wasm alias should not be empty"
+    );
+
     // GET / unauthed → 307 → /login
     let r = client.get(server.url("/")).send().unwrap();
     assert_eq!(r.status(), 307);
@@ -152,6 +166,15 @@ fn full_flow() {
     let body = r.text().unwrap();
     assert!(body.contains("PASSWORD"));
 
+    // SSE endpoint is public at the outer middleware layer so EventSource can
+    // connect without a redirect, but the handler itself must still reject
+    // missing/invalid session cookies.
+    let r = client
+        .get(server.url("/events/notifications"))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
     // POST /login wrong password → 303 back to /login?error=1.
     // 307 would preserve POST and can create an infinite redirect loop.
     let r = client
@@ -162,6 +185,26 @@ fn full_flow() {
     assert_eq!(r.status(), 303);
     let loc = r.headers().get("location").unwrap().to_str().unwrap();
     assert!(loc.contains("error=1"), "expected ?error=1 in {loc}");
+
+    // Failed login should keep a sanitized deep link so a typo does not lose
+    // the user's destination.
+    let r = client
+        .post(server.url("/login"))
+        .form(&[("password", "wrong-pw"), ("next", "/finance?tab=budget")])
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 303);
+    let loc = r.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(loc, "/login?error=1&next=%2Ffinance%3Ftab%3Dbudget");
+
+    let r = client
+        .post(server.url("/login"))
+        .form(&[("password", "wrong-pw"), ("next", "https://example.com")])
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 303);
+    let loc = r.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(loc, "/login?error=1");
 
     // POST /login correct password → 303 → /
     let r = client
@@ -177,6 +220,12 @@ fn full_flow() {
     let body = r.text().unwrap();
     assert!(body.contains("Eigenpulse"), "missing brand");
     assert!(body.contains("FIN-K01"), "missing finance KPI code");
+
+    // Logout is state-changing: GET must not destroy the session.
+    let r = client.get(server.url("/logout")).send().unwrap();
+    assert_eq!(r.status(), 405);
+    let r = client.get(server.url("/")).send().unwrap();
+    assert_eq!(r.status(), 200);
 
     // /api/v1/healthz public
     let r = client.get(server.url("/api/v1/healthz")).send().unwrap();
@@ -194,6 +243,11 @@ fn full_flow() {
         .send()
         .unwrap();
     assert_eq!(r.status(), 401);
+
+    let r = client.post(server.url("/logout")).send().unwrap();
+    assert_eq!(r.status(), 303);
+    let r = client.get(server.url("/")).send().unwrap();
+    assert_eq!(r.status(), 307);
 }
 
 #[test]

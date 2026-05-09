@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 /// Wire form for a transaction's `tag` column. The DB column stays TEXT
 /// (Txn::tag is `String`) so no `sqlx::Type` impl is needed; this enum is the
-/// single source of truth for the `exp | inc | tfr` set, used by add_txn
-/// validation, the row-decorator class, and the server-side sign convention.
+/// single source of truth for the persisted `exp | inc | tfr` set. User-created
+/// one-leg transactions only accept `exp | inc`; paired transfers are created
+/// through the transfer flow and still persist as `tfr`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tag {
@@ -27,6 +28,11 @@ impl Tag {
             "tfr" => Some(Self::Tfr),
             _ => None,
         }
+    }
+
+    #[cfg(feature = "ssr")]
+    pub const fn is_single_entry(self) -> bool {
+        matches!(self, Self::Exp | Self::Inc)
     }
 }
 
@@ -129,8 +135,6 @@ pub struct MonthSummary {
 }
 
 /// Per-account derived stats, parallel-indexed with `LedgerData.accounts`.
-/// Kept separate from `Account` because the cross-module reports view
-/// imports `Account` and doesn't need this slice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountStats {
     /// Most recent occurred_at of any txn touching this account, in unix

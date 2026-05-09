@@ -3,20 +3,14 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::{Cookie, SameSite, SignedCookieJar};
-use ep_auth::{login_create_session, logout_destroy_session, COOKIE_NAME};
+use axum_extra::extract::cookie::SignedCookieJar;
+use ep_auth::{
+    expired_session_cookie, login_create_session, logout_destroy_session, session_cookie,
+    COOKIE_NAME,
+};
 use ep_core::AppState;
 use ep_i18n::{build_set_cookie, t, Locale, LOCALE_COOKIE};
 use serde::Deserialize;
-use time::Duration;
-
-/// HTTPS-only cookie if `EP_COOKIE_SECURE=1` (recommended for production).
-/// Default false so local HTTP / NAS-LAN deployments can persist sessions.
-fn cookie_secure() -> bool {
-    std::env::var("EP_COOKIE_SECURE")
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-}
 
 #[derive(Debug, Deserialize)]
 pub struct NextQuery {
@@ -30,7 +24,7 @@ pub async fn page(
     Extension(locale): Extension<Locale>,
     Query(q): Query<NextQuery>,
 ) -> Html<String> {
-    let next = q.next.unwrap_or_else(|| "/".into());
+    let next = sanitize_next(q.next.as_deref());
     let err_block = if q.error.is_some() {
         format!(
             r#"<div style="background:var(--rose-soft);color:var(--rose-ink);padding:8px 12px;border-radius:8px;font-size:13px;margin-bottom:14px">{}</div>"#,
@@ -103,33 +97,23 @@ pub async fn submit(
             .await
         {
             Ok(r) => r,
-            Err(e) => return error500(&e.to_string()),
+            Err(e) => return error500(e),
         };
     let Some((user_id, hash, stored_locale)) = row else {
-        return Redirect::to("/login?error=1").into_response();
+        return login_error_redirect(input.next.as_deref()).into_response();
     };
     let ok = ep_auth::verify_password_async(input.password.clone(), hash)
         .await
         .unwrap_or(false);
     if !ok {
-        return Redirect::to("/login?error=1").into_response();
+        return login_error_redirect(input.next.as_deref()).into_response();
     }
     let sess = match login_create_session(&state.db, user_id).await {
         Ok(s) => s,
-        Err(e) => return error500(&e.to_string()),
+        Err(e) => return error500(e),
     };
-    let next = input
-        .next
-        .filter(|s| s.starts_with('/'))
-        .unwrap_or_else(|| "/".into());
-    let cookie = Cookie::build((COOKIE_NAME, sess.token))
-        .path("/")
-        .secure(cookie_secure())
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .max_age(Duration::days(30))
-        .build();
-    let jar = jar.add(cookie);
+    let next = sanitize_next(input.next.as_deref());
+    let jar = jar.add(session_cookie(sess.token));
 
     // Locale seed: if the browser has no `ep_locale` cookie yet AND the user
     // has previously persisted a preference (via `set_user_locale` server
@@ -160,26 +144,84 @@ pub async fn submit(
     response
 }
 
+fn sanitize_next(next: Option<&str>) -> String {
+    next.and_then(ep_core::safe_in_app_path)
+        .unwrap_or("/")
+        .to_string()
+}
+
+fn login_error_redirect(next: Option<&str>) -> Redirect {
+    Redirect::to(&login_error_location(next))
+}
+
+fn login_error_location(next: Option<&str>) -> String {
+    let next = sanitize_next(next);
+    if next == "/" {
+        "/login?error=1".to_string()
+    } else {
+        format!(
+            "/login?error=1&next={}",
+            ep_core::url_encode_query_value(&next)
+        )
+    }
+}
+
 pub async fn logout(State(state): State<AppState>, jar: SignedCookieJar) -> Response {
     if let Some(c) = jar.get(COOKIE_NAME) {
-        let _ = logout_destroy_session(&state.db, c.value()).await;
+        if let Err(e) = logout_destroy_session(&state.db, c.value()).await {
+            tracing::warn!(error = %e, "failed to destroy logout session");
+        }
     }
-    let removed = Cookie::build((COOKIE_NAME, ""))
-        .path("/")
-        .secure(cookie_secure())
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .max_age(Duration::seconds(0))
-        .build();
-    let jar = jar.add(removed);
+    let jar = jar.add(expired_session_cookie());
     (jar, Redirect::to("/login")).into_response()
 }
 
-fn error500(msg: &str) -> Response {
+fn error500(error: impl std::fmt::Display) -> Response {
+    tracing::error!(error = %error, "login handler failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        format!("internal: {msg}"),
+        "internal server error",
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{login_error_location, sanitize_next};
+
+    #[test]
+    fn sanitize_next_accepts_local_paths() {
+        assert_eq!(sanitize_next(Some("/")), "/");
+        assert_eq!(
+            sanitize_next(Some("/finance?tab=budget")),
+            "/finance?tab=budget"
+        );
+    }
+
+    #[test]
+    fn sanitize_next_rejects_external_and_backslash_paths() {
+        assert_eq!(sanitize_next(Some("//example.com")), "/");
+        assert_eq!(sanitize_next(Some("https://example.com")), "/");
+        assert_eq!(sanitize_next(Some(r"/\example.com")), "/");
+        assert_eq!(sanitize_next(Some(r"/finance\evil")), "/");
+        assert_eq!(sanitize_next(Some("/finance%0d%0aevil")), "/");
+        assert_eq!(sanitize_next(Some("/finance%1Fevil")), "/");
+        assert_eq!(sanitize_next(Some("/finance%7Fevil")), "/");
+        assert_eq!(sanitize_next(Some("/finance\r\nevil")), "/");
+        assert_eq!(sanitize_next(None), "/");
+    }
+
+    #[test]
+    fn login_error_location_preserves_safe_next_only() {
+        assert_eq!(
+            login_error_location(Some("/finance?tab=budget")),
+            "/login?error=1&next=%2Ffinance%3Ftab%3Dbudget"
+        );
+        assert_eq!(
+            login_error_location(Some("https://example.com")),
+            "/login?error=1"
+        );
+        assert_eq!(login_error_location(None), "/login?error=1");
+    }
 }

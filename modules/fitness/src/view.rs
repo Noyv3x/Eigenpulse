@@ -1,20 +1,9 @@
 use crate::model::Workout;
 use crate::server_fns::*;
 use ep_core::{IconKind, Tone};
-use ep_i18n::{parse_err, t, tf, use_locale};
-use ep_ui::{
-    kpi::Direction, Card, ChartBars, Icon, Kpi, PageHead, Ring, RowDeleteAction, StatRow, Tag,
-};
+use ep_i18n::{server_fn_error_text, t, tf, use_locale};
+use ep_ui::{Card, ChartBars, Direction, Icon, Kpi, PageHead, Ring, RowDeleteAction, Tag};
 use leptos::prelude::*;
-use leptos::server_fn::ServerFnError;
-
-fn fmt_server_err(e: &ServerFnError) -> String {
-    let locale = use_locale();
-    match parse_err(e) {
-        Some((code, payload)) => tf(locale, code, &[("payload", payload.unwrap_or(""))]),
-        None => e.to_string(),
-    }
-}
 
 #[component]
 pub fn FitnessView() -> impl IntoView {
@@ -36,14 +25,14 @@ pub fn FitnessView() -> impl IntoView {
             <PageHead
                 code="FIT-02"
                 module=t(locale, "fitness.page.module")
-                title="Fitness"
+                title=t(locale, "fitness.page.title")
                 title_cn=t(locale, "fitness.page.title_cn")
                 sub=t(locale, "fitness.page.sub")
             />
 
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
                 {move || data.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {fmt_server_err(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_fitness(d, add, delete).into_any(),
                 })}
             </Suspense>
@@ -190,12 +179,14 @@ fn render_fitness(
                     <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.kind")}</span>
-                            <input name="kind" required placeholder=t(locale, "fitness.placeholder.kind")
+                            <input name="kind" required maxlength=MAX_WORKOUT_KIND_CHARS.to_string()
+                                   placeholder=t(locale, "fitness.placeholder.kind")
                                    style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
                         </label>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.plan")}</span>
-                            <input name="program" placeholder="PPL-5D"
+                            <input name="program" maxlength=MAX_WORKOUT_PROGRAM_CHARS.to_string()
+                                   placeholder="PPL-5D"
                                    style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
                         </label>
                     </div>
@@ -207,7 +198,8 @@ fn render_fitness(
                         </label>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.load")}</span>
-                            <input name="load_text" placeholder=t(locale, "fitness.placeholder.load")
+                            <input name="load_text" maxlength=MAX_WORKOUT_LOAD_TEXT_CHARS.to_string()
+                                   placeholder=t(locale, "fitness.placeholder.load")
                                    style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
                         </label>
                         <label class="vstack" style="gap:4px">
@@ -223,22 +215,11 @@ fn render_fitness(
                         <button class="btn primary" type="submit"><Icon kind=IconKind::Plus size=14/>{t(locale, "fitness.submit.record")}</button>
                         <span class="error-slot">
                             {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{e.to_string()}</span>
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
                             })}
                         </span>
                     </div>
                 </ActionForm>
-            </Card>
-
-            <Card title=t(locale, "fitness.card.bio.title") code="FIT-BIO-01" sub=t(locale, "fitness.card.bio.sub")>
-                <div class="vstack" style="gap:0">
-                    <StatRow label=t(locale, "fitness.stat.sleep") value=t(locale, "fitness.placeholder.body").to_string()/>
-                    <StatRow label=t(locale, "fitness.stat.deep_sleep") value=t(locale, "fitness.placeholder.body").to_string()/>
-                    <StatRow label=t(locale, "fitness.stat.steps") value=t(locale, "fitness.placeholder.body").to_string()/>
-                    <StatRow label=t(locale, "fitness.stat.calories") value=t(locale, "fitness.placeholder.body").to_string()/>
-                    <StatRow label=t(locale, "fitness.stat.pressure") value=t(locale, "fitness.placeholder.body").to_string()/>
-                    <StatRow label=t(locale, "fitness.stat.weight") value=t(locale, "fitness.placeholder.body").to_string()/>
-                </div>
             </Card>
         </div>
 

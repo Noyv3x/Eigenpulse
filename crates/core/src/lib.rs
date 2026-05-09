@@ -4,52 +4,97 @@
 //! - `Module` trait & `ModuleRegistry` — SSR-only (depend on axum/sqlx).
 //! - `AppState` — SSR-only.
 
-pub mod escape;
-pub mod fmt;
-pub mod nav;
-pub mod severity;
-pub mod tone;
+mod escape;
+mod fmt;
+mod nav;
+mod severity;
+mod text;
+mod tone;
 
 #[cfg(feature = "ssr")]
-pub mod errors;
+mod activity;
 #[cfg(feature = "ssr")]
-pub mod ids;
+mod api_error;
 #[cfg(feature = "ssr")]
-pub mod module;
+mod ids;
 #[cfg(feature = "ssr")]
-pub mod notify_msg;
+mod module;
 #[cfg(feature = "ssr")]
-pub mod registry;
+mod notify_msg;
 #[cfg(feature = "ssr")]
-pub mod state;
+mod refs;
+#[cfg(feature = "ssr")]
+mod registry;
+#[cfg(feature = "ssr")]
+mod state;
 
 pub use escape::html_escape;
 pub use fmt::{
     fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, fmt_ts_minute, thousands_sep,
+    unix_to_ymdhm, ymd_to_unix_midnight,
 };
-pub use nav::{IconKind, NavEntry, NavSection};
+pub use nav::{IconKind, NavSection};
 pub use severity::Severity;
+pub use text::{safe_doc_id, safe_in_app_path, trim_to_option, url_encode_query_value};
 pub use tone::Tone;
 
-/// Map any `Display` (sqlx::Error, anyhow::Error, &str, …) into a
-/// `ServerFnError`. Exposed from `ep_core` so module crates and the binary
-/// can share one definition; previously each `server_fns.rs` redefined it.
-/// Compiled on both SSR and hydrate so the
-/// `#[cfg(not(feature = "ssr"))] { Err(server_err("ssr-only")) }` stub
-/// branches link.
+/// Map any `Display` (sqlx::Error, anyhow::Error, &str, …) into an internal
+/// `ServerFnError`. SSR logs the detailed message server-side, but the value
+/// sent over the server-fn wire is generic so SQL paths, URLs, and third-party
+/// client details do not reach the browser.
 pub fn server_err<E: std::fmt::Display>(e: E) -> leptos::server_fn::ServerFnError {
-    leptos::server_fn::ServerFnError::ServerError(e.to_string())
+    let message = e.to_string();
+    #[cfg(feature = "ssr")]
+    {
+        tracing::warn!(error = %message, "server function internal error");
+        leptos::server_fn::ServerFnError::ServerError("internal server error".into())
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        leptos::server_fn::ServerFnError::ServerError(message)
+    }
 }
 
 #[cfg(feature = "ssr")]
-pub use errors::{Error, Result};
+pub fn app_state_context() -> Result<AppState, leptos::server_fn::ServerFnError> {
+    leptos::prelude::use_context::<AppState>()
+        .ok_or_else(|| server_err("AppState context missing in server function"))
+}
+
+#[cfg(feature = "ssr")]
+pub use activity::{load_today_activity, TodayActivity, TodayActivityOrder, TodayActivityRow};
+#[cfg(feature = "ssr")]
+pub use api_error::{api_error_response, ApiErrorBody, ApiErrorInner, ApiJson, ApiQuery};
 #[cfg(feature = "ssr")]
 pub use ids::{next_doc_id, DocIdShape};
 #[cfg(feature = "ssr")]
-pub use module::{DashboardWidget, Module, ModuleLink, TodayItem, WidgetKind};
+pub use module::Module;
 #[cfg(feature = "ssr")]
 pub use notify_msg::{NotifyBusHandle, NotifyBusTrait, NotifyMessage};
 #[cfg(feature = "ssr")]
-pub use registry::ModuleRegistry;
+pub use refs::clear_doc_references;
+#[cfg(feature = "ssr")]
+pub use registry::{run_module_migrations, split_sql, ModuleRegistry};
 #[cfg(feature = "ssr")]
 pub use state::AppState;
+
+#[cfg(test)]
+mod tests {
+    use super::server_err;
+    use leptos::server_fn::ServerFnError;
+
+    #[test]
+    fn server_err_hides_internal_detail_on_ssr() {
+        let err = server_err("sqlite://secret/path failed");
+        match err {
+            ServerFnError::ServerError(message) => {
+                if cfg!(feature = "ssr") {
+                    assert_eq!(message, "internal server error");
+                } else {
+                    assert_eq!(message, "sqlite://secret/path failed");
+                }
+            }
+            other => panic!("expected ServerError, got {other:?}"),
+        }
+    }
+}

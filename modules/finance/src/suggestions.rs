@@ -3,12 +3,13 @@
 //!
 //! The bar for adding a rule is: the data the rule needs is already in
 //! `LedgerData`, the heuristic is named after a thing the user can act on,
-//! and the title/meta strings render to ≤ 2 lines in the FIN-AI-01 card.
+//! and the title/meta strings render to <= 2 lines in the FIN-RUL-01 card.
 //! Anything more contextual (statistical anomaly detection, multi-month
 //! seasonality, etc.) belongs in a separate analytics module, not here.
 
 use crate::server_fns::LedgerData;
 use ep_core::IconKind;
+use ep_i18n::{tf, Locale};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +32,7 @@ const SURPLUS_BALANCE_FLOOR: f64 = 10_000.0;
 /// Conservative DCA fraction (30%) of the surplus — leaves 70% liquid.
 const SURPLUS_DCA_RATIO: f64 = 0.30;
 
-pub fn compute_suggestions(d: &LedgerData) -> Vec<Suggestion> {
+pub fn compute_suggestions(d: &LedgerData, locale: Locale) -> Vec<Suggestion> {
     let mut out = Vec::new();
 
     // Rule 1 — budgets approaching overage. Pick the worst (highest
@@ -56,12 +57,19 @@ pub fn compute_suggestions(d: &LedgerData) -> Vec<Suggestion> {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| worst.category_code.clone());
         let remaining = (worst.amount - worst.used).max(0.0);
+        let pct = pct.to_string();
+        let remaining = ep_core::fmt_int(remaining);
         out.push(Suggestion {
             icon: IconKind::Sparkle,
-            title: format!("{cat_name} used {pct}%"),
-            meta: format!(
-                "¥{} remaining · spend carefully through month end",
-                ep_core::fmt_int(remaining)
+            title: tf(
+                locale,
+                "finance.suggestion.budget.title",
+                &[("category", &cat_name), ("pct", &pct)],
+            ),
+            meta: tf(
+                locale,
+                "finance.suggestion.budget.meta",
+                &[("remaining", &remaining)],
             ),
             link: Some("/finance".into()),
         });
@@ -83,13 +91,19 @@ pub fn compute_suggestions(d: &LedgerData) -> Vec<Suggestion> {
         })
     {
         let dca_amount = (savings.balance * SURPLUS_DCA_RATIO).round();
+        let dca_amount = ep_core::fmt_int(dca_amount);
+        let balance = ep_core::fmt_int(savings.balance);
         out.push(Suggestion {
             icon: IconKind::Coin,
-            title: format!("Can DCA ¥{}", ep_core::fmt_int(dca_amount)),
-            meta: format!(
-                "{} balance ¥{} · suggest moving 30% to ETF in batches",
-                savings.name,
-                ep_core::fmt_int(savings.balance)
+            title: tf(
+                locale,
+                "finance.suggestion.surplus.title",
+                &[("amount", &dca_amount)],
+            ),
+            meta: tf(
+                locale,
+                "finance.suggestion.surplus.meta",
+                &[("account", &savings.name), ("balance", &balance)],
             ),
             link: Some("/finance".into()),
         });
@@ -200,7 +214,7 @@ mod tests {
 
     #[test]
     fn budget_rule_picks_worst_overage() {
-        let s = compute_suggestions(&fixture_data());
+        let s = compute_suggestions(&fixture_data(), Locale::En);
         let budget = s
             .iter()
             .find(|s| s.icon == IconKind::Sparkle)
@@ -216,7 +230,7 @@ mod tests {
 
     #[test]
     fn surplus_rule_fires_above_floor() {
-        let s = compute_suggestions(&fixture_data());
+        let s = compute_suggestions(&fixture_data(), Locale::En);
         let coin = s
             .iter()
             .find(|s| s.icon == IconKind::Coin)
@@ -234,12 +248,27 @@ mod tests {
         }
         // savings under floor
         d.accounts[1].balance = 5_000.0;
-        let s = compute_suggestions(&d);
+        let s = compute_suggestions(&d, Locale::En);
         assert!(
             s.is_empty(),
             "expected zero suggestions, got {} ({:?})",
             s.len(),
             s
+        );
+    }
+
+    #[test]
+    fn suggestions_are_localized() {
+        let s = compute_suggestions(&fixture_data(), Locale::ZhCn);
+        let budget = s
+            .iter()
+            .find(|s| s.icon == IconKind::Sparkle)
+            .expect("expected budget rule hit");
+        assert!(budget.title.contains("已用"), "title: {}", budget.title);
+        assert!(
+            budget.meta.contains("本月底"),
+            "meta should be zh-CN: {}",
+            budget.meta
         );
     }
 }

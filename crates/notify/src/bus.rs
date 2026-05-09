@@ -61,7 +61,15 @@ impl NotifyBusTrait for NotifyBus {
         };
 
         for (ch_id, kind, cfg, min_sev) in channels {
-            let min = Severity::parse(&min_sev);
+            let Some(min) = Severity::try_parse(&min_sev) else {
+                tracing::warn!(
+                    channel_id = ch_id,
+                    kind = %kind,
+                    min_severity = %min_sev,
+                    "notification channel has invalid min_severity; skipping"
+                );
+                continue;
+            };
             if !msg.severity.passes(min) {
                 continue;
             }
@@ -210,6 +218,33 @@ mod tests {
         assert_eq!(row.0, 0);
         assert_eq!(row.1, "telegram 通道投递失败 · 详细错误已记录");
         assert!(!row.1.contains("SECRET_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_skips_channels_with_invalid_min_severity() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO notify_channel (kind, name, config_json, min_severity)
+             VALUES ('inapp', 'bad severity', '{}', 'urgent')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert channel");
+
+        let bus = NotifyBus::new(pool.clone());
+        let id = bus
+            .dispatch(NotifyMessage::crit("probe"))
+            .await
+            .expect("dispatch notification");
+
+        let delivery_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM notify_delivery WHERE notification_id = ?1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("count deliveries");
+
+        assert_eq!(delivery_count, 0);
     }
 
     #[test]

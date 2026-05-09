@@ -20,7 +20,9 @@ ssr = [
     "dep:axum", "dep:axum-extra", "dep:tokio", "dep:tower", "dep:tower-http",
     "dep:leptos_axum", "dep:sqlx", "dep:cookie", "dep:tracing",
     "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess",
-    "dep:base64", "dep:rand", "dep:hex", "dep:futures-util", "dep:tokio-stream",
+    "dep:rand", "dep:hex", "dep:tokio-stream",
+    "dep:ep-db", "dep:ep-auth", "dep:ep-notify", "dep:ep-api",
+    "dep:anyhow", "dep:serde_json", "dep:time",
     "leptos/ssr",
     "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-ui/ssr", "ep-i18n/ssr",
     "ep-notify/ssr", "ep-api/ssr",
@@ -35,12 +37,8 @@ hydrate = [
 
 [dependencies]
 ep-core      = { workspace = true }
-ep-db        = { workspace = true }
-ep-auth      = { workspace = true }
 ep-ui        = { workspace = true }
 ep-i18n      = { workspace = true }
-ep-notify    = { workspace = true }
-ep-api       = { workspace = true }
 ep-finance   = { workspace = true }
 ep-fitness   = { workspace = true }
 ep-learning  = { workspace = true }
@@ -51,12 +49,15 @@ leptos_meta   = { workspace = true }
 leptos_router = { workspace = true }
 
 serde         = { workspace = true }
-serde_json    = { workspace = true }
-anyhow        = { workspace = true }
-thiserror     = { workspace = true }
-time          = { workspace = true }
 
 # SSR-only
+ep-db            = { workspace = true, optional = true }
+ep-auth          = { workspace = true, optional = true }
+ep-notify        = { workspace = true, optional = true }
+ep-api           = { workspace = true, optional = true }
+anyhow           = { workspace = true, optional = true }
+serde_json       = { workspace = true, optional = true }
+time             = { workspace = true, optional = true }
 axum             = { workspace = true, optional = true }
 axum-extra       = { workspace = true, optional = true }
 tokio            = { workspace = true, optional = true }
@@ -69,16 +70,14 @@ tracing          = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 rust-embed       = { workspace = true, optional = true }
 mime_guess       = { workspace = true, optional = true }
-base64           = { workspace = true, optional = true }
 rand             = { workspace = true, optional = true }
 hex              = { workspace = true, optional = true }
-futures-util     = { workspace = true, optional = true }
 tokio-stream     = { workspace = true, optional = true }
 
 # hydrate-only
 wasm-bindgen             = { workspace = true, optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
-web-sys                  = { workspace = true, optional = true, features = ["Window", "Navigator", "ServiceWorkerContainer"] }
+web-sys                  = { workspace = true, optional = true, features = ["Window", "Navigator", "ServiceWorkerContainer", "RegistrationOptions", "EventSource", "MessageEvent"] }
 
 [dev-dependencies]
 reqwest  = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "cookies"] }

@@ -7,6 +7,92 @@ use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
+pub(crate) const MAX_WORKOUT_KIND_CHARS: usize = 64;
+pub(crate) const MAX_WORKOUT_PROGRAM_CHARS: usize = 128;
+pub(crate) const MAX_WORKOUT_LOAD_TEXT_CHARS: usize = 128;
+
+#[cfg(feature = "ssr")]
+#[derive(Debug)]
+struct WorkoutInput {
+    kind: String,
+    program: Option<String>,
+    load_text: Option<String>,
+    strain: String,
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_workout_input(
+    kind: &str,
+    program: &str,
+    duration_m: i64,
+    load_text: &str,
+    strain: &str,
+) -> Result<WorkoutInput, ServerFnError> {
+    let kind = kind.trim();
+    if kind.is_empty() {
+        return Err(err("fitness.err.kind_required"));
+    }
+    if kind.chars().count() > MAX_WORKOUT_KIND_CHARS {
+        return Err(err_with(
+            "fitness.err.kind_too_long",
+            MAX_WORKOUT_KIND_CHARS,
+        ));
+    }
+    if duration_m <= 0 {
+        return Err(err("fitness.err.duration_positive"));
+    }
+
+    let program = ep_core::trim_to_option(program);
+    if program
+        .as_deref()
+        .is_some_and(|program| program.chars().count() > MAX_WORKOUT_PROGRAM_CHARS)
+    {
+        return Err(err_with(
+            "fitness.err.program_too_long",
+            MAX_WORKOUT_PROGRAM_CHARS,
+        ));
+    }
+
+    let load_text = ep_core::trim_to_option(load_text);
+    if load_text
+        .as_deref()
+        .is_some_and(|load_text| load_text.chars().count() > MAX_WORKOUT_LOAD_TEXT_CHARS)
+    {
+        return Err(err_with(
+            "fitness.err.load_text_too_long",
+            MAX_WORKOUT_LOAD_TEXT_CHARS,
+        ));
+    }
+
+    let strain = strain.trim();
+    let strain_kind = if strain.is_empty() {
+        Strain::M
+    } else {
+        match Strain::parse(strain) {
+            Some(k) => k,
+            None => return Err(err_with("fitness.err.strain_invalid", strain)),
+        }
+    };
+
+    Ok(WorkoutInput {
+        kind: kind.to_string(),
+        program,
+        load_text,
+        strain: strain_kind.as_str().to_string(),
+    })
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
+    let doc_id =
+        ep_core::trim_to_option(doc_id).ok_or_else(|| err("fitness.err.doc_id_required"))?;
+    if ep_core::safe_doc_id(&doc_id).is_some() {
+        Ok(doc_id)
+    } else {
+        Err(err_with("fitness.err.doc_id_invalid", &doc_id))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitnessData {
     pub workouts: Vec<Workout>,
@@ -33,7 +119,7 @@ pub async fn load_fitness() -> Result<FitnessData, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
+        let st = ep_core::app_state_context()?;
         type Row = (
             String,
             i64,
@@ -68,9 +154,7 @@ pub async fn load_fitness() -> Result<FitnessData, ServerFnError> {
             })
             .collect();
 
-        let summary = compute_summary(&st.db, &workouts)
-            .await
-            .map_err(server_err)?;
+        let summary = compute_summary(&st.db).await.map_err(server_err)?;
         Ok(FitnessData { workouts, summary })
     }
     #[cfg(not(feature = "ssr"))]
@@ -80,10 +164,7 @@ pub async fn load_fitness() -> Result<FitnessData, ServerFnError> {
 }
 
 #[cfg(feature = "ssr")]
-async fn compute_summary(
-    pool: &sqlx::SqlitePool,
-    workouts: &[Workout],
-) -> sqlx::Result<FitnessSummary> {
+async fn compute_summary(pool: &sqlx::SqlitePool) -> sqlx::Result<FitnessSummary> {
     // 12-week dense frame, server's local-tz aware. Each row is one ISO week
     // label like "2026-W17" mapped to weighted load (duration × strain).
     type WeekRow = (String, f64);
@@ -198,7 +279,6 @@ async fn compute_summary(
         sqlx::query_scalar("SELECT CAST(julianday('now','localtime','start of day') AS INTEGER)")
             .fetch_one(pool)
             .await?;
-    let _ = workouts; // streak no longer reads the loaded list — see SQL above
     let streak_days = compute_streak(today_local, &workout_days_local);
 
     Ok(FitnessSummary {
@@ -358,22 +438,8 @@ pub async fn add_workout(
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        if kind.trim().is_empty() {
-            return Err(err("fitness.err.kind_required"));
-        }
-        if duration_m <= 0 {
-            return Err(err("fitness.err.duration_positive"));
-        }
-        let strain_kind = if strain.is_empty() {
-            Strain::M
-        } else {
-            match Strain::parse(&strain) {
-                Some(k) => k,
-                None => return Err(err_with("fitness.err.strain_invalid", &strain)),
-            }
-        };
-        let strain_norm = strain_kind.as_str().to_string();
-        let st: ep_core::AppState = expect_context();
+        let input = normalize_workout_input(&kind, &program, duration_m, &load_text, &strain)?;
+        let st = ep_core::app_state_context()?;
         let occurred = time::OffsetDateTime::now_utc().unix_timestamp();
         let mut tx = st.db.begin().await.map_err(server_err)?;
         let doc_id = ep_core::next_doc_id(
@@ -383,22 +449,12 @@ pub async fn add_workout(
         )
         .await
         .map_err(server_err)?;
-        let program_opt = if program.trim().is_empty() {
-            None
-        } else {
-            Some(program.clone())
-        };
-        let load_opt = if load_text.trim().is_empty() {
-            None
-        } else {
-            Some(load_text.clone())
-        };
         sqlx::query(
             "INSERT INTO fit_workout (doc_id, occurred_at, kind, program, duration_m, load_text, strain)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
         )
-        .bind(&doc_id).bind(occurred).bind(&kind)
-        .bind(&program_opt).bind(duration_m).bind(&load_opt).bind(&strain_norm)
+        .bind(&doc_id).bind(occurred).bind(&input.kind)
+        .bind(&input.program).bind(duration_m).bind(&input.load_text).bind(&input.strain)
         .execute(&mut *tx).await.map_err(server_err)?;
         sqlx::query(
             "INSERT INTO activity (occurred_at, module, doc_id, summary, status)
@@ -406,8 +462,8 @@ pub async fn add_workout(
         )
         .bind(occurred)
         .bind(&doc_id)
-        .bind(&kind)
-        .bind(&strain_norm)
+        .bind(&input.kind)
+        .bind(&input.strain)
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
@@ -415,11 +471,11 @@ pub async fn add_workout(
         Ok(Workout {
             doc_id,
             occurred_at: occurred,
-            kind,
-            program: program_opt,
+            kind: input.kind,
+            program: input.program,
             duration_m,
-            load_text: load_opt,
-            strain: Some(strain_norm),
+            load_text: input.load_text,
+            strain: Some(input.strain),
             rpe: None,
             notes: None,
         })
@@ -430,28 +486,236 @@ pub async fn add_workout(
     }
 }
 
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_workout_input_trims_fields_and_defaults_blank_strain() {
+        let got = normalize_workout_input("  Run  ", "  Zone 2  ", 45, "  5km  ", "   ").unwrap();
+        assert_eq!(got.kind, "Run");
+        assert_eq!(got.program.as_deref(), Some("Zone 2"));
+        assert_eq!(got.load_text.as_deref(), Some("5km"));
+        assert_eq!(got.strain, "M");
+    }
+
+    #[test]
+    fn normalize_workout_input_keeps_valid_strain() {
+        let got = normalize_workout_input("Lift", "", 60, "", " H ").unwrap();
+        assert_eq!(got.program, None);
+        assert_eq!(got.load_text, None);
+        assert_eq!(got.strain, "H");
+    }
+
+    #[test]
+    fn normalize_workout_input_rejects_invalid_values() {
+        assert!(normalize_workout_input("   ", "", 30, "", "M").is_err());
+        assert!(normalize_workout_input("Run", "", 0, "", "M").is_err());
+        assert!(normalize_workout_input("Run", "", 30, "", "easy").is_err());
+    }
+
+    #[test]
+    fn normalize_workout_input_enforces_text_lengths() {
+        let kind_err =
+            normalize_workout_input(&"x".repeat(MAX_WORKOUT_KIND_CHARS + 1), "", 30, "", "M")
+                .expect_err("long kind should fail");
+        assert_eq!(
+            ep_i18n::parse_err(&kind_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("fitness.err.kind_too_long", "64"))
+        );
+
+        let program_err = normalize_workout_input(
+            "Run",
+            &"x".repeat(MAX_WORKOUT_PROGRAM_CHARS + 1),
+            30,
+            "",
+            "M",
+        )
+        .expect_err("long program should fail");
+        assert_eq!(
+            ep_i18n::parse_err(&program_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("fitness.err.program_too_long", "128"))
+        );
+
+        let load_err = normalize_workout_input(
+            "Run",
+            "",
+            30,
+            &"x".repeat(MAX_WORKOUT_LOAD_TEXT_CHARS + 1),
+            "M",
+        )
+        .expect_err("long load text should fail");
+        assert_eq!(
+            ep_i18n::parse_err(&load_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("fitness.err.load_text_too_long", "128"))
+        );
+    }
+
+    #[test]
+    fn normalize_doc_id_trims_and_rejects_blank() {
+        assert_eq!(normalize_doc_id("  FIT-S-0001  ").unwrap(), "FIT-S-0001");
+        assert!(normalize_doc_id("   ").is_err());
+    }
+
+    #[test]
+    fn normalize_doc_id_rejects_invalid_shape() {
+        let err = normalize_doc_id("../FIT-S-0001").expect_err("invalid doc id");
+
+        assert_eq!(
+            ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("fitness.err.doc_id_invalid", "../FIT-S-0001"))
+        );
+    }
+
+    async fn ref_cleanup_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE fit_workout (
+                doc_id TEXT PRIMARY KEY,
+                occurred_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                program TEXT,
+                duration_m INTEGER NOT NULL,
+                load_text TEXT,
+                strain TEXT,
+                rpe INTEGER,
+                notes TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE module_link (
+                source_doc TEXT NOT NULL,
+                target_doc TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'ref',
+                PRIMARY KEY (source_doc, target_doc, kind)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE activity (
+                module TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                link_doc TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE notification (id INTEGER PRIMARY KEY, doc_ref TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn delete_workout_inner_clears_external_references() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO fit_workout (doc_id, occurred_at, kind, duration_m)
+             VALUES ('FIT-S-0001', 1_700_000_000, 'Run', 45)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO module_link (source_doc, target_doc, kind)
+             VALUES ('LRN-N-0001', 'FIT-S-0001', 'ref')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO activity (module, doc_id, link_doc) VALUES
+             ('FIT', 'FIT-S-0001', NULL),
+             ('LRN', 'LRN-N-0001', 'FIT-S-0001')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO notification (id, doc_ref) VALUES (1, 'FIT-S-0001')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        delete_workout_inner(&pool, "FIT-S-0001")
+            .await
+            .expect("delete workout");
+
+        let workouts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fit_workout")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(workouts, 0);
+
+        let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM module_link")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(links, 0);
+
+        let own_activity: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM activity WHERE doc_id = 'FIT-S-0001'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(own_activity, 0);
+
+        let external_link: Option<String> =
+            sqlx::query_scalar("SELECT link_doc FROM activity WHERE doc_id = 'LRN-N-0001'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(external_link, None);
+
+        let doc_ref: Option<String> =
+            sqlx::query_scalar("SELECT doc_ref FROM notification WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(doc_ref, None);
+    }
+}
+
 #[server(DeleteWorkout, "/api/_internal/fit", "Url", "delete_workout")]
 pub async fn delete_workout(doc_id: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let st: ep_core::AppState = expect_context();
-        let mut tx = st.db.begin().await.map_err(server_err)?;
-        sqlx::query("DELETE FROM fit_workout WHERE doc_id = ?1")
-            .bind(&doc_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-        sqlx::query("DELETE FROM activity WHERE module = 'FIT' AND doc_id = ?1")
-            .bind(&doc_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-        tx.commit().await.map_err(server_err)?;
-        Ok(())
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let st = ep_core::app_state_context()?;
+        delete_workout_inner(&st.db, &doc_id).await
     }
     #[cfg(not(feature = "ssr"))]
     {
         Err(server_err("ssr-only"))
     }
+}
+
+#[cfg(feature = "ssr")]
+async fn delete_workout_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let deleted = sqlx::query("DELETE FROM fit_workout WHERE doc_id = ?1")
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    if deleted.rows_affected() == 0 {
+        return Err(err_with("fitness.err.workout_not_found", doc_id));
+    }
+    sqlx::query("DELETE FROM activity WHERE module = 'FIT' AND doc_id = ?1")
+        .bind(doc_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    ep_core::clear_doc_references(&mut tx, doc_id)
+        .await
+        .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(())
 }

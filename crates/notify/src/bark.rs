@@ -36,8 +36,37 @@ pub struct BarkNotifier {
 
 impl BarkNotifier {
     pub fn from_value(v: serde_json::Value) -> anyhow::Result<Self> {
+        fn require_non_empty(value: &str, field: &str) -> anyhow::Result<()> {
+            if value.trim().is_empty() {
+                anyhow::bail!("bark config `{field}` is required");
+            }
+            Ok(())
+        }
+
         Ok(Self {
-            cfg: serde_json::from_value(v)?,
+            cfg: {
+                let cfg: BarkConfig = serde_json::from_value(v)?;
+                require_non_empty(&cfg.base_url, "base_url")?;
+                require_non_empty(&cfg.device_key, "device_key")?;
+                let base_url = reqwest::Url::parse(cfg.base_url.trim())
+                    .map_err(|e| anyhow::anyhow!("bark config `base_url` is invalid: {e}"))?;
+                if !matches!(base_url.scheme(), "http" | "https") {
+                    anyhow::bail!("bark config `base_url` must use http or https");
+                }
+                if let Some(icon_url) = cfg
+                    .icon_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let icon_url = reqwest::Url::parse(icon_url)
+                        .map_err(|e| anyhow::anyhow!("bark config `icon_url` is invalid: {e}"))?;
+                    if !matches!(icon_url.scheme(), "http" | "https") {
+                        anyhow::bail!("bark config `icon_url` must use http or https");
+                    }
+                }
+                cfg
+            },
         })
     }
 }

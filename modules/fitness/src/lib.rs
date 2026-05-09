@@ -1,14 +1,12 @@
-pub mod model;
-pub mod server_fns;
-pub mod view;
+mod model;
+mod server_fns;
+mod view;
 
-pub use model::*;
-pub use server_fns::*;
 pub use view::FitnessView;
 
 #[cfg(feature = "ssr")]
 mod ssr_module {
-    use ep_core::{AppState, IconKind, Module, ModuleLink, NavSection};
+    use ep_core::Module;
 
     pub struct FitnessModule;
     pub static MODULE: &dyn Module = &FitnessModule;
@@ -17,46 +15,93 @@ mod ssr_module {
         fn code(&self) -> &'static str {
             "FIT"
         }
-        fn name(&self) -> &'static str {
-            "Fitness"
-        }
-        fn name_cn(&self) -> &'static str {
-            "\u{5065}\u{8eab}\u{7ba1}\u{7406}"
-        }
-        fn nav_section(&self) -> NavSection {
-            NavSection::Modules
-        }
-        fn nav_icon(&self) -> IconKind {
-            IconKind::Fitness
-        }
-        fn glyph(&self) -> &'static str {
-            "fit"
-        }
-        fn description(&self) -> &'static str {
-            "\u{8bad}\u{7ec3}\u{8ba1}\u{5212}\u{3001}\u{52a8}\u{4f5c}\u{5e93}\u{3001}\u{8eab}\u{4f53}\u{6307}\u{6807}"
-        }
-        fn version(&self) -> &'static str {
-            "0.1.0"
-        }
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[("001_fitness", include_str!("../migrations/001_fitness.sql"))]
-        }
-        fn routes(&self, _state: AppState) -> axum::Router<AppState> {
-            axum::Router::new()
-        }
-        fn links(&self) -> &'static [ModuleLink] {
             &[
-                ModuleLink {
-                    source: "FIT",
-                    target: "DSH",
-                    kind: "totals-feed",
-                },
-                ModuleLink {
-                    source: "FIT",
-                    target: "FIN",
-                    kind: "doc-ref",
-                },
+                ("001_fitness", include_str!("../migrations/001_fitness.sql")),
+                (
+                    "002_remove_demo_seed",
+                    include_str!("../migrations/002_remove_demo_seed.sql"),
+                ),
             ]
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::MODULE;
+        use std::collections::BTreeSet;
+
+        #[test]
+        fn every_migration_file_is_registered() {
+            let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let migration_dir = manifest_dir.join("migrations");
+            let files: BTreeSet<String> = std::fs::read_dir(&migration_dir)
+                .unwrap_or_else(|e| panic!("read {}: {e}", migration_dir.display()))
+                .map(|entry| {
+                    entry
+                        .expect("migration dir entry")
+                        .path()
+                        .file_stem()
+                        .expect("migration file stem")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let registered: BTreeSet<String> = MODULE
+                .migrations()
+                .iter()
+                .map(|(name, _)| (*name).to_string())
+                .collect();
+
+            assert_eq!(registered, files);
+        }
+
+        async fn migrated_pool() -> sqlx::SqlitePool {
+            let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+            sqlx::query(
+                "CREATE TABLE seq (
+                    module TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    last_value INTEGER NOT NULL,
+                    PRIMARY KEY (module, kind)
+                )",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "CREATE TABLE _ep_module_migration (
+                    module TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    applied_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    PRIMARY KEY (module, name)
+                )",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            ep_core::run_module_migrations(&pool, MODULE)
+                .await
+                .expect("module migrations");
+            pool
+        }
+
+        #[tokio::test]
+        async fn migrations_remove_demo_workouts_but_keep_sequence() {
+            let pool = migrated_pool().await;
+            let workouts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fit_workout")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(workouts, 0);
+
+            let seq: i64 = sqlx::query_scalar(
+                "SELECT last_value FROM seq WHERE module = 'FIT' AND kind = 'type:S'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(seq, 412);
         }
     }
 }

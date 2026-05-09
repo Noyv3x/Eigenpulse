@@ -8,27 +8,24 @@ license     = { workspace = true }
 [features]
 default = []
 ssr     = [
-    "dep:axum", "dep:axum-extra", "dep:tokio", "dep:sqlx", "dep:cookie",
+    "dep:axum", "dep:axum-extra", "dep:tokio", "dep:sqlx",
     "dep:argon2", "dep:rand", "dep:sha2", "dep:hex", "dep:tracing",
     "dep:leptos", "dep:leptos_axum",
+    "dep:ep-core", "dep:ep-db", "dep:serde", "dep:anyhow", "dep:time",
     "ep-core/ssr", "ep-db/ssr"
 ]
 
 [dependencies]
-ep-core    = { workspace = true }
-ep-db      = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-thiserror  = { workspace = true }
-anyhow     = { workspace = true }
-async-trait = { workspace = true }
-time       = { workspace = true }
+ep-core    = { workspace = true, optional = true }
+ep-db      = { workspace = true, optional = true }
+serde      = { workspace = true, optional = true }
+anyhow     = { workspace = true, optional = true }
+time       = { workspace = true, optional = true }
 
 axum        = { workspace = true, optional = true }
 axum-extra  = { workspace = true, optional = true }
 tokio       = { workspace = true, optional = true }
 sqlx        = { workspace = true, optional = true }
-cookie      = { workspace = true, optional = true }
 argon2      = { workspace = true, optional = true }
 rand        = { workspace = true, optional = true }
 sha2        = { workspace = true, optional = true }
@@ -44,3 +41,6 @@ leptos_axum = { workspace = true, optional = true }
 [[example]]
 name              = "reset_password"
 required-features = ["ssr"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

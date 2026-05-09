@@ -2,14 +2,15 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 
-fn hasher() -> Argon2<'static> {
-    let params = Params::new(19_456, 2, 1, None).expect("valid argon2 params");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+fn hasher() -> anyhow::Result<Argon2<'static>> {
+    let params = Params::new(19_456, 2, 1, None)
+        .map_err(|e| anyhow::anyhow!("invalid argon2 params: {e}"))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
 pub fn hash_password(plain: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    let hash = hasher()
+    let hash = hasher()?
         .hash_password(plain.as_bytes(), &salt)
         .map_err(|e| anyhow::anyhow!("argon2 hash failed: {e}"))?
         .to_string();
@@ -19,7 +20,7 @@ pub fn hash_password(plain: &str) -> anyhow::Result<String> {
 pub fn verify_password(plain: &str, encoded: &str) -> anyhow::Result<bool> {
     let parsed =
         PasswordHash::new(encoded).map_err(|e| anyhow::anyhow!("argon2 parse failed: {e}"))?;
-    Ok(hasher().verify_password(plain.as_bytes(), &parsed).is_ok())
+    Ok(hasher()?.verify_password(plain.as_bytes(), &parsed).is_ok())
 }
 
 /// Async wrapper for `hash_password` that bounces the ~150 ms Argon2id

@@ -15,12 +15,8 @@ pub async fn locale_layer(mut req: Request, next: Next) -> Response {
 
 fn detect_locale(req: &Request) -> Locale {
     if let Some(q) = req.uri().query() {
-        for pair in q.split('&') {
-            if let Some(v) = pair.strip_prefix("locale=") {
-                if let Some(loc) = Locale::parse(v) {
-                    return loc;
-                }
-            }
+        if let Some(loc) = query_locale(q) {
+            return loc;
         }
     }
     let jar = CookieJar::from_headers(req.headers());
@@ -37,6 +33,52 @@ fn detect_locale(req: &Request) -> Locale {
         return Locale::parse_accept_language(al);
     }
     Locale::DEFAULT
+}
+
+fn query_locale(query: &str) -> Option<Locale> {
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key != "locale" {
+            continue;
+        }
+        let Some(value) = decode_form_component(value) else {
+            continue;
+        };
+        if let Some(loc) = Locale::parse(&value) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn decode_form_component(value: &str) -> Option<String> {
+    if !value.as_bytes().iter().any(|b| *b == b'%' || *b == b'+') {
+        return Some(value.to_string());
+    }
+
+    let mut out = Vec::with_capacity(value.len());
+    let mut bytes = value.as_bytes().iter().copied();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hi = bytes.next().and_then(hex_value)?;
+                let lo = bytes.next().and_then(hex_value)?;
+                out.push((hi << 4) | lo);
+            }
+            _ => out.push(b),
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -58,6 +100,21 @@ mod tests {
             &[("cookie", "ep_locale=zh-CN"), ("accept-language", "zh-CN")],
             "/x?locale=en",
         );
+        assert_eq!(detect_locale(&r), Locale::En);
+    }
+
+    #[test]
+    fn url_query_decodes_percent_encoded_locale() {
+        let r = req_with(
+            &[("cookie", "ep_locale=en"), ("accept-language", "en")],
+            "/x?foo=1&locale=zh%2DCN",
+        );
+        assert_eq!(detect_locale(&r), Locale::ZhCn);
+    }
+
+    #[test]
+    fn invalid_url_query_locale_falls_back_to_cookie() {
+        let r = req_with(&[("cookie", "ep_locale=en")], "/x?locale=zh%XXCN");
         assert_eq!(detect_locale(&r), Locale::En);
     }
 

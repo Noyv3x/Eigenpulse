@@ -18,10 +18,15 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ```bash
 # Type-check the SSR side (binary + libs). Use this for normal feedback loops.
-cargo check -p eigenpulse --features ssr
+cargo check -p eigenpulse --features ssr --no-default-features --locked
 
-# Type-check entire workspace (default features, exercises hydrate-side code paths). Slower; use before commits.
-cargo check --workspace
+# Type-check the default-feature workspace graph. Pair this with the explicit
+# hydrate check below before commits; default features alone do not exercise
+# wasm32/hydrate-only code paths.
+cargo check --workspace --locked
+
+# Type-check the hydrate-side app graph.
+cargo check -p eigenpulse --lib --target wasm32-unknown-unknown --no-default-features --features hydrate --locked
 
 # Run dev server with file-watching, runs both SSR and hydrate WASM builds.
 # Only EP_ADMIN_PASSWORD is required (for first boot). DATABASE_URL has a default
@@ -39,51 +44,52 @@ cargo leptos build --release
 docker buildx build --platform linux/amd64,linux/arm64 -t eigenpulse:0.1.0 .
 
 # Type-check just one crate.
-cargo check -p ep-finance --features ssr
+cargo check -p ep-finance --features ssr --no-default-features --locked
 
 # Unit tests / focused integration tests.
-cargo test -p ep-core --lib
-cargo test -p ep-auth --lib --features ssr --no-default-features
-cargo test -p ep-finance --features ssr --no-default-features --test crud
+cargo test -p ep-core --lib --locked
+cargo test -p ep-auth --lib --features ssr --no-default-features --locked
+cargo test -p ep-db --lib --features ssr --no-default-features --locked
+cargo test -p ep-finance --features ssr --no-default-features --test crud --locked
 
 # Smoke test requires a built Leptos site first.
 cargo leptos build --release && ./scripts/leptos-postbuild.sh
-cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features
+cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
 ```
 
-There are unit tests and a small smoke suite now. CI runs workspace checks, selected `--lib` tests, a full `cargo leptos build --release` followed by `scripts/leptos-postbuild.sh`, the `app/tests/smoke.rs` harness, and a Docker health probe. `modules/finance/tests/crud.rs` is a focused SQLite integration suite and should be run when touching finance CRUD/server helpers.
+There are unit tests and a small smoke suite now. CI runs `cargo fmt --check`, workspace/SSR/hydrate checks, no-default leaf-crate checks, clippy with `-D warnings`, selected `--lib` tests, a full `cargo leptos build --release` followed by `scripts/leptos-postbuild.sh`, the `app/tests/smoke.rs` harness, and a Docker health probe. `modules/finance/tests/crud.rs` is a focused SQLite integration suite and should be run when touching finance CRUD/server helpers.
 
 ## Architecture — the parts that span files
 
 ### Module system (the core abstraction)
 
-Every feature lives in `modules/<x>/` as its own crate that implements `ep_core::Module` (defined in `crates/core/src/module.rs`). The trait declares: code/name/icon/section, embedded SQL migrations, `routes(state)` (axum sub-router), `open_api(state)` (mounted under `/api/v1/<x>` with PAT middleware), `dashboard_widgets`, `today_items`, and cross-module `links`.
+Every feature lives in `modules/<x>/` as its own crate that implements `ep_core::Module` (defined in `crates/core/src/module.rs`). The trait requires a module code and embedded SQL migrations. Override `open_api(state)` only when the module exposes PAT-protected endpoints under `/api/v1/<x>`.
 
 - Each module exports `pub static MODULE: &dyn Module = &<X>Module;` (a unit struct, zero-cost).
 - `app/src/main.rs` registers them with `ModuleRegistry::new().with(ep_finance::MODULE)…` — **one line per module**. To add a new module, see README §"添加新模块".
 - The registry runs migrations idempotently via the `_ep_module_migration` ledger table; per-module SQL goes in `modules/<x>/migrations/`. Global tables live in the workspace-root `migrations/0001_init.sql` and are run by `sqlx::migrate!()` at pool open.
-- Module-trait impls are gated `#[cfg(feature = "ssr")]` because `routes()` returns `axum::Router`. Everything else (views, models) stays compilable on both targets.
+- Module-trait impls are gated `#[cfg(feature = "ssr")]` because registry wiring and Open API routers are server-side only. Everything else (views, models) stays compilable on both targets.
 
 ### Hydrate vs SSR feature gating
 
-This is the single most fragile part of the project. `sqlx`, `argon2`, `lettre`, `reqwest`, `tokio` etc. **must not** enter the WASM bundle or the size budget (target < 450 KB gzipped) blows up.
+This is the single most fragile part of the project. Keep SSR-only dependencies such as `sqlx`, `argon2`, `lettre`, `reqwest`, and `tokio` out of hydrate builds unless there is a deliberate browser-side need and it still compiles/runs cleanly on `wasm32-unknown-unknown`. The expected deployment target is a modern NAS, not an embedded device: keep the app lightweight and fast, but prioritize useful functionality and maintainability over shaving a few hundred KB. Treat gzip size as a performance signal rather than a hard gate; the historical <450 KB gzipped figure is a useful leak-detection reference, not a reason to delete useful functionality when the measured UX is fine.
 
 - Every workspace crate has `ssr` and (where applicable) `hydrate` features. Heavy deps are `optional = true` and only enabled under `ssr`.
-- `app` is a hybrid: `[lib]` (compiled both for SSR and hydrate-as-rlib) + `[[bin]] required-features = ["ssr"]`. `app-client` is the `cdylib` that pulls `app` with `features = ["hydrate"]`.
-- Inside `#[server]` functions, wrap server-only code in `#[cfg(feature = "ssr")]` and provide a stub for `#[cfg(not(feature = "ssr"))]` returning `ServerFnError::ServerError("ssr-only".into())`. See `modules/finance/src/server_fns.rs` for the canonical pattern.
+- `app` is a hybrid: `[lib]` (compiled both for SSR and hydrate) + `[[bin]] required-features = ["ssr"]`. cargo-leptos builds the `app` lib directly with `features = ["hydrate"]`.
+- Inside `#[server]` functions, wrap server-only code in `#[cfg(feature = "ssr")]` and provide a `#[cfg(not(feature = "ssr"))]` stub returning `ep_core::server_err("ssr-only")`. See `modules/finance/src/server_fns.rs` for the canonical pattern.
 
 ### State propagation (axum + Leptos)
 
 `AppState` (`crates/core/src/state.rs`) holds `db: SqlitePool`, `cookie_key: cookie::Key`, `notify: NotifyBusHandle`, `leptos_options`. It implements `FromRef<AppState>` for `SqlitePool` / `cookie::Key` / `LeptosOptions`, so all three extractors work on `Router<AppState>`.
 
 - The whole axum router uses `Router::<AppState>::new()`. **Don't** revert this to `Router::new()` — type inference picks `LeptosOptions` and breaks `leptos_routes_with_context`.
-- `leptos_routes_with_context` takes `&state` (not `&leptos_options`) and provides `AppState` via `provide_context` so `#[server]` functions get it through `expect_context::<AppState>()`.
-- The PAT-protected `/api/v1/*` group is layered separately with `from_fn_with_state(state.clone(), ep_auth::pat::require_pat)`; the rest of the app sits under `ep_auth::middleware::require_session`. Public allowlist is in `crates/auth/src/middleware.rs::PUBLIC_PREFIXES`.
+- `leptos_routes_with_context` takes `&state` (not `&leptos_options`) and provides `AppState` via `provide_context`; `#[server]` functions read it through `ep_core::app_state_context()` so missing context becomes a server-fn error instead of a panic.
+- The PAT-protected `/api/v1/*` group is layered separately with `from_fn_with_state(state.clone(), ep_auth::require_pat)`; the rest of the app sits under `ep_auth::require_session`. Public allowlist is in `crates/auth/src/middleware.rs::PUBLIC_PREFIXES`.
 
 ### Auth (cookie + PAT, two parallel mechanisms)
 
-- **Cookie session** (`crates/auth/src/session.rs`): browser-only. `ep_sid` cookie, signed with `EP_SECRET` (or generated `data/secret.key`), 30-day sliding renewal. `Secure` flag is **off** by default — controlled by `EP_COOKIE_SECURE=1` because the LAN/NAS HTTP deployment cannot persist a `Secure` cookie. SameSite is `Lax`.
-- **Personal Access Tokens** (`crates/auth/src/pat.rs`): `Authorization: Bearer ep_pat_…`. Stored as plain `sha256(token)` (no HMAC, no `EP_SECRET` involvement) + a 12-char visible prefix; verification is byte-equality on the hash. Scopes are space-separated strings declared by each module's `Module::open_api_scopes()`. `require_scope(&pat, "fin:write")` is the gate inside handlers. Revocation = `UPDATE pat SET revoked_at = now WHERE id = ?`; rotating `EP_SECRET` does **not** invalidate tokens.
+- **Cookie session** (`crates/auth/src/session.rs`): browser-only. `ep_sid` cookie, signed with `EP_SECRET` (or generated at `EP_SECRET_FILE`, default `data/secret.key`; Docker sets `/data/secret.key`), 30-day sliding renewal. `Secure` flag is **off** by default — controlled by `EP_COOKIE_SECURE=1` because the LAN/NAS HTTP deployment cannot persist a `Secure` cookie. SameSite is `Lax`.
+- **Personal Access Tokens** (`crates/auth/src/pat.rs`): `Authorization: Bearer ep_pat_…`. Stored as plain `sha256(token)` (no HMAC, no `EP_SECRET` involvement) + a 12-char visible prefix; verification is byte-equality on the hash. Scopes are space-separated strings validated in `app/src/views/settings/security.rs` and enforced in handlers with `require_scope(&pat, "fin:write")`. Revocation = `UPDATE pat SET revoked_at = now WHERE id = ?`; rotating `EP_SECRET` does **not** invalidate tokens.
 - First-boot bootstrap (`crates/auth/src/bootstrap.rs`) reads `EP_ADMIN_PASSWORD` and creates the single OWNER row. **Missing → process panics**, by design.
 - Argon2id is run inside `tokio::task::spawn_blocking` in `app/src/login.rs::submit` because verify takes ~150–250 ms on Celeron-class NAS hardware.
 
@@ -99,7 +105,7 @@ The bus exposes itself to other crates as `dyn NotifyBusTrait` (defined in `crat
   - **Don't** rename CSS variables, consolidate rules, retune values, or restructure cascade layers speculatively — design CSS interacts in non-obvious ways.
   - **Do** delete rules whose selectors no longer match any rendered element (true dead code is a pure subtraction, zero visual risk).
   - Density is via `data-density="compact|comfortable"` on the root, theme via `data-theme="light|dark"`.
-- `crates/ui/src/` has the shared Leptos components (`Kpi`, `Card`, `Tag`, `Tabs`, `PageHead`, `SectionLabel`, `ChartBars`, `Donut`, `Ring`, `Heatmap`, `Sidebar`, `Topbar`, `Icon`). String props use `#[prop(into, optional)] Option<String>` so call sites can write `title="…"` without `.to_string()` or `Some(…)`.
+- `crates/ui/src/` has the shared Leptos components (`Kpi`, `Card`, `Tag`, `Tabs`, `PageHead`, `SectionLabel`, `ChartBars`, `Ring`, `Heatmap`, `Sidebar`, `Topbar`, `Icon`). String props use `#[prop(into, optional)] Option<String>` so call sites can write `title="…"` without `.to_string()` or `Some(…)`.
 - `crates/ui/src/sidebar.rs::NAV` is **hardcoded** static; this is intentional because hydrate-side has no `ModuleRegistry`. New modules require a new `NAV` entry in addition to the registry registration.
 - Theme + density toggles: theme is a one-click Sun/Moon button in the `Topbar`; density is a segmented control on the `/settings` `CFG-UI · 外观` card. Both write to the shared `RwSignal<TweakState>` provided by `provide_tweak_state` in `<App/>`.
 - Anti-FOUC: `assets/theme-init.js` is inlined in `<head>` to set `data-theme` / `data-density` from cookie/localStorage before first paint. `crates/ui/src/tweaks.rs::provide_tweak_state` then runs two `Effect`s on hydrate: (1) a one-shot post-mount **restore** that reads localStorage (or falls back to the `<html>` attrs theme-init.js wrote) and `s.set()`s the signal so reactive views re-evaluate against the persisted state — without this the SSR-default value would clobber the user's choice on every page load; (2) a **persist** effect that writes signal changes back to localStorage / cookie / `<html>`, deduped against `prev` to skip no-op writes.
@@ -117,16 +123,16 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - Number formatting: `ep_core::{fmt_int, fmt_money, thousands_sep}` — used by both `dashboard.rs` and `finance::view`.
 - HTML escape: `ep_core::html_escape`.
 - Unauthorized JSON response: `ep_auth::unauthorized(message)`.
-- HTTP client (notifiers): `ep_notify::http_client()` (single global `OnceLock<reqwest::Client>`).
+- HTTP client (notifiers): provider implementations share the crate-private `ep_notify` HTTP client (`OnceLock<reqwest::Client>`); callers should go through `NotifyBus` / channel helpers, not direct HTTP access.
 
 ### Deploy
 
 - Single distroless container, runs as `nonroot` (uid 65532, the upstream `gcr.io/distroless/cc-debian12:nonroot` default). When mounting a host path for `/data`, `chown -R 65532:65532 <path>`.
 - The Dockerfile pins `rust:1-bookworm` (latest stable 1.x) — keep it that way; specific minor pins will break against `time` / `icu_*` / `home`.
-- `EP_SECRET` is **only** the signing key for the `ep_sid` session cookie (`SignedCookieJar` in `crates/auth/src/middleware.rs` and `app/src/login.rs`). Rotating it invalidates all browser sessions; **PATs are unaffected** — `crates/auth/src/pat.rs::hash_token` is a plain unkeyed `sha256(token)` and never reads `EP_SECRET`. Don't suggest rotating `EP_SECRET` as a way to revoke leaked tokens; revoke individual rows in `pat` (set `revoked_at`) instead.
+- `EP_SECRET` is **only** the signing key for the `ep_sid` session cookie (`SignedCookieJar` in `crates/auth/src/middleware.rs` and `app/src/login.rs`). Rotating it invalidates all browser sessions; **PATs are unaffected** — `crates/auth/src/pat.rs::hash_token` is a plain unkeyed `sha256(token)` and never reads `EP_SECRET`. If unset, the binary reads or creates `EP_SECRET_FILE` (default `data/secret.key`; Docker sets `/data/secret.key`). Don't suggest rotating `EP_SECRET` as a way to revoke leaked tokens; revoke individual rows in `pat` (set `revoked_at`) instead.
 - `EP_ADMIN_PASSWORD` is read **only** when `app_user` is empty (first boot). After bootstrap the row stays; the env var has no further effect. To rotate, use `/settings/security` (purges all sessions) or the recovery CLI `cargo run -p ep-auth --features ssr --example reset_password`.
 - `cargo-leptos` is installed and invoked in the build stage; the runtime stage only contains the `eigenpulse` binary + `target/site/`.
-- The Dockerfile installs `wasm-opt-shim.sh` as `/usr/local/cargo/bin/wasm-opt-version_123/wasm-opt`. cargo-leptos 0.3.6 always tries to run wasm-opt and its bundled downloader (`version_123`/`129`) has no usable aarch64 path for multi-arch builds; Debian `binaryen` is also too old for current Rust WASM features. The shim no-ops wasm-opt after Rust's own `-Oz` pass.
+- The Dockerfile installs `wasm-opt-shim.sh` as `/usr/local/cargo/bin/wasm-opt-version_{123,129}/wasm-opt`. cargo-leptos 0.3.6 always tries to run wasm-opt and its bundled downloader has no usable aarch64 path for multi-arch builds; Debian `binaryen` is also too old for current Rust WASM features. The shim no-ops wasm-opt after Rust's own `-Oz` pass.
 - **`scripts/leptos-postbuild.sh` is mandatory after every `cargo leptos build`**: cargo-leptos 0.3.6 publishes the wasm artifact as `<name>.wasm` while wasm-bindgen's `.js` loader and Leptos's `<HydrationScripts/>` both fetch `<name>_bg.wasm`. The script `cp`s the file under both names; without it every page silently degrades to its SSR snapshot (no Tweaks toggle, no ActionForm refetch, no SSE counter). The Dockerfile invokes it automatically; `cargo leptos watch` users have to re-run it after each rebuild (cargo-leptos has no post-build hook in 0.3.6).
 - **Wrap inline `{move || option.map(view!)}` in a stable wrapper element** when the conditional view sits next to an `<ActionForm>` (or any sibling that mutates DOM during hydrate). tachys 0.1.9's text-node walker panics with `failed_to_cast_text_node` if the placeholder neighbour shifts. See `app/src/views/settings/{notifications,security}.rs` for `<span class="error-slot">…</span>` and `<div class="new-token-slot">…</div>` examples; the wrapper itself never moves, so the walker keeps its anchor.
 
@@ -134,11 +140,11 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 
 **Anything returned from a `#[server]` function ends up in the hydrate WASM bundle and over the wire to the browser.** Treat the DTO type as a public API.
 
-- `notify_channel.config_json` (SMTP password, Bark device key, Telegram bot token, Discord webhook URL) **must not** appear on any DTO returned by a server fn or open-API handler. The `ChannelDto` in `app/src/views/settings/notifications.rs` deliberately drops it; re-editing a channel re-prompts the user for the secret.
+- `notify_channel.config_json` (SMTP password, Bark device key, Telegram bot token, Discord webhook URL) **must not** appear on any DTO returned by a server fn or open-API handler. `ep_notify::list_channels()` returns `NotifyChannelSummary` without config JSON, and the `ChannelDto` in `app/src/views/settings/notifications.rs` mirrors that boundary. Re-editing a channel re-prompts the user for the secret.
 - `pat.hash` is server-side only. UI shows `prefix` (12 visible chars). The plaintext token is returned **exactly once** in `GeneratePat::token` at creation time — never persisted in `pat.hash`, never re-fetchable.
 - `app_user.password_hash` is never serialized.
 - When adding a new server fn that touches a `*_secret` / `*_token` / `password*` / `webhook*` / `config_json` column, define a minimal DTO with only the fields the UI actually renders.
-- **Errors from third-party clients can also leak secrets.** `lettre::Error` may include the SMTP host:port and connection string; `reqwest::Error` may include the full request URL — and Bark device-keys / Telegram bot tokens / Discord webhooks all live *in the URL*. Don't `.map_err(server_err)?` straight from these libs into a `#[server]` fn that the browser can read. Use `tracing::warn!(...)` to log the full error server-side and return a generic message (`format!("{} 通道测试失败 · 详细错误已记录", kind)`). See `test_channel` in `app/src/views/settings/notifications.rs`.
+- **Errors from third-party clients can also leak secrets if returned directly.** `lettre::Error` may include the SMTP host:port and connection string; `reqwest::Error` may include the full request URL — and Bark device-keys / Telegram bot tokens / Discord webhooks all live *in the URL*. `ep_core::server_err` logs details server-side and returns a generic `ServerError`, but user-facing flows such as channel tests should still log the full error and return a contextual generic message (`format!("{} 通道测试失败 · 详细错误已记录", kind)`). See `test_channel` in `app/src/views/settings/notifications.rs`.
 
 ## Wasm-side panics to avoid in view code
 
@@ -150,7 +156,7 @@ Don't call from view code:
 - `std::fs` / `std::process` / `tokio::fs` — silently won't link or panic.
 - Anything inside `#[cfg(feature = "ssr")]` is fine; the view's wasm-target compile sees only `#[cfg(not(feature = "ssr"))]` branches.
 
-Pure conversions like `time::OffsetDateTime::from_unix_timestamp(i64)` are pure math and are safe on wasm — that's what `fmt_ts` in security.rs uses.
+For view-side timestamp formatting, prefer the `ep_core::fmt_ts_*` helpers or the pure `ep_core::unix_to_ymdhm` / `ep_core::ymd_to_unix_midnight` conversions. Do not pull `time` back into hydrate just for date formatting.
 
 ## Migration discipline
 

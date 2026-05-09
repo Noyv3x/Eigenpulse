@@ -117,7 +117,7 @@ pub fn provide_tweak_state(initial: TweakState) -> RwSignal<TweakState> {
 }
 
 pub fn use_tweaks() -> RwSignal<TweakState> {
-    use_context::<RwSignal<TweakState>>().expect("provide_tweak_state must be called in <App/>")
+    use_context::<RwSignal<TweakState>>().unwrap_or_else(|| RwSignal::new(TweakState::default()))
 }
 
 #[cfg(feature = "hydrate")]

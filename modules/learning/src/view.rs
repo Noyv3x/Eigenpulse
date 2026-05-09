@@ -1,18 +1,9 @@
 use crate::model::*;
 use crate::server_fns::*;
 use ep_core::IconKind;
-use ep_i18n::{parse_err, t, tf, use_locale};
-use ep_ui::{kpi::Direction, Card, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, Tag};
+use ep_i18n::{server_fn_error_text, t, tf, use_locale};
+use ep_ui::{Card, Direction, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, Tag};
 use leptos::prelude::*;
-use leptos::server_fn::ServerFnError;
-
-fn fmt_server_err(e: &ServerFnError) -> String {
-    let locale = use_locale();
-    match parse_err(e) {
-        Some((code, payload)) => tf(locale, code, &[("payload", payload.unwrap_or(""))]),
-        None => e.to_string(),
-    }
-}
 
 #[component]
 pub fn LearningView() -> impl IntoView {
@@ -40,14 +31,14 @@ pub fn LearningView() -> impl IntoView {
             <PageHead
                 code="LRN-03"
                 module=t(locale, "learning.page.module")
-                title="Learning"
+                title=t(locale, "learning.page.title")
                 title_cn=t(locale, "learning.page.title_cn")
                 sub=t(locale, "learning.page.sub")
             />
 
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
                 {move || data.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {fmt_server_err(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_learning(d, add_book, cycle, del_book, add_note, del_note).into_any(),
                 })}
             </Suspense>
@@ -137,12 +128,14 @@ fn render_body(
     let locale = use_locale();
     view! {
         <div class="grid-2">
-            <Card title=t(locale, "learning.card.books.title") code="LRN-BK-01" sub="Books">
+            <Card title=t(locale, "learning.card.books.title") code="LRN-BK-01" sub=t(locale, "learning.card.books.sub")>
                 <ActionForm action=add_book attr:class="vstack" attr:style="gap:8px;margin-bottom:12px">
                     <div style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end">
-                        <input name="name" required placeholder=t(locale, "learning.field.book")
+                        <input name="name" required maxlength=MAX_BOOK_NAME_CHARS.to_string()
+                               placeholder=t(locale, "learning.field.book")
                                style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
-                        <input name="author" placeholder=t(locale, "learning.field.author")
+                        <input name="author" maxlength=MAX_BOOK_AUTHOR_CHARS.to_string()
+                               placeholder=t(locale, "learning.field.author")
                                style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
                         <select name="status" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
                             <option value="todo" selected="selected">{t(locale, "learning.status.todo")}</option>
@@ -153,7 +146,7 @@ fn render_body(
                     </div>
                     <span class="error-slot">
                         {move || add_book.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{e.to_string()}</span>
+                            <span class="tag rose">{server_fn_error_text(&e)}</span>
                         })}
                     </span>
                 </ActionForm>
@@ -201,17 +194,19 @@ fn render_body(
                 </table>
             </Card>
 
-            <Card title=t(locale, "learning.card.notes.title") code="LRN-N-01" sub="Notes">
+            <Card title=t(locale, "learning.card.notes.title") code="LRN-N-01" sub=t(locale, "learning.card.notes.sub")>
                 <ActionForm action=add_note attr:class="vstack" attr:style="gap:8px;margin-bottom:12px">
-                    <input name="title" required placeholder=t(locale, "learning.field.title")
+                    <input name="title" required maxlength=MAX_NOTE_TITLE_CHARS.to_string()
+                           placeholder=t(locale, "learning.field.title")
                            style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
-                    <textarea name="body" rows="2" placeholder=t(locale, "learning.field.body")
+                    <textarea name="body" rows="2" maxlength=MAX_NOTE_BODY_CHARS.to_string()
+                              placeholder=t(locale, "learning.field.body")
                               style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono);font-size:12px"></textarea>
                     <div class="hstack" style="gap:8px">
                         <button class="btn primary sm" type="submit"><Icon kind=IconKind::Plus size=12/>{t(locale, "learning.submit.add_note")}</button>
                         <span class="error-slot">
                             {move || add_note.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{e.to_string()}</span>
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
                             })}
                         </span>
                     </div>
@@ -221,11 +216,15 @@ fn render_body(
                     {d.notes.into_iter().map(|n| {
                         let doc = n.doc_id.clone();
                         let when = ep_core::fmt_ts_date(Some(n.updated_at));
+                        let body = n.body.clone();
                         view! {
                             <div class="list-row">
                                 <div class="icon-tile mono" style="font-size:10px">{n.doc_id.split('-').next_back().unwrap_or("").to_string()}</div>
                                 <div>
                                     <div class="title">{n.title}</div>
+                                    {body.map(|b| view! {
+                                        <div class="muted" style="font-size:12px;margin-top:2px;white-space:pre-wrap">{b}</div>
+                                    })}
                                     <div class="meta mono dim">{when}</div>
                                 </div>
                                 <RowDeleteAction action=del_note value=doc

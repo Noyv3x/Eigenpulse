@@ -6,7 +6,34 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
+use tower::ServiceExt;
+
+fn server_fn_error_text_en(e: &leptos::server_fn::ServerFnError) -> String {
+    let Some((code, payload)) = ep_i18n::parse_err(e) else {
+        return e.to_string();
+    };
+    match payload {
+        Some(payload) => ep_i18n::tf(ep_i18n::Locale::En, code, &[("payload", payload)]),
+        None => ep_i18n::t(ep_i18n::Locale::En, code).to_string(),
+    }
+}
+
+#[derive(Debug)]
+struct NoopNotifyBus;
+
+#[async_trait::async_trait]
+impl ep_core::NotifyBusTrait for NoopNotifyBus {
+    async fn dispatch(&self, _msg: ep_core::NotifyMessage) -> anyhow::Result<i64> {
+        Ok(0)
+    }
+
+    fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ep_core::NotifyMessage> {
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        rx
+    }
+}
 
 /// Spin up a fresh in-memory SQLite pool and apply both the global core
 /// migrations and the finance module migrations against it. Mirrors
@@ -39,20 +66,15 @@ async fn make_test_pool() -> anyhow::Result<SqlitePool> {
     //    module_link, activity, notification, …) — the global migrator.
     ep_db::CORE_MIGRATOR.run(&pool).await?;
 
-    // 2. Finance module migrations — applied
-    //    via the same idempotent ledger code-path that production uses.
-    //    We call `MODULE.migrations()` directly rather than building a full
-    //    `ModuleRegistry` because the registry pulls in axum + the rest of
-    //    the SSR app and we don't need any of that here.
-    apply_module_migrations(&pool, ep_finance::MODULE).await?;
+    // 2. Finance module migrations — applied via the same idempotent ledger
+    //    code-path that production uses.
+    ep_core::run_module_migrations(&pool, ep_finance::MODULE).await?;
 
-    // 3. Strip seed data so each test starts from a known-empty fixture.
-    //    `001_finance.sql` ships demo accounts/categories/budgets/txns to
-    //    make a fresh `cargo leptos watch` look populated; for unit tests
-    //    that's noise. We drop everything and let the test seed exactly
-    //    what it needs. We do NOT touch `_ep_module_migration` — the ledger
-    //    must keep saying "002 applied" so a subsequent
-    //    `apply_module_migrations` call (idempotency check) is a no-op.
+    // 3. Ensure each test starts from a known-empty fixture. The production
+    //    migrations remove historical demo data, and these deletes are now
+    //    mostly defensive no-ops. We do NOT touch `_ep_module_migration` —
+    //    the ledger must keep saying every migration applied so a subsequent
+    //    `run_module_migrations` call (idempotency check) is a no-op.
     sqlx::query("DELETE FROM fin_txn").execute(&pool).await?;
     sqlx::query("DELETE FROM fin_budget").execute(&pool).await?;
     sqlx::query("DELETE FROM fin_account")
@@ -69,76 +91,6 @@ async fn make_test_pool() -> anyhow::Result<SqlitePool> {
         .await?;
 
     Ok(pool)
-}
-
-/// Stripped-down clone of `ModuleRegistry::run_migrations` for one module —
-/// re-applies the ledger contract (`_ep_module_migration` filename-keyed
-/// idempotent INSERT). Kept inline so the test harness doesn't depend on
-/// the full registry → that pulls axum, leptos_axum, and a half-dozen other
-/// crates we don't need for sqlite-only tests.
-async fn apply_module_migrations(
-    pool: &SqlitePool,
-    module: &dyn ep_core::Module,
-) -> anyhow::Result<()> {
-    for (name, sql) in module.migrations() {
-        let already: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM _ep_module_migration WHERE module = ?1 AND name = ?2",
-        )
-        .bind(module.code())
-        .bind(*name)
-        .fetch_optional(pool)
-        .await?;
-        if already.is_some() {
-            continue;
-        }
-        let mut tx = pool.begin().await?;
-        // Strip `--` line comments first — the prod registry uses a fully
-        // quote-and-comment-aware splitter, but lifting that requires an
-        // `AppState`. Stripping line comments is enough for the migrations
-        // we ship; none of them contain `;` inside a string literal or
-        // block comment. (If that ever changes, lift `split_sql` to a
-        // `pub fn` in `ep_core` and call it here.) The `;`-inside-line-
-        // comment foot-gun is real: 002_finance_crud's "follow-up UPDATE."
-        // sentence trips the naive splitter.
-        let stripped = strip_line_comments(sql);
-        for stmt in stripped.split(';') {
-            let stmt = stmt.trim();
-            if stmt.is_empty() {
-                continue;
-            }
-            sqlx::query(stmt).execute(&mut *tx).await?;
-        }
-        sqlx::query("INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)")
-            .bind(module.code())
-            .bind(*name)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-    }
-    Ok(())
-}
-
-/// Drop every `--`…end-of-line comment in `sql`. We can't do this in the
-/// migration files themselves (the prod registry's quote-aware splitter
-/// keeps comments verbatim, which is the right call for the production
-/// path). For the test harness's simple `;`-splitter, removing line
-/// comments before the split is the cheapest way to handle a migration
-/// like `002_finance_crud.sql` whose comment text contains a stray `;`.
-fn strip_line_comments(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    for line in sql.lines() {
-        match line.find("--") {
-            Some(idx) => {
-                out.push_str(&line[..idx]);
-                out.push('\n');
-            }
-            None => {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-    }
-    out
 }
 
 /// Insert one `fin_account` row at the given starting balance, returning
@@ -229,7 +181,7 @@ async fn pool_helper_applies_finance_migrations() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 3, "expected all finance migrations to be ledgered");
+    assert_eq!(n, 4, "expected all finance migrations to be ledgered");
 }
 
 /// Idempotency: running the migrations a second time should be a no-op,
@@ -238,16 +190,16 @@ async fn pool_helper_applies_finance_migrations() {
 #[tokio::test]
 async fn pool_helper_is_idempotent_on_double_apply() {
     let pool = make_test_pool().await.expect("first apply");
-    apply_module_migrations(&pool, ep_finance::MODULE)
+    ep_core::run_module_migrations(&pool, ep_finance::MODULE)
         .await
         .expect("second apply must be no-op");
-    // Still exactly three ledger rows.
+    // Still exactly four ledger rows.
     let n: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 3);
+    assert_eq!(n, 4);
 }
 
 /// `seed_account` + `fetch_balance` round-trip. Cheap fixture-helper test
@@ -263,6 +215,253 @@ async fn fixture_helpers_round_trip() {
 }
 
 #[tokio::test]
+async fn post_txn_api_persists_linked_doc_id_everywhere() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 100.0)
+        .await
+        .expect("seed account");
+    seed_category(&pool, "EXP", "Expense")
+        .await
+        .expect("seed category");
+    let state = ep_core::AppState {
+        db: pool.clone(),
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "test".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/txn")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({
+                "merchant": "Linked expense",
+                "category_code": "EXP",
+                "account_code": "ACC-T",
+                "amount": -42.0,
+                "tag": "exp",
+                "note": "handler path",
+                "linked_doc_id": " FIT-26001 ",
+                "occurred_at": 1_700_000_000_i64
+            })
+            .to_string(),
+        ))
+        .expect("request");
+    let resp = app.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let created: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let doc_id = created
+        .get("doc_id")
+        .and_then(|v| v.as_str())
+        .expect("doc_id");
+
+    let linked: Option<String> =
+        sqlx::query_scalar("SELECT linked_doc_id FROM fin_txn WHERE doc_id = ?1")
+            .bind(doc_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fin_txn linked_doc_id");
+    assert_eq!(linked.as_deref(), Some("FIT-26001"));
+
+    let activity_link: Option<String> =
+        sqlx::query_scalar("SELECT link_doc FROM activity WHERE module = 'FIN' AND doc_id = ?1")
+            .bind(doc_id)
+            .fetch_one(&pool)
+            .await
+            .expect("activity link_doc");
+    assert_eq!(activity_link.as_deref(), Some("FIT-26001"));
+
+    let link_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM module_link
+          WHERE source_doc = ?1 AND target_doc = 'FIT-26001' AND kind = 'ref'",
+    )
+    .bind(doc_id)
+    .fetch_one(&pool)
+    .await
+    .expect("module_link ref");
+    assert_eq!(link_count, 1);
+}
+
+#[tokio::test]
+async fn post_txn_api_rejects_bad_sign_with_i18n_error_json() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 100.0)
+        .await
+        .expect("seed account");
+    seed_category(&pool, "EXP", "Expense")
+        .await
+        .expect("seed category");
+    let state = ep_core::AppState {
+        db: pool.clone(),
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "test".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/txn")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({
+                "merchant": "Wrong sign",
+                "category_code": "EXP",
+                "account_code": "ACC-T",
+                "amount": 42.0,
+                "tag": "exp"
+            })
+            .to_string(),
+        ))
+        .expect("request");
+    let resp = app.oneshot(req).await.expect("response");
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let err: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        err.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("finance.err.amount_sign_invalid")
+    );
+    assert_eq!(count_txns(&pool).await.unwrap(), 0);
+    assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(100.0));
+}
+
+#[tokio::test]
+async fn add_txn_inner_trims_and_persists_side_effects() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 100.0)
+        .await
+        .expect("seed account");
+    seed_category(&pool, "EXP", "Expense")
+        .await
+        .expect("seed category");
+
+    let txn = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            merchant: "  Coffee  ".into(),
+            category_code: " EXP ".into(),
+            account_code: " ACC-T ".into(),
+            amount: -12.5,
+            tag: " exp ".into(),
+            note: Some("  morning  ".into()),
+            linked_doc_id: Some(" FIT-S-0001 ".into()),
+            occurred_at: 1_700_000_000,
+        },
+    )
+    .await
+    .expect("add txn");
+
+    assert_eq!(txn.merchant, "Coffee");
+    assert_eq!(txn.category_code, "EXP");
+    assert_eq!(txn.account_code, "ACC-T");
+    assert_eq!(txn.note.as_deref(), Some("morning"));
+    assert_eq!(txn.linked_doc_id.as_deref(), Some("FIT-S-0001"));
+    assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(87.5));
+
+    let activity_link: Option<String> =
+        sqlx::query_scalar("SELECT link_doc FROM activity WHERE module = 'FIN' AND doc_id = ?1")
+            .bind(&txn.doc_id)
+            .fetch_one(&pool)
+            .await
+            .expect("activity link_doc");
+    assert_eq!(activity_link.as_deref(), Some("FIT-S-0001"));
+}
+
+#[tokio::test]
+async fn add_txn_inner_rejects_invalid_contract_before_insert() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 100.0)
+        .await
+        .expect("seed account");
+    seed_category(&pool, "EXP", "Expense")
+        .await
+        .expect("seed category");
+
+    let err = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            merchant: "Coffee".into(),
+            category_code: "EXP".into(),
+            account_code: "ACC-T".into(),
+            amount: 12.5,
+            tag: "exp".into(),
+            note: None,
+            linked_doc_id: None,
+            occurred_at: 1_700_000_000,
+        },
+    )
+    .await
+    .expect_err("bad sign");
+    assert_eq!(
+        ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+        Some(("finance.err.amount_sign_invalid", ""))
+    );
+
+    let err = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            merchant: "Move money".into(),
+            category_code: "EXP".into(),
+            account_code: "ACC-T".into(),
+            amount: -12.5,
+            tag: "tfr".into(),
+            note: None,
+            linked_doc_id: None,
+            occurred_at: 1_700_000_000,
+        },
+    )
+    .await
+    .expect_err("single-leg transfer");
+    assert_eq!(
+        ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+        Some(("finance.err.tfr_requires_transfer", ""))
+    );
+
+    let err = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            merchant: "Coffee".into(),
+            category_code: "EXP".into(),
+            account_code: "ACC-T".into(),
+            amount: -12.5,
+            tag: "exp".into(),
+            note: None,
+            linked_doc_id: Some("../FIT-S-0001".into()),
+            occurred_at: 1_700_000_000,
+        },
+    )
+    .await
+    .expect_err("invalid linked doc id");
+    assert_eq!(
+        ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+        Some(("finance.err.linked_doc_id_invalid", "../FIT-S-0001"))
+    );
+
+    assert_eq!(count_txns(&pool).await.unwrap(), 0);
+    assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(100.0));
+}
+
+#[tokio::test]
 async fn delete_unused_account_removes_row() {
     let pool = make_test_pool().await.expect("pool");
     seed_account(&pool, "ACC-DEL", 12.0).await.unwrap();
@@ -272,6 +471,74 @@ async fn delete_unused_account_removes_row() {
         .expect("delete unused account");
 
     assert_eq!(fetch_balance(&pool, "ACC-DEL").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn finance_open_api_trims_account_path_code_before_patch_and_response() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 12.0).await.unwrap();
+    let state = ep_core::AppState {
+        db: pool.clone(),
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "writer".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/account/%20ACC-T%20")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({"name": "Trimmed"}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("patch response");
+    assert_eq!(patch.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(patch.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let account: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        account.pointer("/code").and_then(|v| v.as_str()),
+        Some("ACC-T")
+    );
+    assert_eq!(
+        account.pointer("/name").and_then(|v| v.as_str()),
+        Some("Trimmed")
+    );
+
+    let delete = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/account/%20ACC-T%20")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delete response");
+    assert_eq!(delete.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(delete.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let deleted: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        deleted.pointer("/code").and_then(|v| v.as_str()),
+        Some("ACC-T")
+    );
+    assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -286,6 +553,64 @@ async fn delete_account_rejects_rows_with_transactions() {
     let res = ep_finance::delete_account_inner(&pool, "ACC-BUSY".into()).await;
     assert!(res.is_err(), "account with txns must not be deleted");
     assert_eq!(fetch_balance(&pool, "ACC-BUSY").await.unwrap(), Some(-8.0));
+}
+
+#[tokio::test]
+async fn delete_txn_inner_reports_missing_doc() {
+    let pool = make_test_pool().await.expect("pool");
+
+    let deleted = ep_finance::delete_txn_inner(&pool, "FIN-MISSING")
+        .await
+        .expect("missing delete should not error");
+
+    assert!(!deleted);
+}
+
+#[tokio::test]
+async fn delete_txn_inner_clears_external_references_to_fin_doc() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 100.0).await.unwrap();
+    seed_category(&pool, "EXP", "Expense").await.unwrap();
+    seed_txn_directly(&pool, "FIN-REF-TARGET", "ACC-T", "EXP", -20.0, "exp")
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO module_link (source_doc, target_doc, kind)
+         VALUES ('LRN-N-0001', 'FIN-REF-TARGET', 'ref')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, link_doc)
+         VALUES (1_700_000_000, 'LRN', 'LRN-N-0001', 'linked note', 'FIN-REF-TARGET')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let deleted = ep_finance::delete_txn_inner(&pool, "FIN-REF-TARGET")
+        .await
+        .expect("delete txn");
+
+    assert!(deleted);
+    let link_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM module_link
+          WHERE source_doc = 'FIN-REF-TARGET'
+             OR target_doc = 'FIN-REF-TARGET'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(link_count, 0);
+
+    let link_doc: Option<String> =
+        sqlx::query_scalar("SELECT link_doc FROM activity WHERE doc_id = 'LRN-N-0001'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(link_doc, None);
 }
 
 #[tokio::test]
@@ -312,6 +637,92 @@ async fn delete_unused_category_removes_budgets_too() {
             .unwrap();
     assert_eq!(cat_exists, 0);
     assert_eq!(budget_count, 0);
+}
+
+#[tokio::test]
+async fn finance_open_api_trims_category_path_code_before_patch_and_response() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_category(&pool, "EXP", "Expense").await.unwrap();
+    let state = ep_core::AppState {
+        db: pool.clone(),
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "writer".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let patch = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/category/%20EXP%20")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({"name": "Groceries"}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("patch response");
+    assert_eq!(patch.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(patch.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let category: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        category.pointer("/code").and_then(|v| v.as_str()),
+        Some("EXP")
+    );
+    assert_eq!(
+        category.pointer("/name").and_then(|v| v.as_str()),
+        Some("Groceries")
+    );
+
+    let delete = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri("/category/%20EXP%20")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delete response");
+    assert_eq!(delete.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(delete.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let deleted: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        deleted.pointer("/code").and_then(|v| v.as_str()),
+        Some("EXP")
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_category WHERE code = 'EXP'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn set_budget_rejects_unknown_category_before_insert() {
+    let pool = make_test_pool().await.expect("pool");
+
+    let err = ep_finance::set_budget_inner(&pool, "2026-05", "MISSING", 500.0)
+        .await
+        .expect_err("unknown category should be a domain error");
+
+    assert_eq!(
+        ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+        Some(("finance.err.category_not_found", "MISSING"))
+    );
 }
 
 #[tokio::test]
@@ -366,6 +777,212 @@ async fn parse_occurred_at_iso_date_returns_some_within_local_day() {
     assert!(
         delta <= 18 * 3600,
         "expected within ±18h of UTC-noon ({utc_noon}); got {got} (delta {delta}s)"
+    );
+}
+
+#[tokio::test]
+async fn finance_open_api_enforces_read_and_write_scopes() {
+    let pool = make_test_pool().await.expect("pool");
+    let state = ep_core::AppState {
+        db: pool.clone(),
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+
+    let read_with_write_only = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "writer".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state.clone());
+    let resp = read_with_write_only
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/txn")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+
+    let write_with_read_only = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 2,
+            name: "reader".into(),
+            scopes: vec!["fin:read".into()],
+        }))
+        .with_state(state);
+    let resp = write_with_read_only
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/txn")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "merchant": "Blocked",
+                        "category_code": "EXP",
+                        "account_code": "ACC-T",
+                        "amount": -1.0,
+                        "tag": "exp"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(count_txns(&pool).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn finance_open_api_returns_json_error_for_malformed_json_body() {
+    let pool = make_test_pool().await.expect("pool");
+    let state = ep_core::AppState {
+        db: pool,
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "writer".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/txn")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from("{"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("application/json")),
+        Some(true)
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let err: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        err.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("bad_request")
+    );
+    assert!(
+        err.pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "missing error message: {err}"
+    );
+}
+
+#[tokio::test]
+async fn finance_open_api_returns_json_error_for_bad_query_params() {
+    let pool = make_test_pool().await.expect("pool");
+    let state = ep_core::AppState {
+        db: pool,
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "reader".into(),
+            scopes: vec!["fin:read".into()],
+        }))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/budget")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.starts_with("application/json")),
+        Some(true)
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let err: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        err.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("bad_request")
+    );
+}
+
+#[tokio::test]
+async fn finance_open_api_budget_unknown_category_is_domain_error() {
+    let pool = make_test_pool().await.expect("pool");
+    let state = ep_core::AppState {
+        db: pool,
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "writer".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/budget")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "period": "2026-05",
+                        "category_code": "MISSING",
+                        "amount": 500.0
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let err: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        err.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("finance.err.category_not_found")
     );
 }
 
@@ -488,6 +1105,117 @@ async fn update_txn_cross_account() {
     );
 }
 
+#[tokio::test]
+async fn update_txn_trims_identifiers_and_optional_note() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 0.0).await.unwrap();
+    seed_category(&pool, "EXP", "Expense").await.unwrap();
+    seed_txn_directly(&pool, "FIN-99003", "ACC-T", "EXP", -100.0, "exp")
+        .await
+        .unwrap();
+
+    let updated = ep_finance::update_txn_inner(
+        &pool,
+        "FIN-99003",
+        ep_finance::UpdateTxnFields {
+            merchant: "  trimmed merchant  ".into(),
+            category_code: " EXP ".into(),
+            account_code: " ACC-T ".into(),
+            amount: 25.0,
+            note: Some("  reviewed  ".into()),
+            occurred_at_input: String::new(),
+        },
+    )
+    .await
+    .expect("trimmed update ok");
+
+    assert_eq!(updated.merchant, "trimmed merchant");
+    assert_eq!(updated.category_code, "EXP");
+    assert_eq!(updated.account_code, "ACC-T");
+    assert_eq!(updated.note.as_deref(), Some("reviewed"));
+    assert_eq!(updated.amount, -25.0);
+
+    let row: (String, String, String, Option<String>) = sqlx::query_as(
+        "SELECT merchant, category_code, account_code, note FROM fin_txn WHERE doc_id = 'FIN-99003'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "trimmed merchant".into(),
+            "EXP".into(),
+            "ACC-T".into(),
+            Some("reviewed".into())
+        )
+    );
+    assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(-25.0));
+}
+
+#[tokio::test]
+async fn update_txn_clears_existing_cross_module_reference() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-T", 0.0).await.unwrap();
+    seed_category(&pool, "EXP", "Expense").await.unwrap();
+    seed_txn_directly(&pool, "FIN-99004", "ACC-T", "EXP", -100.0, "exp")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE fin_txn SET linked_doc_id = 'FIT-S-0001' WHERE doc_id = 'FIN-99004'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc)
+         VALUES (1700000000, 'FIN', 'FIN-99004', 'seed', -100.0, 'FIT-S-0001')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO module_link (source_doc, target_doc, kind)
+         VALUES ('FIN-99004', 'FIT-S-0001', 'ref')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let updated = ep_finance::update_txn_inner(
+        &pool,
+        "FIN-99004",
+        ep_finance::UpdateTxnFields {
+            merchant: "edited".into(),
+            category_code: "EXP".into(),
+            account_code: "ACC-T".into(),
+            amount: 80.0,
+            note: None,
+            occurred_at_input: String::new(),
+        },
+    )
+    .await
+    .expect("update ok");
+
+    assert_eq!(updated.linked_doc_id, None);
+    let txn_link: Option<String> =
+        sqlx::query_scalar("SELECT linked_doc_id FROM fin_txn WHERE doc_id = 'FIN-99004'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(txn_link, None);
+    let activity_link: Option<String> =
+        sqlx::query_scalar("SELECT link_doc FROM activity WHERE doc_id = 'FIN-99004'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(activity_link, None);
+    let ref_links: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM module_link WHERE source_doc = 'FIN-99004'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ref_links, 0);
+}
+
 // add_transfer pair + delete cascade.
 
 #[tokio::test]
@@ -524,6 +1252,7 @@ async fn add_transfer_creates_pair_and_delete_cascades() {
     assert_eq!(from_txn.amount, -300.0);
     assert_eq!(to_txn.amount, 300.0);
     assert_eq!(from_txn.occurred_at, occurred_at);
+    assert_eq!(from_txn.note, None);
 
     // Delete the *from* leg → cascade to the *to* leg.
     let deleted = ep_finance::delete_txn_inner(&pool, &from_txn.doc_id)
@@ -554,6 +1283,46 @@ async fn add_transfer_creates_pair_and_delete_cascades() {
         Some(0.0),
         "ACC-TO balance reverts to pre-transfer state"
     );
+}
+
+#[tokio::test]
+async fn add_transfer_trims_optional_note() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-FROM", 1000.0).await.unwrap();
+    seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
+    seed_category(&pool, "TFR", "Transfer").await.unwrap();
+
+    let (from_txn, _to_txn) = ep_finance::add_transfer_inner(
+        &pool,
+        "ACC-FROM",
+        "ACC-TO",
+        25.0,
+        Some("  monthly sweep  "),
+        1_700_000_000,
+    )
+    .await
+    .expect("transfer ok");
+
+    assert_eq!(from_txn.note.as_deref(), Some("monthly sweep"));
+
+    let note: Option<String> = sqlx::query_scalar("SELECT note FROM fin_txn WHERE doc_id = ?1")
+        .bind(&from_txn.doc_id)
+        .fetch_one(&pool)
+        .await
+        .expect("note");
+    assert_eq!(note.as_deref(), Some("monthly sweep"));
+
+    let (blank_from, _blank_to) = ep_finance::add_transfer_inner(
+        &pool,
+        "ACC-FROM",
+        "ACC-TO",
+        10.0,
+        Some("   "),
+        1_700_000_001,
+    )
+    .await
+    .expect("blank-note transfer ok");
+    assert_eq!(blank_from.note, None);
 }
 
 /// Bonus assertion — deleting the *to* leg (instead of the from) must work
@@ -677,6 +1446,31 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
         (week_net + 40.0).abs() < 1e-6,
         "week net should be -40, got {week_net}"
     );
+
+    // 5) Shared 12-month trend helper — reports and finance page both use
+    // this path, so it must keep the same transfer-exclusion invariant.
+    let months = ep_finance::load_month_buckets_12(&pool)
+        .await
+        .expect("month buckets");
+    assert_eq!(months.len(), 12);
+    let current_period: String = sqlx::query_scalar("SELECT strftime('%Y-%m','now','localtime')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let current = months
+        .iter()
+        .find(|m| m.period == current_period)
+        .expect("current month bucket");
+    assert!(
+        (current.expense - 40.0).abs() < 1e-6,
+        "month bucket expense should be 40, got {} in {current:?}",
+        current.expense
+    );
+    assert!(
+        (current.net + 40.0).abs() < 1e-6,
+        "month bucket net should be -40, got {} in {current:?}",
+        current.net
+    );
 }
 
 // Single-leg tfr (kind='ref' link, not 'tfr-pair') must not cascade.
@@ -699,8 +1493,9 @@ async fn single_leg_tfr_delete_does_not_cascade_unrelated_doc() {
     .await
     .unwrap();
 
-    // Single-leg tfr (escape-hatch via add_txn shape): tag='tfr',
-    // linked_doc_id points at FIN-EXP-1, kind='ref' link (NOT 'tfr-pair').
+    // Legacy/drifted single-leg tfr: tag='tfr', linked_doc_id points at
+    // FIN-EXP-1, kind='ref' link (NOT 'tfr-pair'). The public write paths now
+    // reject this shape, but delete must still clean it up without cascading.
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code,
                               account_code, amount, tag, note, linked_doc_id)
@@ -781,7 +1576,8 @@ async fn delete_rejects_orphan_tfr_pair_link() {
         result.is_err(),
         "orphan partner must reject — committing would leave ACC-TO with a phantom balance"
     );
-    let msg = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    let msg = server_fn_error_text_en(&err);
     assert!(
         msg.contains("missing") && msg.contains(&to_txn.doc_id),
         "error should name the missing partner doc; got: {msg}"
@@ -910,7 +1706,8 @@ async fn delete_rejects_when_multiple_distinct_tfr_partners() {
         result.is_err(),
         "must reject when partner lookup returns multiple distinct candidates"
     );
-    let msg = result.unwrap_err().to_string();
+    let err = result.unwrap_err();
+    let msg = server_fn_error_text_en(&err);
     assert!(
         msg.contains("distinct partners") && msg.contains("manual repair"),
         "error should call out corruption + manual repair; got: {msg}"

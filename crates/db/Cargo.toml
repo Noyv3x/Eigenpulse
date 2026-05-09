@@ -7,11 +7,10 @@ license     = { workspace = true }
 
 [features]
 default = []
-ssr     = ["dep:sqlx", "dep:tokio", "dep:tracing"]
+ssr     = ["dep:anyhow", "dep:sqlx", "dep:tokio", "dep:tracing"]
 
 [dependencies]
-anyhow    = { workspace = true }
-thiserror = { workspace = true }
+anyhow    = { workspace = true, optional = true }
 
 sqlx      = { workspace = true, optional = true }
 tokio     = { workspace = true, optional = true }
