@@ -6,12 +6,12 @@ pub fn ChartBars(
     #[prop(default = None)] highlight: Option<usize>,
     #[prop(default = vec![])] labels: Vec<String>,
 ) -> impl IntoView {
-    let max = data.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+    let max = chart_max(&data);
     let bars = data
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let h = (v / max * 100.0).max(4.0);
+            let h = bar_height(*v, max);
             let cls = if Some(i) == highlight {
                 "bar-cell hi"
             } else {
@@ -35,5 +35,38 @@ pub fn ChartBars(
             <div class="chart-bars">{bars}</div>
             {label_row}
         </div>
+    }
+}
+
+fn chart_max(data: &[f64]) -> f64 {
+    data.iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .fold(1.0_f64, f64::max)
+}
+
+fn bar_height(value: f64, max: f64) -> f64 {
+    if !value.is_finite() || !max.is_finite() || max <= 0.0 {
+        return 4.0;
+    }
+    (value.max(0.0) / max * 100.0).clamp(4.0, 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bar_height, chart_max};
+
+    #[test]
+    fn chart_max_ignores_non_positive_and_non_finite_values() {
+        assert_eq!(chart_max(&[-5.0, 0.0, f64::NAN, f64::INFINITY]), 1.0);
+        assert_eq!(chart_max(&[2.0, 8.0, f64::NAN]), 8.0);
+    }
+
+    #[test]
+    fn bar_height_is_always_a_finite_percentage() {
+        assert_eq!(bar_height(f64::NAN, 10.0), 4.0);
+        assert_eq!(bar_height(-5.0, 10.0), 4.0);
+        assert_eq!(bar_height(5.0, 10.0), 50.0);
+        assert_eq!(bar_height(15.0, 10.0), 100.0);
     }
 }

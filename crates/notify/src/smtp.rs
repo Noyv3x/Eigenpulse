@@ -31,7 +31,11 @@ pub struct SmtpNotifier {
 
 impl SmtpNotifier {
     pub fn from_value(v: serde_json::Value) -> anyhow::Result<Self> {
-        let cfg: SmtpConfig = serde_json::from_value(v)?;
+        let mut cfg: SmtpConfig = serde_json::from_value(v)?;
+        cfg.host = cfg.host.trim().to_string();
+        cfg.username = cfg.username.trim().to_string();
+        cfg.from = cfg.from.trim().to_string();
+        cfg.to = cfg.to.trim().to_string();
         for (field, value) in [
             ("host", cfg.host.as_str()),
             ("username", cfg.username.as_str()),
@@ -101,5 +105,30 @@ impl Notifier for SmtpNotifier {
         };
         mailer.send(email).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_value_trims_connection_and_address_fields() {
+        let notifier = SmtpNotifier::from_value(serde_json::json!({
+            "host": " smtp.example.com ",
+            "port": 587,
+            "username": " user ",
+            "password": " pass with boundary spaces ",
+            "from": " ops@example.com ",
+            "to": " owner@example.com ",
+            "starttls": true
+        }))
+        .expect("valid smtp config");
+
+        assert_eq!(notifier.cfg.host, "smtp.example.com");
+        assert_eq!(notifier.cfg.username, "user");
+        assert_eq!(notifier.cfg.password, " pass with boundary spaces ");
+        assert_eq!(notifier.cfg.from, "ops@example.com");
+        assert_eq!(notifier.cfg.to, "owner@example.com");
     }
 }

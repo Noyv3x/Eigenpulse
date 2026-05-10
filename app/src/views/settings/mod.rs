@@ -71,27 +71,27 @@ fn database_location_label(database_url: &str) -> String {
 
 #[cfg(feature = "ssr")]
 async fn count_user_data_rows(pool: &sqlx::SqlitePool) -> sqlx::Result<i64> {
-    let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT name
-           FROM sqlite_schema
-          WHERE type = 'table'
-            AND name NOT LIKE 'sqlite_%'
-            AND name NOT IN ('_sqlx_migrations', '_ep_module_migration', 'seq', 'session', 'app_user')",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let mut total = 0;
-    for table in tables {
-        // Table names come from sqlite_schema, not user input. The quoted
-        // identifier keeps this robust if future module tables contain odd
-        // characters.
-        let quoted = table.replace('"', "\"\"");
-        let sql = format!("SELECT COUNT(*) FROM \"{quoted}\"");
-        let rows: i64 = sqlx::query_scalar(&sql).fetch_one(pool).await?;
-        total += rows;
-    }
-    Ok(total)
+    const COUNT_USER_DATA_ROWS_SQL: &str = "
+        SELECT
+            (SELECT COUNT(*) FROM module_link) +
+            (SELECT COUNT(*) FROM activity) +
+            (SELECT COUNT(*) FROM notification) +
+            (SELECT COUNT(*) FROM notify_channel) +
+            (SELECT COUNT(*) FROM notify_delivery) +
+            (SELECT COUNT(*) FROM pat) +
+            (SELECT COUNT(*) FROM fin_account) +
+            (SELECT COUNT(*) FROM fin_category) +
+            (SELECT COUNT(*) FROM fin_txn) +
+            (SELECT COUNT(*) FROM fin_budget) +
+            (SELECT COUNT(*) FROM fit_workout) +
+            (SELECT COUNT(*) FROM fit_set) +
+            (SELECT COUNT(*) FROM lrn_course) +
+            (SELECT COUNT(*) FROM lrn_book) +
+            (SELECT COUNT(*) FROM lrn_note)
+    ";
+    sqlx::query_scalar(COUNT_USER_DATA_ROWS_SQL)
+        .fetch_one(pool)
+        .await
 }
 
 #[component]
@@ -185,5 +185,65 @@ mod tests {
             super::database_location_label("postgres://user:pass@example/db"),
             "configured database"
         );
+    }
+
+    #[tokio::test]
+    async fn count_user_data_rows_counts_only_explicit_user_tables() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        for sql in [
+            "CREATE TABLE app_user (id INTEGER)",
+            "CREATE TABLE session (id INTEGER)",
+            "CREATE TABLE seq (id INTEGER)",
+            "CREATE TABLE _ep_module_migration (id INTEGER)",
+            "CREATE TABLE module_link (id INTEGER)",
+            "CREATE TABLE activity (id INTEGER)",
+            "CREATE TABLE notification (id INTEGER)",
+            "CREATE TABLE notify_channel (id INTEGER)",
+            "CREATE TABLE notify_delivery (id INTEGER)",
+            "CREATE TABLE pat (id INTEGER)",
+            "CREATE TABLE fin_account (id INTEGER)",
+            "CREATE TABLE fin_category (id INTEGER)",
+            "CREATE TABLE fin_txn (id INTEGER)",
+            "CREATE TABLE fin_budget (id INTEGER)",
+            "CREATE TABLE fit_workout (id INTEGER)",
+            "CREATE TABLE fit_set (id INTEGER)",
+            "CREATE TABLE lrn_course (id INTEGER)",
+            "CREATE TABLE lrn_book (id INTEGER)",
+            "CREATE TABLE lrn_note (id INTEGER)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect("create table");
+        }
+
+        for sql in [
+            "INSERT INTO app_user (id) VALUES (1), (2)",
+            "INSERT INTO session (id) VALUES (1), (2)",
+            "INSERT INTO seq (id) VALUES (1), (2)",
+            "INSERT INTO _ep_module_migration (id) VALUES (1), (2)",
+            "INSERT INTO module_link (id) VALUES (1), (2)",
+            "INSERT INTO activity (id) VALUES (1), (2)",
+            "INSERT INTO notification (id) VALUES (1), (2)",
+            "INSERT INTO notify_channel (id) VALUES (1), (2)",
+            "INSERT INTO notify_delivery (id) VALUES (1), (2)",
+            "INSERT INTO pat (id) VALUES (1), (2)",
+            "INSERT INTO fin_account (id) VALUES (1), (2)",
+            "INSERT INTO fin_category (id) VALUES (1), (2)",
+            "INSERT INTO fin_txn (id) VALUES (1), (2)",
+            "INSERT INTO fin_budget (id) VALUES (1), (2)",
+            "INSERT INTO fit_workout (id) VALUES (1), (2)",
+            "INSERT INTO fit_set (id) VALUES (1), (2)",
+            "INSERT INTO lrn_course (id) VALUES (1), (2)",
+            "INSERT INTO lrn_book (id) VALUES (1), (2)",
+            "INSERT INTO lrn_note (id) VALUES (1), (2)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect("insert rows");
+        }
+
+        let total = super::count_user_data_rows(&pool)
+            .await
+            .expect("count rows");
+
+        assert_eq!(total, 30);
     }
 }

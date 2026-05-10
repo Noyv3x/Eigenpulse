@@ -35,11 +35,12 @@ pub struct DiscordNotifier {
 
 impl DiscordNotifier {
     pub fn from_value(v: serde_json::Value) -> anyhow::Result<Self> {
-        let cfg: DiscordConfig = serde_json::from_value(v)?;
+        let mut cfg: DiscordConfig = serde_json::from_value(v)?;
+        cfg.webhook_url = cfg.webhook_url.trim().to_string();
         if cfg.webhook_url.trim().is_empty() {
             anyhow::bail!("discord config `webhook_url` is required");
         }
-        let webhook_url = reqwest::Url::parse(cfg.webhook_url.trim())
+        let webhook_url = reqwest::Url::parse(&cfg.webhook_url)
             .map_err(|e| anyhow::anyhow!("discord config `webhook_url` is invalid: {e}"))?;
         if !matches!(webhook_url.scheme(), "http" | "https") {
             anyhow::bail!("discord config `webhook_url` must use http or https");
@@ -101,5 +102,23 @@ impl Notifier for DiscordNotifier {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_value_trims_webhook_url() {
+        let notifier = DiscordNotifier::from_value(serde_json::json!({
+            "webhook_url": " https://discord.com/api/webhooks/abc "
+        }))
+        .expect("valid discord config");
+
+        assert_eq!(
+            notifier.cfg.webhook_url,
+            "https://discord.com/api/webhooks/abc"
+        );
     }
 }

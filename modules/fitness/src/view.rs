@@ -193,7 +193,7 @@ fn render_fitness(
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.duration")}</span>
-                            <input name="duration_m" type="number" min="1" required placeholder="60"
+                            <input name="duration_m" type="number" min="1" max=MAX_WORKOUT_DURATION_MINUTES.to_string() required placeholder="60"
                                    style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
                         </label>
                         <label class="vstack" style="gap:4px">

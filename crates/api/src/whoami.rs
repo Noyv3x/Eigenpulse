@@ -76,7 +76,10 @@ mod tests {
         let pat = AuthPat {
             id: 42,
             name: "iOS Shortcuts".into(),
-            scopes: vec!["fin:write".into(), "notify:write".into()],
+            scopes: vec![
+                ep_core::SCOPE_FIN_WRITE.into(),
+                ep_core::SCOPE_NOTIFY_WRITE.into(),
+            ],
         };
 
         let axum::Json(resp) = handler(State(state), Extension(pat))
@@ -87,6 +90,9 @@ mod tests {
         assert_eq!(resp.user.name, "Owner");
         assert_eq!(resp.user.role, "OWNER");
         assert_eq!(resp.token.name, "iOS Shortcuts");
-        assert_eq!(resp.token.scopes, ["fin:write", "notify:write"]);
+        assert_eq!(
+            resp.token.scopes,
+            [ep_core::SCOPE_FIN_WRITE, ep_core::SCOPE_NOTIFY_WRITE]
+        );
     }
 }

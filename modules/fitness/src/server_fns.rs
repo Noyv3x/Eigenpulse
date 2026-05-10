@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const MAX_WORKOUT_KIND_CHARS: usize = 64;
 pub(crate) const MAX_WORKOUT_PROGRAM_CHARS: usize = 128;
 pub(crate) const MAX_WORKOUT_LOAD_TEXT_CHARS: usize = 128;
+pub(crate) const MAX_WORKOUT_DURATION_MINUTES: i64 = 24 * 60;
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
@@ -40,6 +41,12 @@ fn normalize_workout_input(
     }
     if duration_m <= 0 {
         return Err(err("fitness.err.duration_positive"));
+    }
+    if duration_m > MAX_WORKOUT_DURATION_MINUTES {
+        return Err(err_with(
+            "fitness.err.duration_too_long",
+            MAX_WORKOUT_DURATION_MINUTES,
+        ));
     }
 
     let program = ep_core::trim_to_option(program);
@@ -84,12 +91,12 @@ fn normalize_workout_input(
 
 #[cfg(feature = "ssr")]
 fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
-    let doc_id =
-        ep_core::trim_to_option(doc_id).ok_or_else(|| err("fitness.err.doc_id_required"))?;
-    if ep_core::safe_doc_id(&doc_id).is_some() {
-        Ok(doc_id)
-    } else {
-        Err(err_with("fitness.err.doc_id_invalid", &doc_id))
+    match ep_core::normalize_doc_id_input(doc_id) {
+        Ok(doc_id) => Ok(doc_id),
+        Err(ep_core::DocIdInputError::Required) => Err(err("fitness.err.doc_id_required")),
+        Err(ep_core::DocIdInputError::Invalid(doc_id)) => {
+            Err(err_with("fitness.err.doc_id_invalid", &doc_id))
+        }
     }
 }
 
@@ -223,26 +230,23 @@ async fn compute_summary(pool: &sqlx::SqlitePool) -> sqlx::Result<FitnessSummary
     // local-Monday-00:00 string to a UTC unix epoch for comparison
     // against `occurred_at`. The earlier `'weekday 0','-7 days'` form
     // was Sun-start AND kept the time-of-day, off by both axes.
-    const WEEK_START_MONDAY: &str =
-        "unixepoch('now','localtime','-6 days','weekday 1','start of day','utc')";
-
-    let this_week_count: u32 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM fit_workout WHERE occurred_at >= {WEEK_START_MONDAY}"
-    ))
-    .fetch_one(pool)
-    .await?;
-
-    let aerobic_min_this_week: u32 = sqlx::query_scalar(&format!(
-        "SELECT COALESCE(SUM(duration_m), 0) FROM fit_workout
-          WHERE occurred_at >= {WEEK_START_MONDAY}
+    const THIS_WEEK_COUNT_SQL: &str = "SELECT COUNT(*) FROM fit_workout
+          WHERE occurred_at >= unixepoch('now','localtime','-6 days','weekday 1','start of day','utc')";
+    const AEROBIC_MIN_THIS_WEEK_SQL: &str = "SELECT COALESCE(SUM(duration_m), 0) FROM fit_workout
+          WHERE occurred_at >= unixepoch('now','localtime','-6 days','weekday 1','start of day','utc')
             AND (lower(kind) LIKE '%cardio%'
                  OR lower(kind) LIKE '%\u{6709}\u{6c27}%'
                  OR lower(kind) LIKE '%\u{8dd1}%'
                  OR lower(kind) LIKE '%\u{9a91}%'
-                 OR lower(kind) LIKE '%\u{6e38}%')"
-    ))
-    .fetch_one(pool)
-    .await?;
+                 OR lower(kind) LIKE '%\u{6e38}%')";
+
+    let this_week_count: u32 = sqlx::query_scalar(THIS_WEEK_COUNT_SQL)
+        .fetch_one(pool)
+        .await?;
+
+    let aerobic_min_this_week: u32 = sqlx::query_scalar(AEROBIC_MIN_THIS_WEEK_SQL)
+        .fetch_one(pool)
+        .await?;
 
     let avg_duration_min: u32 = sqlx::query_scalar(
         "SELECT COALESCE(CAST(AVG(duration_m) AS INTEGER), 0) FROM fit_workout
@@ -440,7 +444,7 @@ pub async fn add_workout(
         ep_auth::require_user_for_server_fn().await?;
         let input = normalize_workout_input(&kind, &program, duration_m, &load_text, &strain)?;
         let st = ep_core::app_state_context()?;
-        let occurred = time::OffsetDateTime::now_utc().unix_timestamp();
+        let occurred = ep_core::unix_now();
         let mut tx = st.db.begin().await.map_err(server_err)?;
         let doc_id = ep_core::next_doc_id(
             &mut tx,
@@ -511,6 +515,9 @@ mod tests {
     fn normalize_workout_input_rejects_invalid_values() {
         assert!(normalize_workout_input("   ", "", 30, "", "M").is_err());
         assert!(normalize_workout_input("Run", "", 0, "", "M").is_err());
+        assert!(
+            normalize_workout_input("Run", "", MAX_WORKOUT_DURATION_MINUTES + 1, "", "M").is_err()
+        );
         assert!(normalize_workout_input("Run", "", 30, "", "easy").is_err());
     }
 
@@ -708,12 +715,7 @@ async fn delete_workout_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(
     if deleted.rows_affected() == 0 {
         return Err(err_with("fitness.err.workout_not_found", doc_id));
     }
-    sqlx::query("DELETE FROM activity WHERE module = 'FIT' AND doc_id = ?1")
-        .bind(doc_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
-    ep_core::clear_doc_references(&mut tx, doc_id)
+    ep_core::delete_doc_activity_and_references(&mut tx, "FIT", doc_id)
         .await
         .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;

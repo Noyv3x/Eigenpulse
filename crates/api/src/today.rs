@@ -1,6 +1,6 @@
 use axum::{extract::State, Extension, Json};
 use ep_auth::{require_scope, AuthPat};
-use ep_core::{fmt_ts_hm, AppState, TodayActivityOrder, TodayActivityRow};
+use ep_core::{fmt_ts_hm, AppState, TodayActivityOrder, TodayActivityRow, SCOPE_ACTIVITY_READ};
 use serde::Serialize;
 
 use crate::errors::ApiError;
@@ -27,8 +27,10 @@ pub async fn handler(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<TodayResp>, ApiError> {
-    if require_scope(&pat, "activity:read").is_err() {
-        return Err(ApiError::Forbidden("requires scope: activity:read".into()));
+    if require_scope(&pat, SCOPE_ACTIVITY_READ).is_err() {
+        return Err(ApiError::Forbidden(format!(
+            "requires scope: {SCOPE_ACTIVITY_READ}"
+        )));
     }
     let today = ep_core::load_today_activity(&state.db, TodayActivityOrder::Desc, Some(50)).await?;
     let items = today.rows.into_iter().map(activity_row_to_item).collect();
@@ -112,7 +114,7 @@ mod tests {
         let pat = AuthPat {
             id: 1,
             name: "reader".into(),
-            scopes: vec!["activity:read".into()],
+            scopes: vec![ep_core::SCOPE_ACTIVITY_READ.into()],
         };
         let axum::Json(resp) = handler(State(app_state(db, noop_notify())), Extension(pat))
             .await
@@ -138,7 +140,7 @@ mod tests {
         let pat = AuthPat {
             id: 1,
             name: "notify-only".into(),
-            scopes: vec!["notify:write".into()],
+            scopes: vec![ep_core::SCOPE_NOTIFY_WRITE.into()],
         };
 
         let err = match handler(State(app_state(db, noop_notify())), Extension(pat)).await {

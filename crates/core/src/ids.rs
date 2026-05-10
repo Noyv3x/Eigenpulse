@@ -15,9 +15,13 @@ pub async fn next_doc_id(
     module_code: &str,
     shape: DocIdShape,
 ) -> sqlx::Result<String> {
+    let current_year = match &shape {
+        DocIdShape::YearSerial5 => Some(current_yy()),
+        DocIdShape::TypeSerial4 { .. } => None,
+    };
     let kind_key = match &shape {
         DocIdShape::YearSerial5 => {
-            let yy = current_yy();
+            let yy = current_year.expect("year serial has a sampled year");
             format!("doc:y{:02}", yy)
         }
         DocIdShape::TypeSerial4 { kind } => format!("type:{}", kind),
@@ -37,7 +41,7 @@ pub async fn next_doc_id(
 
     Ok(match shape {
         DocIdShape::YearSerial5 => {
-            let yy = current_yy();
+            let yy = current_year.expect("year serial has a sampled year");
             format!("{module_code}-{yy:02}{next:05}")
         }
         DocIdShape::TypeSerial4 { kind } => {

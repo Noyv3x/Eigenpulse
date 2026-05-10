@@ -11,3 +11,30 @@ pub trait Module: Sync + 'static {
         axum::Router::new()
     }
 }
+
+#[macro_export]
+macro_rules! assert_module_migrations_registered {
+    ($module:expr) => {{
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let migration_dir = manifest_dir.join("migrations");
+        let files: std::collections::BTreeSet<String> = std::fs::read_dir(&migration_dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", migration_dir.display()))
+            .map(|entry| {
+                entry
+                    .expect("migration dir entry")
+                    .path()
+                    .file_stem()
+                    .expect("migration file stem")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let registered: std::collections::BTreeSet<String> = $module
+            .migrations()
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect();
+
+        assert_eq!(registered, files);
+    }};
+}

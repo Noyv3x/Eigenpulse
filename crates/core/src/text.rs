@@ -7,24 +7,49 @@ pub fn trim_to_option(input: &str) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocIdInputError {
+    Required,
+    Invalid(String),
+}
+
+/// Normalize a document id from user/API input.
+///
+/// This is deliberately error-key agnostic: feature modules own their localized
+/// error messages, while core owns the shared document-id shape check.
+pub fn normalize_doc_id_input(input: &str) -> Result<String, DocIdInputError> {
+    let doc_id = trim_to_option(input).ok_or(DocIdInputError::Required)?;
+    if safe_doc_id(&doc_id).is_some() {
+        Ok(doc_id)
+    } else {
+        Err(DocIdInputError::Invalid(doc_id))
+    }
+}
+
 /// Return a trimmed in-app absolute path if it is safe to put in redirects or
 /// same-origin links.
 ///
 /// This deliberately accepts only local absolute paths (`/finance`, not
 /// `https://...`, `//host`, `javascript:...`, or backslash variants) and rejects
-/// raw or percent-encoded control characters.
+/// raw/percent-encoded control characters plus raw delimiters that are not useful
+/// in app routes.
 pub fn safe_in_app_path(input: &str) -> Option<&str> {
     let path = input.trim();
     if path.starts_with('/')
         && !path.starts_with("//")
         && !path.contains('\\')
         && !path.chars().any(char::is_control)
+        && !path.chars().any(is_raw_path_delimiter)
         && !contains_percent_encoded_control(path)
     {
         Some(path)
     } else {
         None
     }
+}
+
+fn is_raw_path_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'' | '`')
 }
 
 /// Percent-encode a string for use as one query parameter value.
@@ -124,11 +149,31 @@ mod tests {
     }
 
     #[test]
+    fn normalize_doc_id_input_trims_and_classifies_errors() {
+        assert_eq!(
+            normalize_doc_id_input("  FIN-26092  "),
+            Ok("FIN-26092".to_string())
+        );
+        assert_eq!(
+            normalize_doc_id_input("   "),
+            Err(DocIdInputError::Required)
+        );
+        assert_eq!(
+            normalize_doc_id_input("../FIN-26092"),
+            Err(DocIdInputError::Invalid("../FIN-26092".to_string()))
+        );
+    }
+
+    #[test]
     fn safe_in_app_path_accepts_local_absolute_paths() {
         assert_eq!(safe_in_app_path(" /finance "), Some("/finance"));
         assert_eq!(
             safe_in_app_path("/settings/security?tab=pat"),
             Some("/settings/security?tab=pat")
+        );
+        assert_eq!(
+            safe_in_app_path("/finance?merchant=Blue%20Bottle"),
+            Some("/finance?merchant=Blue%20Bottle")
         );
     }
 
@@ -142,6 +187,11 @@ mod tests {
             "/finance\\evil",
             "/finance%0d%0aevil",
             "/finance%7F",
+            "/finance?q=raw space",
+            "/finance?q=<script>",
+            "/finance?q=\"quote\"",
+            "/finance?q='quote'",
+            "/finance?q=`tick`",
         ] {
             assert_eq!(safe_in_app_path(raw), None, "raw={raw}");
         }

@@ -6,7 +6,6 @@ use axum::{
 };
 use axum_extra::extract::cookie::SignedCookieJar;
 use ep_core::AppState;
-use time::OffsetDateTime;
 
 use crate::session::{
     lookup_session, session_cookie, should_refresh_session, AuthUser, COOKIE_NAME,
@@ -49,8 +48,7 @@ pub async fn require_session(
     };
     match lookup_session(&state.db, &token).await {
         Ok(Some((sess, user))) => {
-            let refresh_cookie =
-                should_refresh_session(sess.expires_at, OffsetDateTime::now_utc().unix_timestamp());
+            let refresh_cookie = should_refresh_session(sess.expires_at, ep_core::unix_now());
             let mut req = req;
             req.extensions_mut().insert(user);
             let response = next.run(req).await;

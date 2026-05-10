@@ -16,6 +16,8 @@ mod activity;
 #[cfg(feature = "ssr")]
 mod api_error;
 #[cfg(feature = "ssr")]
+mod clock;
+#[cfg(feature = "ssr")]
 mod ids;
 #[cfg(feature = "ssr")]
 mod module;
@@ -35,8 +37,24 @@ pub use fmt::{
 };
 pub use nav::{IconKind, NavSection};
 pub use severity::Severity;
-pub use text::{safe_doc_id, safe_in_app_path, trim_to_option, url_encode_query_value};
+pub use text::{
+    normalize_doc_id_input, safe_doc_id, safe_in_app_path, trim_to_option, url_encode_query_value,
+    DocIdInputError,
+};
 pub use tone::Tone;
+
+pub const SCOPE_ACTIVITY_READ: &str = "activity:read";
+pub const SCOPE_FIN_READ: &str = "fin:read";
+pub const SCOPE_FIN_WRITE: &str = "fin:write";
+pub const SCOPE_NOTIFY_WRITE: &str = "notify:write";
+pub const SCOPE_ALL: &str = "*";
+pub const PAT_SCOPES: &[&str] = &[
+    SCOPE_ACTIVITY_READ,
+    SCOPE_FIN_READ,
+    SCOPE_FIN_WRITE,
+    SCOPE_NOTIFY_WRITE,
+    SCOPE_ALL,
+];
 
 /// Map any `Display` (sqlx::Error, anyhow::Error, &str, …) into an internal
 /// `ServerFnError`. SSR logs the detailed message server-side, but the value
@@ -66,13 +84,15 @@ pub use activity::{load_today_activity, TodayActivity, TodayActivityOrder, Today
 #[cfg(feature = "ssr")]
 pub use api_error::{api_error_response, ApiErrorBody, ApiErrorInner, ApiJson, ApiQuery};
 #[cfg(feature = "ssr")]
+pub use clock::unix_now;
+#[cfg(feature = "ssr")]
 pub use ids::{next_doc_id, DocIdShape};
 #[cfg(feature = "ssr")]
 pub use module::Module;
 #[cfg(feature = "ssr")]
 pub use notify_msg::{NotifyBusHandle, NotifyBusTrait, NotifyMessage};
 #[cfg(feature = "ssr")]
-pub use refs::clear_doc_references;
+pub use refs::{clear_doc_references, delete_doc_activity_and_references};
 #[cfg(feature = "ssr")]
 pub use registry::{run_module_migrations, split_sql, ModuleRegistry};
 #[cfg(feature = "ssr")]

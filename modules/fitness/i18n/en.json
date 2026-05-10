@@ -15,6 +15,7 @@
   "fitness.card.sessions.title": "Workout Log",
   "fitness.confirm.delete": "Delete this workout?",
   "fitness.err.duration_positive": "duration must be positive",
+  "fitness.err.duration_too_long": "duration must be at most {payload} minutes",
   "fitness.err.doc_id_invalid": "doc_id must look like an Eigenpulse doc id, got '{payload}'",
   "fitness.err.doc_id_required": "doc_id is required",
   "fitness.err.kind_required": "kind is required",

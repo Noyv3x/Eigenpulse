@@ -241,8 +241,13 @@ fn render_body(
         <Card title=t(locale, "learning.card.courses.title") code="LRN-CRS-01" sub=t(locale, "learning.card.courses.sub")>
             <div class="vstack" style="gap:0">
                 {d.courses.into_iter().map(|c| {
-                    let pct = (c.progress * 100.0) as u32;
-                    let bar_color = c.tone.as_deref().map(|t| format!("var(--{t})")).unwrap_or_else(|| "var(--primary)".into());
+                    let pct = (c.progress * 100.0).round().clamp(0.0, 100.0) as u32;
+                    let bar_color = c
+                        .tone
+                        .as_deref()
+                        .map(ep_core::Tone::parse)
+                        .unwrap_or_default()
+                        .css_var();
                     view! {
                         <div style="padding:12px 0;border-bottom:1px solid var(--border)">
                             <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">

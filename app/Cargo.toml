@@ -22,7 +22,7 @@ ssr = [
     "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess",
     "dep:rand", "dep:hex", "dep:tokio-stream",
     "dep:ep-db", "dep:ep-auth", "dep:ep-notify", "dep:ep-api",
-    "dep:anyhow", "dep:serde_json", "dep:time",
+    "dep:anyhow", "dep:serde_json",
     "leptos/ssr",
     "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-ui/ssr", "ep-i18n/ssr",
     "ep-notify/ssr", "ep-api/ssr",
@@ -57,7 +57,6 @@ ep-notify        = { workspace = true, optional = true }
 ep-api           = { workspace = true, optional = true }
 anyhow           = { workspace = true, optional = true }
 serde_json       = { workspace = true, optional = true }
-time             = { workspace = true, optional = true }
 axum             = { workspace = true, optional = true }
 axum-extra       = { workspace = true, optional = true }
 tokio            = { workspace = true, optional = true }

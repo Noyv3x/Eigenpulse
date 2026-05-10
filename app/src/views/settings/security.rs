@@ -32,11 +32,23 @@ pub struct GeneratedPat {
 }
 
 const ALL_SCOPES: &[(&str, &str)] = &[
-    ("activity:read", "app.settings.security.scope.activity_read"),
-    ("fin:read", "app.settings.security.scope.fin_read"),
-    ("fin:write", "app.settings.security.scope.fin_write"),
-    ("notify:write", "app.settings.security.scope.notify_write"),
-    ("*", "app.settings.security.scope.all"),
+    (
+        ep_core::SCOPE_ACTIVITY_READ,
+        "app.settings.security.scope.activity_read",
+    ),
+    (
+        ep_core::SCOPE_FIN_READ,
+        "app.settings.security.scope.fin_read",
+    ),
+    (
+        ep_core::SCOPE_FIN_WRITE,
+        "app.settings.security.scope.fin_write",
+    ),
+    (
+        ep_core::SCOPE_NOTIFY_WRITE,
+        "app.settings.security.scope.notify_write",
+    ),
+    (ep_core::SCOPE_ALL, "app.settings.security.scope.all"),
 ];
 
 #[cfg(feature = "ssr")]
@@ -105,7 +117,7 @@ pub async fn list_pats() -> Result<Vec<PatDto>, ServerFnError> {
         ep_auth::require_user_for_server_fn().await?;
         let st = ep_core::app_state_context()?;
         let rows = ep_auth::list_pats(&st.db).await.map_err(server_err)?;
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let now = ep_core::unix_now();
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -147,7 +159,7 @@ pub async fn generate_pat(
         let (name, scope_vec, expires_days) = normalize_pat_input(name, scopes, expires_days)?;
         let st = ep_core::app_state_context()?;
         let scope_refs: Vec<&str> = scope_vec.iter().map(String::as_str).collect();
-        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let now = ep_core::unix_now();
         let expires_at =
             match expires_days {
                 Some(d) => Some(
@@ -269,14 +281,34 @@ mod tests {
     fn normalize_pat_input_trims_and_dedupes_scopes() {
         let (name, scopes, expires_days) = normalize_pat_input(
             "  iOS Shortcuts  ".into(),
-            "activity:read fin:read fin:read notify:write".into(),
+            format!(
+                "{} {} {} {}",
+                ep_core::SCOPE_ACTIVITY_READ,
+                ep_core::SCOPE_FIN_READ,
+                ep_core::SCOPE_FIN_READ,
+                ep_core::SCOPE_NOTIFY_WRITE
+            ),
             " 30 ".into(),
         )
         .expect("valid PAT input");
 
         assert_eq!(name, "iOS Shortcuts");
-        assert_eq!(scopes, vec!["activity:read", "fin:read", "notify:write"]);
+        assert_eq!(
+            scopes,
+            vec![
+                ep_core::SCOPE_ACTIVITY_READ,
+                ep_core::SCOPE_FIN_READ,
+                ep_core::SCOPE_NOTIFY_WRITE
+            ]
+        );
         assert_eq!(expires_days, Some(30));
+    }
+
+    #[test]
+    fn all_scope_options_match_core_scope_set() {
+        let options: Vec<&str> = ALL_SCOPES.iter().map(|(scope, _)| *scope).collect();
+
+        assert_eq!(options, ep_core::PAT_SCOPES);
     }
 
     #[test]
@@ -305,7 +337,7 @@ mod tests {
     fn normalize_pat_input_rejects_overlong_name() {
         let err = normalize_pat_input(
             "x".repeat(ep_auth::MAX_PAT_NAME_CHARS + 1),
-            "fin:read".into(),
+            ep_core::SCOPE_FIN_READ.into(),
             "".into(),
         )
         .expect_err("overlong name should fail");
@@ -325,6 +357,29 @@ mod tests {
             ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("app.settings.security.err_pat_not_found", "0"))
         );
+    }
+
+    #[test]
+    fn pat_list_dto_never_serializes_secret_material() {
+        let dto = PatDto {
+            id: 1,
+            name: "iOS Shortcuts".into(),
+            prefix: "ep_pat_ABCDE".into(),
+            scopes: ep_core::SCOPE_FIN_READ.into(),
+            created_at: 1,
+            expires_at: None,
+            last_used_at: None,
+            revoked_at: None,
+            is_expired: false,
+            is_revoked: false,
+        };
+
+        let value = serde_json::to_value(dto).expect("serialize PatDto");
+
+        assert!(value.get("prefix").is_some());
+        assert!(value.get("hash").is_none());
+        assert!(value.get("token").is_none());
+        assert!(value.get("password_hash").is_none());
     }
 }
 

@@ -15,6 +15,7 @@
   "fitness.card.sessions.title": "训练记录",
   "fitness.confirm.delete": "删除该训练？",
   "fitness.err.duration_positive": "时长必须为正数",
+  "fitness.err.duration_too_long": "时长最多 {payload} 分钟",
   "fitness.err.doc_id_invalid": "doc_id 必须是 Eigenpulse 单号格式，收到 '{payload}'",
   "fitness.err.doc_id_required": "单号必填",
   "fitness.err.kind_required": "类型必填",

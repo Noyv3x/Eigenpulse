@@ -74,10 +74,8 @@ async fn post_txn(
     Extension(pat): Extension<AuthPat>,
     ApiJson(input): ApiJson<TxnInput>,
 ) -> Result<Json<TxnCreated>, Response> {
-    require_scope(&pat, "fin:write")?;
-    let occurred = input
-        .occurred_at
-        .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp());
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
+    let occurred = input.occurred_at.unwrap_or_else(ep_core::unix_now);
 
     let txn = add_txn_inner(
         &state.db,
@@ -103,7 +101,7 @@ async fn list_txn(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Txn>>, Response> {
-    require_scope(&pat, "fin:read")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
     let rows: Vec<TxnListRow> = sqlx::query_as(
         "SELECT doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id
            FROM fin_txn ORDER BY occurred_at DESC LIMIT 50"
@@ -130,7 +128,7 @@ async fn delete_txn(
     Extension(pat): Extension<AuthPat>,
     Path(doc_id): Path<String>,
 ) -> Result<Json<TxnDeleted>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let doc_id = crate::server_fns::normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     let existed = crate::server_fns::delete_txn_inner(&state.db, &doc_id)
         .await
@@ -176,7 +174,7 @@ async fn patch_txn(
     Path(doc_id): Path<String>,
     ApiJson(input): ApiJson<PatchTxnInput>,
 ) -> Result<Json<TxnUpdated>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let doc_id = crate::server_fns::normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     type Row = (String, String, String, f64, Option<String>);
     let cur: Option<Row> = sqlx::query_as(
@@ -234,14 +232,14 @@ async fn post_transfer(
     Extension(pat): Extension<AuthPat>,
     ApiJson(input): ApiJson<TransferInput>,
 ) -> Result<Json<TransferCreated>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     // Validation (FK + finite + distinct + non-empty) lives in
     // add_transfer_inner, so this handler is just request-shape mapping.
     let occurred_input = input.occurred_at.unwrap_or_default();
     let occurred = crate::server_fns::parse_occurred_at(&state.db, &occurred_input)
         .await
         .map_err(server_err_to_response)?
-        .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp());
+        .unwrap_or_else(ep_core::unix_now);
 
     let note = input.note.as_deref();
     let (from_txn, to_txn) = add_transfer_inner(
@@ -268,7 +266,7 @@ async fn list_account(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Account>>, Response> {
-    require_scope(&pat, "fin:read")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
     let rows = list_accounts_inner(&state.db)
         .await
         .map_err(db_err_response)?;
@@ -295,7 +293,7 @@ async fn post_account(
     Extension(pat): Extension<AuthPat>,
     ApiJson(input): ApiJson<CreateAccountInput>,
 ) -> Result<Json<AccountCreated>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let acc = create_account_inner(
         &state.db,
         input.code.clone(),
@@ -323,7 +321,7 @@ async fn patch_account(
     Path(code): Path<String>,
     ApiJson(input): ApiJson<PatchAccountInput>,
 ) -> Result<Json<Account>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let code = code.trim().to_string();
     type Row = (String, String, String);
     let cur: Option<Row> =
@@ -360,7 +358,7 @@ async fn delete_account(
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
 ) -> Result<Json<AccountDeleted>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let code = code.trim().to_string();
     delete_account_inner(&state.db, code.clone())
         .await
@@ -376,7 +374,7 @@ async fn list_category(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Category>>, Response> {
-    require_scope(&pat, "fin:read")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
     type Row = (String, String, String, i64, bool, i64);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT code, name, tone, sort_order, archived, created_at
@@ -418,7 +416,7 @@ async fn post_category(
     Extension(pat): Extension<AuthPat>,
     ApiJson(input): ApiJson<CreateCategoryInput>,
 ) -> Result<Json<CategoryCreated>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let cat = create_category_inner(
         &state.db,
         input.code,
@@ -444,7 +442,7 @@ async fn patch_category(
     Path(code): Path<String>,
     ApiJson(input): ApiJson<PatchCategoryInput>,
 ) -> Result<Json<Category>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let code = code.trim().to_string();
     type Row = (String, String, i64);
     let cur: Option<Row> =
@@ -481,7 +479,7 @@ async fn delete_category(
     Extension(pat): Extension<AuthPat>,
     Path(code): Path<String>,
 ) -> Result<Json<CategoryDeleted>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let code = code.trim().to_string();
     delete_category_inner(&state.db, code.clone())
         .await
@@ -510,7 +508,7 @@ async fn list_budget(
     Extension(pat): Extension<AuthPat>,
     ApiQuery(q): ApiQuery<ListBudgetQuery>,
 ) -> Result<Json<Vec<BudgetRow>>, Response> {
-    require_scope(&pat, "fin:read")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
     let period =
         crate::server_fns::normalize_budget_period(&q.period).map_err(server_err_to_response)?;
     type Row = (String, String, f64);
@@ -545,7 +543,7 @@ async fn post_budget(
     Extension(pat): Extension<AuthPat>,
     ApiJson(input): ApiJson<PostBudgetInput>,
 ) -> Result<Json<BudgetRow>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let period = crate::server_fns::normalize_budget_period(&input.period)
         .map_err(server_err_to_response)?;
     let category_code = input.category_code.trim().to_string();
@@ -570,7 +568,7 @@ async fn delete_budget(
     Extension(pat): Extension<AuthPat>,
     Path((period, category_code)): Path<(String, String)>,
 ) -> Result<Json<BudgetDeleted>, Response> {
-    require_scope(&pat, "fin:write")?;
+    require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let period =
         crate::server_fns::normalize_budget_period(&period).map_err(server_err_to_response)?;
     let category_code = ep_core::trim_to_option(&category_code).ok_or_else(|| {

@@ -1,6 +1,6 @@
 use axum::{extract::State, Extension, Json};
 use ep_auth::{require_scope, AuthPat};
-use ep_core::{ApiJson, AppState, NotifyMessage, Severity};
+use ep_core::{ApiJson, AppState, NotifyMessage, Severity, SCOPE_NOTIFY_WRITE};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::ApiError;
@@ -110,8 +110,10 @@ pub async fn handler(
     Extension(pat): Extension<AuthPat>,
     ApiJson(input): ApiJson<NotifyInput>,
 ) -> Result<Json<NotifyResp>, ApiError> {
-    if require_scope(&pat, "notify:write").is_err() {
-        return Err(ApiError::Forbidden("requires scope: notify:write".into()));
+    if require_scope(&pat, SCOPE_NOTIFY_WRITE).is_err() {
+        return Err(ApiError::Forbidden(format!(
+            "requires scope: {SCOPE_NOTIFY_WRITE}"
+        )));
     }
     let severity = parse_request_severity(input.severity.as_deref())?;
     let title = normalize_title(&input.title)?;
@@ -291,7 +293,7 @@ mod tests {
         let pat = AuthPat {
             id: 1,
             name: "reader".into(),
-            scopes: vec!["fin:read".into()],
+            scopes: vec![ep_core::SCOPE_FIN_READ.into()],
         };
 
         let err = handler(
@@ -319,7 +321,7 @@ mod tests {
         let pat = AuthPat {
             id: 1,
             name: "writer".into(),
-            scopes: vec!["notify:write".into()],
+            scopes: vec![SCOPE_NOTIFY_WRITE.into()],
         };
 
         let Json(resp) = handler(

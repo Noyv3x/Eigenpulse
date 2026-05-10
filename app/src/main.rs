@@ -159,29 +159,49 @@ async fn ep_secret_or_create() -> anyhow::Result<String> {
         }
     }
     let path = secret_file_path(std::env::var_os("EP_SECRET_FILE"));
-    let source = path.display().to_string();
-    if let Ok(b) = tokio::fs::read(&path).await {
-        let stored = String::from_utf8(b).map_err(|e| {
-            anyhow::anyhow!("{} must contain UTF-8 secret text: {e}", path.display())
-        })?;
-        match normalize_secret(&stored, &source) {
-            Ok(secret) => return Ok(secret),
-            Err(e) => {
-                tracing::warn!(error = %e, "stored EP_SECRET is invalid; rotating generated secret")
-            }
-        }
+    if let Some(secret) = read_stored_secret(&path).await? {
+        return Ok(secret);
     }
 
     let mut buf = [0u8; 64];
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut buf);
     let s = hex::encode(buf);
+    write_secret_file(&path, &s).await?;
+    tracing::warn!("EP_SECRET not set; generated and persisted to {:?}", path);
+    Ok(s)
+}
+
+async fn write_secret_file(path: &std::path::Path, secret: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&path, s.as_bytes()).await?;
-    tracing::warn!("EP_SECRET not set; generated and persisted to {:?}", path);
-    Ok(s)
+    tokio::fs::write(path, secret.as_bytes()).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let perms = std::fs::Permissions::from_mode(0o600);
+        tokio::fs::set_permissions(path, perms).await?;
+    }
+    Ok(())
+}
+
+async fn read_stored_secret(path: &std::path::Path) -> anyhow::Result<Option<String>> {
+    let source = path.display().to_string();
+    match tokio::fs::read(path).await {
+        Ok(b) => {
+            let stored = String::from_utf8(b).map_err(|e| {
+                anyhow::anyhow!("{} must contain UTF-8 secret text: {e}", path.display())
+            })?;
+            normalize_secret(&stored, &source).map(Some)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to read EP_SECRET_FILE {}: {e}",
+            path.display()
+        )),
+    }
 }
 
 fn explicit_secret_value(value: &str) -> Option<&str> {
@@ -250,8 +270,8 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_secret, secret_file_path, service_worker_allowed, static_cache_control,
-        static_handler,
+        normalize_secret, read_stored_secret, secret_file_path, service_worker_allowed,
+        static_cache_control, static_handler,
     };
     use axum::http::{header, StatusCode, Uri};
 
@@ -295,6 +315,76 @@ mod tests {
         assert_eq!(super::explicit_secret_value(" \n\t "), None);
         let secret = "a".repeat(64);
         assert_eq!(super::explicit_secret_value(&secret), Some(secret.as_str()));
+    }
+
+    #[tokio::test]
+    async fn read_stored_secret_treats_missing_file_as_unset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing-secret.key");
+        assert_eq!(read_stored_secret(&path).await.expect("read secret"), None);
+    }
+
+    #[tokio::test]
+    async fn read_stored_secret_loads_and_normalizes_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret.key");
+        let secret = "b".repeat(64);
+        tokio::fs::write(&path, format!("{secret}\n"))
+            .await
+            .expect("write secret");
+
+        assert_eq!(
+            read_stored_secret(&path).await.expect("read secret"),
+            Some(secret)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_stored_secret_rejects_malformed_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret.key");
+        tokio::fs::write(&path, "short")
+            .await
+            .expect("write secret");
+
+        let err = read_stored_secret(&path)
+            .await
+            .expect_err("malformed stored secret should fail");
+        assert!(err.to_string().contains("at least 64"));
+    }
+
+    #[tokio::test]
+    async fn write_secret_file_creates_parent_dirs_and_writes_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("secret.key");
+        let secret = "c".repeat(64);
+
+        super::write_secret_file(&path, &secret)
+            .await
+            .expect("write secret");
+
+        let stored = tokio::fs::read_to_string(&path).await.expect("read secret");
+        assert_eq!(stored, secret);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_secret_file_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret.key");
+        super::write_secret_file(&path, &"d".repeat(64))
+            .await
+            .expect("write secret");
+
+        let mode = tokio::fs::metadata(&path)
+            .await
+            .expect("secret metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

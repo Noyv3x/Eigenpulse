@@ -97,12 +97,21 @@ fn normalize_note_input(title: &str, body: &str) -> Result<NoteInput, ServerFnEr
 
 #[cfg(feature = "ssr")]
 fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
-    let doc_id =
-        ep_core::trim_to_option(doc_id).ok_or_else(|| err("learning.err.doc_id_required"))?;
-    if ep_core::safe_doc_id(&doc_id).is_some() {
-        Ok(doc_id)
+    match ep_core::normalize_doc_id_input(doc_id) {
+        Ok(doc_id) => Ok(doc_id),
+        Err(ep_core::DocIdInputError::Required) => Err(err("learning.err.doc_id_required")),
+        Err(ep_core::DocIdInputError::Invalid(doc_id)) => {
+            Err(err_with("learning.err.doc_id_invalid", &doc_id))
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_progress(progress: f64) -> f64 {
+    if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
     } else {
-        Err(err_with("learning.err.doc_id_invalid", &doc_id))
+        0.0
     }
 }
 
@@ -229,7 +238,7 @@ pub async fn load_learning() -> Result<LearningData, ServerFnError> {
                     doc_id: r.0,
                     name: r.1,
                     provider: r.2,
-                    progress: r.3,
+                    progress: normalize_progress(r.3),
                     due_on: r.4,
                     tone: r.5,
                 })
@@ -239,7 +248,7 @@ pub async fn load_learning() -> Result<LearningData, ServerFnError> {
                 books_done,
                 books_reading,
                 books_todo,
-                courses_avg_progress: courses_avg.unwrap_or(0.0) as f32,
+                courses_avg_progress: courses_avg.map(normalize_progress).unwrap_or(0.0) as f32,
                 note_heatmap_28d,
             },
         })
@@ -269,7 +278,7 @@ pub async fn add_book(name: String, author: String, status: String) -> Result<Bo
             "INSERT INTO lrn_book (doc_id, name, author, status, progress) VALUES (?1, ?2, ?3, ?4, ?5)"
         ).bind(&doc_id).bind(&input.name).bind(&input.author).bind(&input.status).bind(input.progress)
          .execute(&mut *tx).await.map_err(server_err)?;
-        let occurred = time::OffsetDateTime::now_utc().unix_timestamp();
+        let occurred = ep_core::unix_now();
         sqlx::query(
             "INSERT INTO activity (occurred_at, module, doc_id, summary, status) VALUES (?1, 'LRN', ?2, ?3, ?4)"
         ).bind(occurred).bind(&doc_id).bind(&input.name).bind(&input.status)
@@ -370,7 +379,7 @@ pub async fn add_note(title: String, body: String) -> Result<Note, ServerFnError
         )
         .await
         .map_err(server_err)?;
-        let updated_at = time::OffsetDateTime::now_utc().unix_timestamp();
+        let updated_at = ep_core::unix_now();
         sqlx::query(
             "INSERT INTO lrn_note (doc_id, title, body, updated_at) VALUES (?1, ?2, ?3, ?4)",
         )
@@ -487,6 +496,15 @@ mod tests {
             ep_i18n::parse_err(&err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("learning.err.doc_id_invalid", "https://example.com"))
         );
+    }
+
+    #[test]
+    fn normalize_progress_clamps_invalid_course_values() {
+        assert_eq!(normalize_progress(-0.2), 0.0);
+        assert_eq!(normalize_progress(0.4), 0.4);
+        assert_eq!(normalize_progress(1.2), 1.0);
+        assert_eq!(normalize_progress(f64::INFINITY), 0.0);
+        assert_eq!(normalize_progress(f64::NAN), 0.0);
     }
 
     async fn ref_cleanup_pool() -> sqlx::SqlitePool {
@@ -700,44 +718,61 @@ pub async fn delete_note(doc_id: String) -> Result<(), ServerFnError> {
 
 #[cfg(feature = "ssr")]
 async fn delete_book_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
-    delete_learning_doc_inner(pool, "lrn_book", "learning.err.book_not_found", doc_id).await
+    delete_learning_doc_inner(pool, LearningDocKind::Book, doc_id).await
 }
 
 #[cfg(feature = "ssr")]
 async fn delete_note_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
-    delete_learning_doc_inner(pool, "lrn_note", "learning.err.note_not_found", doc_id).await
+    delete_learning_doc_inner(pool, LearningDocKind::Note, doc_id).await
+}
+
+#[cfg(feature = "ssr")]
+#[derive(Clone, Copy)]
+enum LearningDocKind {
+    Book,
+    Note,
+}
+
+#[cfg(feature = "ssr")]
+impl LearningDocKind {
+    fn delete_sql(self) -> &'static str {
+        match self {
+            Self::Book => "DELETE FROM lrn_book WHERE doc_id = ?1",
+            Self::Note => "DELETE FROM lrn_note WHERE doc_id = ?1",
+        }
+    }
+
+    fn not_found_key(self) -> &'static str {
+        match self {
+            Self::Book => "learning.err.book_not_found",
+            Self::Note => "learning.err.note_not_found",
+        }
+    }
 }
 
 #[cfg(feature = "ssr")]
 async fn delete_learning_doc_inner(
     pool: &sqlx::SqlitePool,
-    table: &str,
-    not_found_key: &'static str,
+    kind: LearningDocKind,
     doc_id: &str,
 ) -> Result<(), ServerFnError> {
     let mut tx = pool.begin().await.map_err(server_err)?;
-    if table == "lrn_book" {
+    if matches!(kind, LearningDocKind::Book) {
         sqlx::query("UPDATE lrn_note SET book_doc = NULL WHERE book_doc = ?1")
             .bind(doc_id)
             .execute(&mut *tx)
             .await
             .map_err(server_err)?;
     }
-    let sql = format!("DELETE FROM {table} WHERE doc_id = ?1");
-    let deleted = sqlx::query(&sql)
+    let deleted = sqlx::query(kind.delete_sql())
         .bind(doc_id)
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
     if deleted.rows_affected() == 0 {
-        return Err(err_with(not_found_key, doc_id));
+        return Err(err_with(kind.not_found_key(), doc_id));
     }
-    sqlx::query("DELETE FROM activity WHERE module = 'LRN' AND doc_id = ?1")
-        .bind(doc_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
-    ep_core::clear_doc_references(&mut tx, doc_id)
+    ep_core::delete_doc_activity_and_references(&mut tx, "LRN", doc_id)
         .await
         .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;

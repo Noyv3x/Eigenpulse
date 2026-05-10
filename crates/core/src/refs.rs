@@ -27,6 +27,24 @@ pub async fn clear_doc_references(
     Ok(())
 }
 
+/// Delete a document's own activity rows and clear shared references to it.
+///
+/// Module-owned domain rows should already be deleted by the caller inside the
+/// same transaction. This keeps the common global cleanup sequence consistent
+/// across modules.
+pub async fn delete_doc_activity_and_references(
+    tx: &mut Transaction<'_, Sqlite>,
+    module: &str,
+    doc_id: &str,
+) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM activity WHERE module = ?1 AND doc_id = ?2")
+        .bind(module)
+        .bind(doc_id)
+        .execute(&mut **tx)
+        .await?;
+    clear_doc_references(tx, doc_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +147,103 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(untouched_doc_ref.as_deref(), Some("FIT-S-1"));
+    }
+
+    #[tokio::test]
+    async fn delete_doc_activity_and_references_removes_own_activity_only() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE module_link (
+                source_doc TEXT NOT NULL,
+                target_doc TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'ref',
+                PRIMARY KEY (source_doc, target_doc, kind)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE activity (
+                module TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                link_doc TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE notification (
+                id INTEGER PRIMARY KEY,
+                doc_ref TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO module_link (source_doc, target_doc, kind) VALUES
+             ('FIN-1', 'LRN-B-1', 'ref'),
+             ('FIT-S-1', 'LRN-B-1', 'ref')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO activity (module, doc_id, link_doc) VALUES
+             ('LRN', 'LRN-B-1', NULL),
+             ('FIN', 'LRN-B-1', NULL),
+             ('FIN', 'FIN-1', 'LRN-B-1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO notification (id, doc_ref) VALUES (1, 'LRN-B-1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        delete_doc_activity_and_references(&mut tx, "LRN", "LRN-B-1")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let own_activity: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM activity WHERE module = 'LRN'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(own_activity, 0);
+
+        let other_module_same_doc: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM activity WHERE module = 'FIN' AND doc_id = 'LRN-B-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(other_module_same_doc, 1);
+
+        let linked_activity: Option<String> =
+            sqlx::query_scalar("SELECT link_doc FROM activity WHERE doc_id = 'FIN-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(linked_activity, None);
+
+        let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM module_link")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(links, 0);
+
+        let doc_ref: Option<String> =
+            sqlx::query_scalar("SELECT doc_ref FROM notification WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(doc_ref, None);
     }
 }

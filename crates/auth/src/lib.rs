@@ -17,8 +17,7 @@ pub use bootstrap::bootstrap_admin;
 pub use middleware::{require_session, require_user_for_server_fn};
 #[cfg(feature = "ssr")]
 pub use pat::{
-    generate_pat, hash_token, list_pats, require_pat, require_scope, revoke_pat, AuthPat,
-    MAX_PAT_NAME_CHARS,
+    generate_pat, list_pats, require_pat, require_scope, revoke_pat, AuthPat, MAX_PAT_NAME_CHARS,
 };
 #[cfg(feature = "ssr")]
 pub use session::{

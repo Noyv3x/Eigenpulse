@@ -712,6 +712,58 @@ async fn finance_open_api_trims_category_path_code_before_patch_and_response() {
 }
 
 #[tokio::test]
+async fn finance_open_api_rejects_negative_category_sort_order() {
+    let pool = make_test_pool().await.expect("pool");
+    let state = ep_core::AppState {
+        db: pool.clone(),
+        cookie_key: cookie::Key::generate(),
+        notify: Arc::new(NoopNotifyBus),
+        leptos_options: Default::default(),
+    };
+    let app = ep_finance::open_api(state.clone())
+        .layer(axum::Extension(ep_auth::AuthPat {
+            id: 1,
+            name: "writer".into(),
+            scopes: vec!["fin:write".into()],
+        }))
+        .with_state(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/category")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::json!({
+                        "code": "NEG",
+                        "name": "Negative",
+                        "tone": "rose",
+                        "sort_order": -1
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
+        .await
+        .expect("body");
+    let err: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        err.pointer("/error/code").and_then(|v| v.as_str()),
+        Some("finance.err.category_sort_order_invalid")
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_category WHERE code = 'NEG'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn set_budget_rejects_unknown_category_before_insert() {
     let pool = make_test_pool().await.expect("pool");
 
@@ -1366,7 +1418,7 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
     seed_category(&pool, "F&B", "Food").await.unwrap();
 
     // Real expense: ¥40 on F&B from ACC-FROM.
-    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let now = ep_core::unix_now();
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code,
                               account_code, amount, tag, note, linked_doc_id)

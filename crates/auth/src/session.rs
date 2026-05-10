@@ -1,7 +1,7 @@
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use rand::RngCore;
 use sqlx::SqlitePool;
-use time::{Duration, OffsetDateTime};
+use time::Duration;
 
 pub const COOKIE_NAME: &str = "ep_sid";
 pub const SESSION_LIFETIME_SECS: i64 = 30 * 24 * 60 * 60; // 30d
@@ -57,7 +57,7 @@ pub fn expired_session_cookie() -> Cookie<'static> {
 
 pub async fn login_create_session(pool: &SqlitePool, user_id: i64) -> anyhow::Result<Session> {
     let token = random_token();
-    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let now = ep_core::unix_now();
     let expires_at = now + SESSION_LIFETIME_SECS;
     sqlx::query(
         "INSERT INTO session (token, user_id, issued_at, expires_at, last_seen)
@@ -114,7 +114,7 @@ pub async fn lookup_session(
     let Some((token, user_id, expires_at, last_seen, handle, name, role)) = row else {
         return Ok(None);
     };
-    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let now = ep_core::unix_now();
     if expires_at <= now {
         if let Err(e) = sqlx::query("DELETE FROM session WHERE token = ?1")
             .bind(&token)

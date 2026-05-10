@@ -11,14 +11,12 @@ ssr     = [
     "dep:axum", "dep:axum-extra", "dep:tokio", "dep:sqlx",
     "dep:argon2", "dep:rand", "dep:sha2", "dep:hex", "dep:tracing",
     "dep:leptos", "dep:leptos_axum",
-    "dep:ep-core", "dep:ep-db", "dep:serde", "dep:anyhow", "dep:time",
-    "ep-core/ssr", "ep-db/ssr"
+    "dep:ep-core", "dep:anyhow", "dep:time",
+    "ep-core/ssr"
 ]
 
 [dependencies]
 ep-core    = { workspace = true, optional = true }
-ep-db      = { workspace = true, optional = true }
-serde      = { workspace = true, optional = true }
 anyhow     = { workspace = true, optional = true }
 time       = { workspace = true, optional = true }
 
@@ -43,4 +41,5 @@ name              = "reset_password"
 required-features = ["ssr"]
 
 [dev-dependencies]
+ep-db      = { workspace = true, features = ["ssr"] }
 serde_json = { workspace = true }

@@ -8,7 +8,6 @@ use ep_core::AppState;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use time::OffsetDateTime;
 
 #[derive(Clone, Debug)]
 pub struct AuthPat {
@@ -43,7 +42,7 @@ type PatAuthRow = (i64, String, String, Option<i64>, Option<i64>);
 
 pub const MAX_PAT_NAME_CHARS: usize = 64;
 
-pub fn hash_token(token: &str) -> String {
+fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
     hex::encode(h.finalize())
@@ -100,7 +99,7 @@ pub async fn generate_pat(
         name,
         prefix,
         scopes: scopes_s,
-        created_at: OffsetDateTime::now_utc().unix_timestamp(),
+        created_at: ep_core::unix_now(),
         expires_at,
         last_used_at: None,
         revoked_at: None,
@@ -157,7 +156,7 @@ pub async fn list_pats(pool: &SqlitePool) -> anyhow::Result<Vec<PatRow>> {
 }
 
 pub async fn revoke_pat(pool: &SqlitePool, id: i64) -> anyhow::Result<bool> {
-    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let now = ep_core::unix_now();
     let res = sqlx::query("UPDATE pat SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL")
         .bind(now)
         .bind(id)
@@ -207,7 +206,7 @@ pub async fn require_pat(State(state): State<AppState>, req: Request, next: Next
     if revoked_at.is_some() {
         return unauthorized();
     }
-    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let now = ep_core::unix_now();
     if expires_at.map(|e| e <= now).unwrap_or(false) {
         return unauthorized();
     }
@@ -243,7 +242,11 @@ fn is_public_open_api_healthz(path: &str) -> bool {
     reason = "axum handlers consume Response directly"
 )]
 pub fn require_scope(pat: &AuthPat, scope: &str) -> Result<(), Response> {
-    if pat.scopes.iter().any(|s| s == scope || s == "*") {
+    if pat
+        .scopes
+        .iter()
+        .any(|s| s == scope || s == ep_core::SCOPE_ALL)
+    {
         Ok(())
     } else {
         Err(crate::json_error(
@@ -276,18 +279,18 @@ mod tests {
         let exact = AuthPat {
             id: 1,
             name: "exact".into(),
-            scopes: vec!["fin:read".into()],
+            scopes: vec![ep_core::SCOPE_FIN_READ.into()],
         };
-        assert!(require_scope(&exact, "fin:read").is_ok());
-        assert!(require_scope(&exact, "fin:write").is_err());
+        assert!(require_scope(&exact, ep_core::SCOPE_FIN_READ).is_ok());
+        assert!(require_scope(&exact, ep_core::SCOPE_FIN_WRITE).is_err());
 
         let wildcard = AuthPat {
             id: 2,
             name: "all".into(),
-            scopes: vec!["*".into()],
+            scopes: vec![ep_core::SCOPE_ALL.into()],
         };
-        assert!(require_scope(&wildcard, "fin:write").is_ok());
-        assert!(require_scope(&wildcard, "notify:write").is_ok());
+        assert!(require_scope(&wildcard, ep_core::SCOPE_FIN_WRITE).is_ok());
+        assert!(require_scope(&wildcard, ep_core::SCOPE_NOTIFY_WRITE).is_ok());
     }
 
     #[test]
@@ -306,7 +309,7 @@ mod tests {
         let pat = AuthPat {
             id: 1,
             name: "limited".into(),
-            scopes: vec!["fin:read".into()],
+            scopes: vec![ep_core::SCOPE_FIN_READ.into()],
         };
 
         let response = require_scope(&pat, r#"bad"scope\"#).expect_err("scope should be denied");
@@ -343,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_pat_reports_whether_active_token_was_updated() {
         let pool = pat_test_pool().await;
-        let (_token, row) = generate_pat(&pool, "test", &["fin:read"], None)
+        let (_token, row) = generate_pat(&pool, "test", &[ep_core::SCOPE_FIN_READ], None)
             .await
             .expect("pat");
 
@@ -359,17 +362,29 @@ mod tests {
     #[tokio::test]
     async fn generate_pat_trims_and_dedupes_boundary_fields() {
         let pool = pat_test_pool().await;
+        let joined_scopes = format!(
+            "{} {}",
+            ep_core::SCOPE_FIN_READ,
+            ep_core::SCOPE_NOTIFY_WRITE
+        );
         let (_token, row) = generate_pat(
             &pool,
             "  iOS Shortcuts  ",
-            &["fin:read notify:write", "fin:read"],
+            &[&joined_scopes, ep_core::SCOPE_FIN_READ],
             None,
         )
         .await
         .expect("pat");
 
         assert_eq!(row.name, "iOS Shortcuts");
-        assert_eq!(row.scopes, "fin:read notify:write");
+        assert_eq!(
+            row.scopes,
+            format!(
+                "{} {}",
+                ep_core::SCOPE_FIN_READ,
+                ep_core::SCOPE_NOTIFY_WRITE
+            )
+        );
     }
 
     #[test]
@@ -383,8 +398,20 @@ mod tests {
         assert!(normalize_pat_scopes(&[]).is_err());
         assert!(normalize_pat_scopes(&["   "]).is_err());
         assert_eq!(
-            normalize_pat_scopes(&[" fin:read  notify:write ", "fin:read"]).expect("scopes"),
-            "fin:read notify:write"
+            normalize_pat_scopes(&[
+                &format!(
+                    " {}  {} ",
+                    ep_core::SCOPE_FIN_READ,
+                    ep_core::SCOPE_NOTIFY_WRITE
+                ),
+                ep_core::SCOPE_FIN_READ
+            ])
+            .expect("scopes"),
+            format!(
+                "{} {}",
+                ep_core::SCOPE_FIN_READ,
+                ep_core::SCOPE_NOTIFY_WRITE
+            )
         );
     }
 }

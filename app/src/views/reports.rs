@@ -262,11 +262,7 @@ fn render_category_share(d: &ReportsData) -> impl IntoView {
                 view! {
                     <div class="vstack" style="gap:10px">
                         {cats.into_iter().map(|c| {
-                            let bar_color = if c.tone.is_empty() {
-                                "var(--primary)".to_string()
-                            } else {
-                                format!("var(--{})", c.tone)
-                            };
+                            let bar_color = ep_core::Tone::parse(&c.tone).css_var();
                             // Cap visible width at the highest category share so the
                             // bars never look uniformly tiny (same rule the FIN
                             // finance expense-mix card uses, see modules/finance/src/view.rs).

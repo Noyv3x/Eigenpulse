@@ -30,7 +30,9 @@ impl TelegramNotifier {
             Ok(())
         }
 
-        let cfg: TelegramConfig = serde_json::from_value(v)?;
+        let mut cfg: TelegramConfig = serde_json::from_value(v)?;
+        cfg.bot_token = cfg.bot_token.trim().to_string();
+        cfg.chat_id = cfg.chat_id.trim().to_string();
         require_non_empty(&cfg.bot_token, "bot_token")?;
         require_non_empty(&cfg.chat_id, "chat_id")?;
         Ok(Self { cfg })
@@ -47,16 +49,7 @@ impl Notifier for TelegramNotifier {
             "https://api.telegram.org/bot{}/sendMessage",
             self.cfg.bot_token
         );
-        let mut text = format!("*{}*", md_escape(&msg.title));
-        if let Some(b) = &msg.body {
-            text.push_str(&format!("\n{}", md_escape(b)));
-        }
-        if let Some(d) = &msg.doc_ref {
-            text.push_str(&format!("\n`{}`", md_escape(d)));
-        }
-        if let Some(l) = &msg.link {
-            text.push_str(&format!("\n[Open]({l})"));
-        }
+        let text = render_text(msg);
         let body = TgBody {
             chat_id: &self.cfg.chat_id,
             text,
@@ -75,9 +68,59 @@ impl Notifier for TelegramNotifier {
     }
 }
 
+fn render_text(msg: &NotifyMessage) -> String {
+    let mut text = format!("*{}*", md_escape(&msg.title));
+    if let Some(b) = &msg.body {
+        text.push_str(&format!("\n{}", md_escape(b)));
+    }
+    if let Some(d) = &msg.doc_ref {
+        text.push_str(&format!("\n`{}`", md_escape(d)));
+    }
+    if let Some(l) = &msg.link {
+        text.push_str(&format!("\nOpen: {}", md_escape(l)));
+    }
+    text
+}
+
 fn md_escape(s: &str) -> String {
     s.replace('_', "\\_")
         .replace('*', "\\*")
         .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
         .replace('`', "\\`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_value_trims_boundary_whitespace() {
+        let notifier = TelegramNotifier::from_value(serde_json::json!({
+            "bot_token": " TOKEN ",
+            "chat_id": " 123 "
+        }))
+        .expect("valid telegram config");
+
+        assert_eq!(notifier.cfg.bot_token, "TOKEN");
+        assert_eq!(notifier.cfg.chat_id, "123");
+    }
+
+    #[test]
+    fn render_text_escapes_markdown_control_chars() {
+        let msg = NotifyMessage::info("Budget_[Q2]")
+            .body("Use *cash* `(safe)`")
+            .doc_ref("FIN-26001")
+            .link("/finance?next=(month)");
+
+        let text = render_text(&msg);
+
+        assert!(text.contains("*Budget\\_\\[Q2\\]*"));
+        assert!(text.contains("Use \\*cash\\* \\`\\(safe\\)\\`"));
+        assert!(text.contains("`FIN-26001`"));
+        assert!(text.contains("Open: /finance?next=\\(month\\)"));
+        assert!(!text.contains("[Open]("));
+    }
 }

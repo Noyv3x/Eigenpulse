@@ -7,13 +7,14 @@ use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
 
 #[cfg(feature = "hydrate")]
+type NotificationEventHandler = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>;
+#[cfg(feature = "hydrate")]
+type NotificationEventState = Option<(web_sys::EventSource, NotificationEventHandler)>;
+
+#[cfg(feature = "hydrate")]
 thread_local! {
-    static NOTIFICATION_EVENTS: std::cell::RefCell<
-        Option<(
-            web_sys::EventSource,
-            wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>,
-        )>,
-    > = const { std::cell::RefCell::new(None) };
+    static NOTIFICATION_EVENTS: std::cell::RefCell<NotificationEventState> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[component]

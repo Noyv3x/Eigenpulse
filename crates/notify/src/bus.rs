@@ -27,6 +27,8 @@ impl NotifyBus {
 #[async_trait]
 impl NotifyBusTrait for NotifyBus {
     async fn dispatch(&self, msg: NotifyMessage) -> anyhow::Result<i64> {
+        let msg = normalize_message(msg);
+
         // 1) Persist into `notification`.
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO notification (severity, module, title, body, link, doc_ref)
@@ -112,6 +114,20 @@ impl NotifyBusTrait for NotifyBus {
     fn subscribe(&self) -> broadcast::Receiver<NotifyMessage> {
         self.broadcaster.subscribe()
     }
+}
+
+fn normalize_message(mut msg: NotifyMessage) -> NotifyMessage {
+    msg.link = msg
+        .link
+        .as_deref()
+        .and_then(ep_core::safe_in_app_path)
+        .map(str::to_string);
+    msg.doc_ref = msg
+        .doc_ref
+        .as_deref()
+        .and_then(ep_core::safe_doc_id)
+        .map(str::to_string);
+    msg
 }
 
 fn safe_delivery_error(kind: &str) -> String {
@@ -245,6 +261,60 @@ mod tests {
                 .expect("count deliveries");
 
         assert_eq!(delivery_count, 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_sanitizes_message_link_and_doc_ref() {
+        let pool = test_pool().await;
+        let bus = NotifyBus::new(pool.clone());
+
+        let id = bus
+            .dispatch(
+                NotifyMessage::warn("unsafe")
+                    .link(" https://evil.example/path ")
+                    .doc_ref(" FIN-26092<script> "),
+            )
+            .await
+            .expect("dispatch notification");
+
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT link, doc_ref FROM notification WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("notification row");
+
+        assert_eq!(stored, (None, None));
+    }
+
+    #[tokio::test]
+    async fn dispatch_trims_safe_message_link_and_doc_ref() {
+        let pool = test_pool().await;
+        let bus = NotifyBus::new(pool.clone());
+
+        let id = bus
+            .dispatch(
+                NotifyMessage::info("safe")
+                    .link(" /finance?month=2026-05 ")
+                    .doc_ref(" FIN-26092 "),
+            )
+            .await
+            .expect("dispatch notification");
+
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT link, doc_ref FROM notification WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("notification row");
+
+        assert_eq!(
+            stored,
+            (
+                Some("/finance?month=2026-05".into()),
+                Some("FIN-26092".into())
+            )
+        );
     }
 
     #[test]

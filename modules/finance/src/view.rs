@@ -19,6 +19,49 @@ struct LedgerFilters {
     date_to: RwSignal<String>,
 }
 
+#[derive(Clone, Copy)]
+struct FinanceActions {
+    add: ServerAction<AddTxn>,
+    delete: ServerAction<DeleteTxn>,
+    set_budget: ServerAction<SetBudget>,
+    import_budgets: ServerAction<ImportBudgetsFrom>,
+    create_account: ServerAction<CreateAccount>,
+    update_account: ServerAction<UpdateAccount>,
+    delete_account: ServerAction<DeleteAccount>,
+    create_category: ServerAction<CreateCategory>,
+    update_category: ServerAction<UpdateCategory>,
+    delete_category: ServerAction<DeleteCategory>,
+    update_txn: ServerAction<UpdateTxn>,
+    add_transfer: ServerAction<AddTransfer>,
+}
+
+impl FinanceActions {
+    fn versions(self) -> [usize; 12] {
+        [
+            self.add.version().get(),
+            self.delete.version().get(),
+            self.set_budget.version().get(),
+            self.import_budgets.version().get(),
+            self.create_account.version().get(),
+            self.update_account.version().get(),
+            self.delete_account.version().get(),
+            self.create_category.version().get(),
+            self.update_category.version().get(),
+            self.delete_category.version().get(),
+            self.update_txn.version().get(),
+            self.add_transfer.version().get(),
+        ]
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FinanceUiState {
+    active: RwSignal<String>,
+    txn_modal_open: RwSignal<bool>,
+    txn_modal_mode: RwSignal<String>,
+    filters: LedgerFilters,
+}
+
 #[component]
 pub fn FinanceView() -> impl IntoView {
     let locale = use_locale();
@@ -42,24 +85,36 @@ pub fn FinanceView() -> impl IntoView {
     let category_filter = RwSignal::new(String::new());
     let date_from_filter = RwSignal::new(String::new());
     let date_to_filter = RwSignal::new(String::new());
+    let actions = FinanceActions {
+        add,
+        delete,
+        set_budget,
+        import_budgets,
+        create_account,
+        update_account,
+        delete_account,
+        create_category,
+        update_category,
+        delete_category,
+        update_txn,
+        add_transfer,
+    };
+    let ui = FinanceUiState {
+        active,
+        txn_modal_open,
+        txn_modal_mode,
+        filters: LedgerFilters {
+            merchant: merchant_filter,
+            category: category_filter,
+            date_from: date_from_filter,
+            date_to: date_to_filter,
+        },
+    };
 
     // Refetch when any action's version ticks. We compare per-element via a
     // fixed-size array so the closure stays Send + 'static.
     Effect::new(move |prev: Option<[usize; 12]>| {
-        let cur = [
-            add.version().get(),
-            delete.version().get(),
-            set_budget.version().get(),
-            import_budgets.version().get(),
-            create_account.version().get(),
-            update_account.version().get(),
-            delete_account.version().get(),
-            create_category.version().get(),
-            update_category.version().get(),
-            delete_category.version().get(),
-            update_txn.version().get(),
-            add_transfer.version().get(),
-        ];
+        let cur = actions.versions();
         if prev.is_some_and(|p| p != cur) {
             ledger.refetch();
         }
@@ -89,44 +144,16 @@ pub fn FinanceView() -> impl IntoView {
             <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
                 {move || ledger.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
-                    Ok(data) => render_ledger(
-                        data, active, add, delete, set_budget, import_budgets,
-                        create_account, update_account, delete_account,
-                        create_category, update_category, delete_category,
-                        update_txn, add_transfer,
-                        txn_modal_open, txn_modal_mode,
-                        merchant_filter, category_filter, date_from_filter, date_to_filter,
-                    ).into_any(),
+                    Ok(data) => render_ledger(data, ui, actions).into_any(),
                 })}
             </Suspense>
         </div>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_ledger(
-    data: LedgerData,
-    active: RwSignal<String>,
-    add: ServerAction<AddTxn>,
-    delete: ServerAction<DeleteTxn>,
-    set_budget: ServerAction<SetBudget>,
-    import_budgets: ServerAction<ImportBudgetsFrom>,
-    create_account: ServerAction<CreateAccount>,
-    update_account: ServerAction<UpdateAccount>,
-    delete_account: ServerAction<DeleteAccount>,
-    create_category: ServerAction<CreateCategory>,
-    update_category: ServerAction<UpdateCategory>,
-    delete_category: ServerAction<DeleteCategory>,
-    update_txn: ServerAction<UpdateTxn>,
-    add_transfer: ServerAction<AddTransfer>,
-    txn_modal_open: RwSignal<bool>,
-    txn_modal_mode: RwSignal<String>,
-    merchant_filter: RwSignal<String>,
-    category_filter: RwSignal<String>,
-    date_from_filter: RwSignal<String>,
-    date_to_filter: RwSignal<String>,
-) -> impl IntoView {
+fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) -> impl IntoView {
     let locale = use_locale();
+    let active = ui.active;
     let m = &data.month;
     let bud_pct = if m.budget_total > 0.0 {
         (m.expense / m.budget_total * 100.0).round() as u32
@@ -258,31 +285,26 @@ fn render_ledger(
         {kpis}
         <Tabs tabs=tabs active=active/>
         {move || match active.get().as_str() {
-            "budget" => render_budget(&data_for_budget, set_budget, import_budgets).into_any(),
-            "accounts" => render_accounts(&data_for_accounts, create_account, update_account, delete_account).into_any(),
-            "categories" => render_categories(&data_for_categories, create_category, update_category, delete_category).into_any(),
+            "budget" => render_budget(&data_for_budget, actions.set_budget, actions.import_budgets).into_any(),
+            "accounts" => render_accounts(&data_for_accounts, actions.create_account, actions.update_account, actions.delete_account).into_any(),
+            "categories" => render_categories(&data_for_categories, actions.create_category, actions.update_category, actions.delete_category).into_any(),
             "reports" => render_reports(&data_for_reports).into_any(),
             _ => view! {
                 {render_txn_modal(
-                    add,
-                    add_transfer,
+                    actions.add,
+                    actions.add_transfer,
                     data_for_ledger.categories.clone(),
                     data_for_ledger.accounts.clone(),
-                    txn_modal_open,
-                    txn_modal_mode,
+                    ui.txn_modal_open,
+                    ui.txn_modal_mode,
                 )}
                 {render_ledger_tab(
                     &data_for_ledger,
-                    delete,
-                    update_txn,
-                    txn_modal_open,
-                    txn_modal_mode,
-                    LedgerFilters {
-                        merchant: merchant_filter,
-                        category: category_filter,
-                        date_from: date_from_filter,
-                        date_to: date_to_filter,
-                    },
+                    actions.delete,
+                    actions.update_txn,
+                    ui.txn_modal_open,
+                    ui.txn_modal_mode,
+                    ui.filters,
                 )}
             }.into_any(),
         }}
@@ -688,7 +710,7 @@ fn render_ledger_tab(
                         view! {
                             <div class="vstack" style="gap:10px">
                                 {cat_summary.into_iter().map(|c| {
-                                    let bar_color = if c.tone.is_empty() { "var(--primary)".to_string() } else { format!("var(--{})", c.tone) };
+                                    let bar_color = Tone::parse(&c.tone).css_var();
                                     let pct = (c.pct * 3.0).min(100.0);
                                     view! {
                                         <div>
@@ -1073,10 +1095,9 @@ fn render_budget(
                                     .unwrap_or_else(|| (b.category_code.clone(), String::new()));
                                 let pct_f = if b.amount > 0.0 { b.used / b.amount * 100.0 } else { 0.0 };
                                 let pct = pct_f.round() as i32;
-                                let bar_color = if pct > 95 { "var(--rose)".to_string() }
-                                                else if pct > 80 { "var(--amber)".to_string() }
-                                                else if tone.is_empty() { "var(--primary)".to_string() }
-                                                else { format!("var(--{})", tone) };
+                                let bar_color = if pct > 95 { "var(--rose)" }
+                                                else if pct > 80 { "var(--amber)" }
+                                                else { Tone::parse(&tone).css_var() };
                                 let pct_class = if pct > 100 { "amt-neg" } else { "dim" };
                                 let bar_width = (pct as i64).clamp(0, 100);
                                 let edit_period = period.clone();
@@ -1275,14 +1296,14 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code")}</span>
-                            <input name="code" required maxlength="16" placeholder="ACC-99"
-                                   pattern="[-A-Z0-9]{2,16}"
+                            <input name="code" required maxlength=MAX_ACCOUNT_CODE_CHARS.to_string() placeholder="ACC-99"
+                                   pattern=format!("[-A-Z0-9]{{{MIN_ACCOUNT_CODE_CHARS},{MAX_ACCOUNT_CODE_CHARS}}}")
                                    title=t(locale, "finance.account.title_code_pattern")
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                            <input name="name" required maxlength="64" placeholder=t(locale, "finance.placeholder.account_name")
+                            <input name="name" required maxlength=MAX_ACCOUNT_NAME_CHARS.to_string() placeholder=t(locale, "finance.placeholder.account_name")
                                    style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
@@ -1384,7 +1405,7 @@ fn render_account_card(
                         </label>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                            <input name="name" required maxlength="64" value=name
+                            <input name="name" required maxlength=MAX_ACCOUNT_NAME_CHARS.to_string() value=name
                                    style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
@@ -1448,14 +1469,14 @@ fn render_categories(
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code")}</span>
-                            <input name="code" required maxlength="8" placeholder="EDU"
-                                   pattern="[A-Z&]{1,8}"
+                            <input name="code" required maxlength=MAX_CATEGORY_CODE_CHARS.to_string() placeholder="EDU"
+                                   pattern=format!("[A-Z&]{{1,{MAX_CATEGORY_CODE_CHARS}}}")
                                    title=t(locale, "finance.category.title_code_pattern")
                                    style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                            <input name="name" required maxlength="32" placeholder=t(locale, "finance.placeholder.category_name")
+                            <input name="name" required maxlength=MAX_CATEGORY_NAME_CHARS.to_string() placeholder=t(locale, "finance.placeholder.category_name")
                                    style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
@@ -1561,7 +1582,7 @@ fn render_category_row(
                             </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                                <input name="name" required maxlength="32" value=name
+                                <input name="name" required maxlength=MAX_CATEGORY_NAME_CHARS.to_string() value=name
                                        style=INPUT_STYLE/>
                             </label>
                             <label class="vstack" style="gap:4px">
@@ -1709,7 +1730,7 @@ fn render_category_share_card(d: &LedgerData) -> impl IntoView {
                 view! {
                     <div class="vstack" style="gap:10px">
                         {cats.into_iter().map(|c| {
-                            let bar_color = if c.tone.is_empty() { "var(--primary)".to_string() } else { format!("var(--{})", c.tone) };
+                            let bar_color = Tone::parse(&c.tone).css_var();
                             let pct = (c.pct * 3.0).min(100.0);
                             view! {
                                 <div>

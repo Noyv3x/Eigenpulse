@@ -781,7 +781,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
- "time",
  "tokio",
  "tokio-stream",
  "tower",
@@ -869,7 +868,6 @@ dependencies = [
  "leptos",
  "leptos_axum",
  "rand 0.8.6",
- "serde",
  "serde_json",
  "sha2",
  "sqlx",
@@ -933,7 +931,6 @@ dependencies = [
 name = "ep-fitness"
 version = "0.1.0"
 dependencies = [
- "axum 0.7.9",
  "ep-auth",
  "ep-core",
  "ep-i18n",
@@ -941,7 +938,6 @@ dependencies = [
  "leptos",
  "serde",
  "sqlx",
- "time",
  "tokio",
 ]
 
@@ -951,7 +947,6 @@ version = "0.1.0"
 dependencies = [
  "axum 0.7.9",
  "axum-extra",
- "cookie",
  "ep-auth",
  "ep-core",
  "leptos",
@@ -971,7 +966,6 @@ dependencies = [
 name = "ep-learning"
 version = "0.1.0"
 dependencies = [
- "axum 0.7.9",
  "ep-auth",
  "ep-core",
  "ep-i18n",
@@ -979,7 +973,6 @@ dependencies = [
  "leptos",
  "serde",
  "sqlx",
- "time",
  "tokio",
 ]
 
@@ -987,7 +980,6 @@ dependencies = [
 name = "ep-marketplace"
 version = "0.1.0"
 dependencies = [
- "axum 0.7.9",
  "ep-core",
  "ep-i18n",
  "ep-ui",

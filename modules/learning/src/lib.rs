@@ -32,31 +32,10 @@ mod ssr_module {
     #[cfg(test)]
     mod tests {
         use super::MODULE;
-        use std::collections::BTreeSet;
 
         #[test]
         fn every_migration_file_is_registered() {
-            let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let migration_dir = manifest_dir.join("migrations");
-            let files: BTreeSet<String> = std::fs::read_dir(&migration_dir)
-                .unwrap_or_else(|e| panic!("read {}: {e}", migration_dir.display()))
-                .map(|entry| {
-                    entry
-                        .expect("migration dir entry")
-                        .path()
-                        .file_stem()
-                        .expect("migration file stem")
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect();
-            let registered: BTreeSet<String> = MODULE
-                .migrations()
-                .iter()
-                .map(|(name, _)| (*name).to_string())
-                .collect();
-
-            assert_eq!(registered, files);
+            ep_core::assert_module_migrations_registered!(MODULE);
         }
 
         async fn migrated_pool() -> sqlx::SqlitePool {
@@ -92,9 +71,30 @@ mod ssr_module {
         #[tokio::test]
         async fn migrations_remove_demo_learning_records_but_keep_sequences() {
             let pool = migrated_pool().await;
-            for table in ["lrn_note", "lrn_book", "lrn_course"] {
-                let sql = format!("SELECT COUNT(*) FROM {table}");
-                let count: i64 = sqlx::query_scalar(&sql).fetch_one(&pool).await.unwrap();
+            let counts = [
+                (
+                    "lrn_note",
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM lrn_note")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap(),
+                ),
+                (
+                    "lrn_book",
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM lrn_book")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap(),
+                ),
+                (
+                    "lrn_course",
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM lrn_course")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap(),
+                ),
+            ];
+            for (table, count) in counts {
                 assert_eq!(count, 0, "{table} should not retain demo rows");
             }
 

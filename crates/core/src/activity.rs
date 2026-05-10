@@ -33,6 +33,36 @@ type ActivityRow = (
     Option<String>,
 );
 
+const TODAY_ACTIVITY_ASC_SQL: &str = "
+    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
+      FROM activity
+     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
+     ORDER BY occurred_at ASC
+";
+
+const TODAY_ACTIVITY_ASC_LIMIT_SQL: &str = "
+    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
+      FROM activity
+     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
+     ORDER BY occurred_at ASC
+     LIMIT ?1
+";
+
+const TODAY_ACTIVITY_DESC_SQL: &str = "
+    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
+      FROM activity
+     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
+     ORDER BY occurred_at DESC
+";
+
+const TODAY_ACTIVITY_DESC_LIMIT_SQL: &str = "
+    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
+      FROM activity
+     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
+     ORDER BY occurred_at DESC
+     LIMIT ?1
+";
+
 pub async fn load_today_activity(
     pool: &SqlitePool,
     order: TodayActivityOrder,
@@ -45,20 +75,30 @@ pub async fn load_today_activity(
     // "Today" follows local wall-clock time. SQLite modifiers compose
     // left-to-right: shift to localtime, round to local midnight, then convert
     // back to UTC epoch seconds for comparison against stored unix timestamps.
-    let order_sql = match order {
-        TodayActivityOrder::Asc => "ASC",
-        TodayActivityOrder::Desc => "DESC",
+    let rows: Vec<ActivityRow> = match (order, limit) {
+        (TodayActivityOrder::Asc, None) => {
+            sqlx::query_as(TODAY_ACTIVITY_ASC_SQL)
+                .fetch_all(pool)
+                .await?
+        }
+        (TodayActivityOrder::Asc, Some(limit)) => {
+            sqlx::query_as(TODAY_ACTIVITY_ASC_LIMIT_SQL)
+                .bind(i64::from(limit.max(1)))
+                .fetch_all(pool)
+                .await?
+        }
+        (TodayActivityOrder::Desc, None) => {
+            sqlx::query_as(TODAY_ACTIVITY_DESC_SQL)
+                .fetch_all(pool)
+                .await?
+        }
+        (TodayActivityOrder::Desc, Some(limit)) => {
+            sqlx::query_as(TODAY_ACTIVITY_DESC_LIMIT_SQL)
+                .bind(i64::from(limit.max(1)))
+                .fetch_all(pool)
+                .await?
+        }
     };
-    let limit_sql = limit
-        .map(|n| format!(" LIMIT {}", n.max(1)))
-        .unwrap_or_default();
-    let sql = format!(
-        "SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
-           FROM activity
-          WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
-          ORDER BY occurred_at {order_sql}{limit_sql}"
-    );
-    let rows: Vec<ActivityRow> = sqlx::query_as(&sql).fetch_all(pool).await?;
 
     Ok(TodayActivity {
         date,
@@ -107,18 +147,15 @@ mod tests {
     #[tokio::test]
     async fn load_today_activity_orders_and_limits_rows() {
         let pool = pool_with_activity().await;
-        for (ts, doc_id) in [
-            ("unixepoch('now') - 20", "FIN-1"),
-            ("unixepoch('now') - 10", "FIT-1"),
-        ] {
-            sqlx::query(&format!(
-                "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, status, link_doc)
-                 VALUES ({ts}, 'FIN', '{doc_id}', 'summary', -1.0, NULL, NULL)"
-            ))
-            .execute(&pool)
-            .await
-            .expect("activity");
-        }
+        sqlx::query(
+            "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, status, link_doc)
+             VALUES
+                (unixepoch('now') - 20, 'FIN', 'FIN-1', 'summary', -1.0, NULL, NULL),
+                (unixepoch('now') - 10, 'FIN', 'FIT-1', 'summary', -1.0, NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("activity");
 
         let asc = load_today_activity(&pool, TodayActivityOrder::Asc, None)
             .await
@@ -129,6 +166,27 @@ mod tests {
         let desc = load_today_activity(&pool, TodayActivityOrder::Desc, Some(1))
             .await
             .expect("desc");
+        assert_eq!(desc.rows.len(), 1);
+        assert_eq!(desc.rows[0].doc_id, "FIT-1");
+    }
+
+    #[tokio::test]
+    async fn load_today_activity_clamps_zero_limit_to_one() {
+        let pool = pool_with_activity().await;
+        sqlx::query(
+            "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, status, link_doc)
+             VALUES
+                (unixepoch('now') - 20, 'FIN', 'FIN-1', 'summary', -1.0, NULL, NULL),
+                (unixepoch('now') - 10, 'FIN', 'FIT-1', 'summary', -1.0, NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("activity");
+
+        let desc = load_today_activity(&pool, TodayActivityOrder::Desc, Some(0))
+            .await
+            .expect("desc");
+
         assert_eq!(desc.rows.len(), 1);
         assert_eq!(desc.rows[0].doc_id, "FIT-1");
     }

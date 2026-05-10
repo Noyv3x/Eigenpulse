@@ -118,7 +118,7 @@ EP_ADMIN_PASSWORD=changeme docker compose up -d
 |---|---|---|
 | `EP_ADMIN_PASSWORD` | 首次启动 | OWNER 账户初始密码（≥6 字符）；之后可在 UI 中轮换 |
 | `EP_SECRET` | 推荐 | ≥64 字符的 **session cookie 签名密钥**；缺失则首启生成 `EP_SECRET_FILE` 指向的文件（本地默认 `data/secret.key`，Docker 默认 `/data/secret.key`）。轮换会让所有浏览器登录失效，但**不影响 PAT** —— PAT 直接 `sha256(token)` 比对，与本变量无关。 |
-| `EP_SECRET_FILE` | 否 | 未设置 `EP_SECRET` 时用于读取/持久化自动生成密钥；本地默认 `data/secret.key`，Docker 镜像内默认 `/data/secret.key`。 |
+| `EP_SECRET_FILE` | 否 | 未设置 `EP_SECRET` 时用于读取/持久化自动生成密钥；本地默认 `data/secret.key`，Docker 镜像内默认 `/data/secret.key`。文件不存在时会自动生成；文件已存在但内容无效时会拒绝启动，避免静默轮换会话签名密钥。 |
 | `EP_COOKIE_SECURE` | 否 | 设为 `1` / `true` 时 session cookie 标记 `Secure`（仅 HTTPS 发送）。**默认 false**：本地 HTTP / NAS 内网部署会话才能持久化。生产 HTTPS 环境务必设为 `1`。 |
 | `DATABASE_URL` | 否 | 本地默认 `sqlite://data/eigenpulse.db?mode=rwc`；Docker 镜像内覆盖为 `sqlite:///data/eigenpulse.db?mode=rwc` |
 | `RUST_LOG` | 否 | tracing 过滤，例如 `info,sqlx=warn` |

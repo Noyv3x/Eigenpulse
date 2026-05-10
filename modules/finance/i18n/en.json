@@ -166,5 +166,6 @@
   "finance.err.category_not_found": "Category '{payload}' not found",
   "finance.err.category_code_taken": "Category code '{payload}' already exists",
   "finance.err.category_code_format": "code must be 1..=8 chars, uppercase letters and '&' only",
-  "finance.err.category_name_format": "name is required and must be ≤ 32 chars"
+  "finance.err.category_name_format": "name is required and must be ≤ 32 chars",
+  "finance.err.category_sort_order_invalid": "sort_order must be zero or greater"
 }

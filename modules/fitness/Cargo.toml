@@ -8,8 +8,8 @@ license     = { workspace = true }
 [features]
 default = []
 ssr     = [
-    "dep:axum", "dep:sqlx", "dep:tokio",
-    "dep:ep-auth", "dep:time",
+    "dep:sqlx",
+    "dep:ep-auth",
     "ep-core/ssr", "ep-auth/ssr",
     "ep-ui/ssr", "ep-i18n/ssr",
     "leptos/ssr",
@@ -28,7 +28,7 @@ leptos       = { workspace = true }
 serde        = { workspace = true }
 
 ep-auth    = { workspace = true, optional = true }
-time       = { workspace = true, optional = true }
-axum       = { workspace = true, optional = true }
 sqlx       = { workspace = true, optional = true }
-tokio      = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio      = { workspace = true, features = ["macros", "rt"] }

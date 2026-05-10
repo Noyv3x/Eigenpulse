@@ -166,5 +166,6 @@
   "finance.err.category_not_found": "分类 '{payload}' 不存在",
   "finance.err.category_code_taken": "分类 code '{payload}' 已存在",
   "finance.err.category_code_format": "code 必须 1..=8 字符,只允许大写字母和 '&'",
-  "finance.err.category_name_format": "name 必填且长度不超过 32 字符"
+  "finance.err.category_name_format": "name 必填且长度不超过 32 字符",
+  "finance.err.category_sort_order_invalid": "sort_order 必须大于等于 0"
 }

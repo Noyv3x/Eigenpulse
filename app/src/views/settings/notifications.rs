@@ -219,6 +219,27 @@ mod tests {
             Some(("app.settings.notifications.err_channel_not_found", "0"))
         );
     }
+
+    #[test]
+    fn channel_dto_never_serializes_config_json_or_provider_secrets() {
+        let dto = ChannelDto {
+            id: 1,
+            kind: "telegram".into(),
+            name: "Ops".into(),
+            enabled: true,
+            min_severity: "info".into(),
+            created_at: 1,
+        };
+
+        let value = serde_json::to_value(dto).expect("serialize ChannelDto");
+
+        assert!(value.get("kind").is_some());
+        assert!(value.get("config_json").is_none());
+        assert!(value.get("password").is_none());
+        assert!(value.get("bot_token").is_none());
+        assert!(value.get("device_key").is_none());
+        assert!(value.get("webhook_url").is_none());
+    }
 }
 
 #[server(DeleteChannel, "/api/_internal/cfg", "Url", "delete_channel")]

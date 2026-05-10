@@ -45,20 +45,20 @@ impl BarkNotifier {
 
         Ok(Self {
             cfg: {
-                let cfg: BarkConfig = serde_json::from_value(v)?;
+                let mut cfg: BarkConfig = serde_json::from_value(v)?;
+                cfg.base_url = cfg.base_url.trim().to_string();
+                cfg.device_key = cfg.device_key.trim().to_string();
+                cfg.sound = normalize_optional_text(cfg.sound);
+                cfg.group = normalize_optional_text(cfg.group);
+                cfg.icon_url = normalize_optional_text(cfg.icon_url);
                 require_non_empty(&cfg.base_url, "base_url")?;
                 require_non_empty(&cfg.device_key, "device_key")?;
-                let base_url = reqwest::Url::parse(cfg.base_url.trim())
+                let base_url = reqwest::Url::parse(&cfg.base_url)
                     .map_err(|e| anyhow::anyhow!("bark config `base_url` is invalid: {e}"))?;
                 if !matches!(base_url.scheme(), "http" | "https") {
                     anyhow::bail!("bark config `base_url` must use http or https");
                 }
-                if let Some(icon_url) = cfg
-                    .icon_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
+                if let Some(icon_url) = cfg.icon_url.as_deref() {
                     let icon_url = reqwest::Url::parse(icon_url)
                         .map_err(|e| anyhow::anyhow!("bark config `icon_url` is invalid: {e}"))?;
                     if !matches!(icon_url.scheme(), "http" | "https") {
@@ -69,6 +69,12 @@ impl BarkNotifier {
             },
         })
     }
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[async_trait]
@@ -99,5 +105,45 @@ impl Notifier for BarkNotifier {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_value_trims_urls_and_optional_fields() {
+        let notifier = BarkNotifier::from_value(serde_json::json!({
+            "base_url": " https://api.day.app/ ",
+            "device_key": " DEVICE ",
+            "sound": " bell ",
+            "group": " Eigenpulse ",
+            "icon_url": " https://example.com/icon.png "
+        }))
+        .expect("valid bark config");
+
+        assert_eq!(notifier.cfg.base_url, "https://api.day.app/");
+        assert_eq!(notifier.cfg.device_key, "DEVICE");
+        assert_eq!(notifier.cfg.sound.as_deref(), Some("bell"));
+        assert_eq!(notifier.cfg.group.as_deref(), Some("Eigenpulse"));
+        assert_eq!(
+            notifier.cfg.icon_url.as_deref(),
+            Some("https://example.com/icon.png")
+        );
+    }
+
+    #[test]
+    fn from_value_drops_blank_optional_fields() {
+        let notifier = BarkNotifier::from_value(serde_json::json!({
+            "base_url": "https://api.day.app",
+            "device_key": "DEVICE",
+            "sound": " ",
+            "group": ""
+        }))
+        .expect("valid bark config");
+
+        assert_eq!(notifier.cfg.sound, None);
+        assert_eq!(notifier.cfg.group, None);
     }
 }

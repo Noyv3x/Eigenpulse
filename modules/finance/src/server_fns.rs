@@ -10,6 +10,11 @@ use sqlx::SqlitePool;
 
 pub(crate) const MAX_TXN_MERCHANT_CHARS: usize = 128;
 pub(crate) const MAX_TXN_NOTE_CHARS: usize = 2_000;
+pub(crate) const MIN_ACCOUNT_CODE_CHARS: usize = 2;
+pub(crate) const MAX_ACCOUNT_CODE_CHARS: usize = 16;
+pub(crate) const MAX_ACCOUNT_NAME_CHARS: usize = 64;
+pub(crate) const MAX_CATEGORY_CODE_CHARS: usize = 8;
+pub(crate) const MAX_CATEGORY_NAME_CHARS: usize = 32;
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
@@ -85,12 +90,12 @@ fn normalize_txn_note(note: Option<&str>) -> Result<Option<String>, ServerFnErro
 
 #[cfg(feature = "ssr")]
 pub(crate) fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
-    let doc_id = ep_core::trim_to_option(doc_id)
-        .ok_or_else(|| ep_i18n::err("finance.err.doc_id_required"))?;
-    if ep_core::safe_doc_id(&doc_id).is_some() {
-        Ok(doc_id)
-    } else {
-        Err(ep_i18n::err_with("finance.err.doc_id_invalid", &doc_id))
+    match ep_core::normalize_doc_id_input(doc_id) {
+        Ok(doc_id) => Ok(doc_id),
+        Err(ep_core::DocIdInputError::Required) => Err(ep_i18n::err("finance.err.doc_id_required")),
+        Err(ep_core::DocIdInputError::Invalid(doc_id)) => {
+            Err(ep_i18n::err_with("finance.err.doc_id_invalid", &doc_id))
+        }
     }
 }
 
@@ -178,6 +183,53 @@ mod tests {
         );
         assert_eq!(normalize_txn_note(Some("   ")).unwrap(), None);
         assert!(normalize_txn_note(Some(&"x".repeat(MAX_TXN_NOTE_CHARS + 1))).is_err());
+    }
+
+    #[test]
+    fn validate_account_input_enforces_shared_field_limits() {
+        assert!(validate_account_input("A", "Cash", "Cash", "").is_err());
+        assert!(validate_account_input(
+            &"A".repeat(MAX_ACCOUNT_CODE_CHARS + 1),
+            "Cash",
+            "Cash",
+            ""
+        )
+        .is_err());
+        assert!(
+            validate_account_input("ACC", &"x".repeat(MAX_ACCOUNT_NAME_CHARS + 1), "Cash", "")
+                .is_err()
+        );
+        assert_eq!(
+            validate_account_input(" ACC ", " Cash ", "Cash", "green").unwrap(),
+            (
+                "ACC".to_string(),
+                "Cash".to_string(),
+                "Cash".to_string(),
+                "green".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_category_input_enforces_shared_field_limits() {
+        assert!(validate_category_input("", "Food", "").is_err());
+        assert!(
+            validate_category_input(&"A".repeat(MAX_CATEGORY_CODE_CHARS + 1), "Food", "").is_err()
+        );
+        assert!(
+            validate_category_input("FOOD", &"x".repeat(MAX_CATEGORY_NAME_CHARS + 1), "").is_err()
+        );
+        assert_eq!(
+            validate_category_input(" F&B ", " Food ", "amber").unwrap(),
+            ("F&B".to_string(), "Food".to_string(), "amber".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_category_sort_order_rejects_negative_values() {
+        assert!(validate_category_sort_order(-1).is_err());
+        assert_eq!(validate_category_sort_order(0).unwrap(), 0);
+        assert_eq!(validate_category_sort_order(42).unwrap(), 42);
     }
 }
 
@@ -682,7 +734,7 @@ pub async fn add_txn(
 
         let occurred = parse_occurred_at(pool, &occurred_at)
             .await?
-            .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp());
+            .unwrap_or_else(ep_core::unix_now);
 
         let txn = add_txn_inner(
             pool,
@@ -885,12 +937,7 @@ async fn delete_one_leg(
         .execute(&mut **tx)
         .await
         .map_err(server_err)?;
-    sqlx::query("DELETE FROM activity WHERE module = 'FIN' AND doc_id = ?1")
-        .bind(doc_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(server_err)?;
-    ep_core::clear_doc_references(tx, doc_id)
+    ep_core::delete_doc_activity_and_references(tx, "FIN", doc_id)
         .await
         .map_err(server_err)?;
     Ok(Some((tag, linked_doc_id)))
@@ -1513,7 +1560,7 @@ pub async fn add_transfer(
 
         let occurred = parse_occurred_at(pool, &occurred_at)
             .await?
-            .unwrap_or_else(|| time::OffsetDateTime::now_utc().unix_timestamp());
+            .unwrap_or_else(ep_core::unix_now);
 
         add_transfer_inner(
             pool,
@@ -1549,7 +1596,7 @@ fn validate_account_input(
     let name = name.trim().to_string();
     let r#type = r#type.trim().to_string();
     let tone = tone.trim().to_string();
-    if code.len() < 2 || code.len() > 16 {
+    if code.len() < MIN_ACCOUNT_CODE_CHARS || code.len() > MAX_ACCOUNT_CODE_CHARS {
         return Err(ep_i18n::err("finance.err.account_code_format"));
     }
     if !code
@@ -1558,7 +1605,7 @@ fn validate_account_input(
     {
         return Err(ep_i18n::err("finance.err.account_code_charset"));
     }
-    if name.is_empty() || name.chars().count() > 64 {
+    if name.is_empty() || name.chars().count() > MAX_ACCOUNT_NAME_CHARS {
         return Err(ep_i18n::err("finance.err.account_name_format"));
     }
     if !ACCOUNT_TYPES.contains(&r#type.as_str()) {
@@ -1807,12 +1854,12 @@ fn validate_category_input(
     let tone = tone.trim().to_string();
     // Inline char-class check (no regex dep). Accepts `&` for seed code F&B.
     if code.is_empty()
-        || code.len() > 8
+        || code.len() > MAX_CATEGORY_CODE_CHARS
         || !code.chars().all(|c| c.is_ascii_uppercase() || c == '&')
     {
         return Err(ep_i18n::err("finance.err.category_code_format"));
     }
-    if name.is_empty() || name.chars().count() > 32 {
+    if name.is_empty() || name.chars().count() > MAX_CATEGORY_NAME_CHARS {
         return Err(ep_i18n::err("finance.err.category_name_format"));
     }
     if !tone.is_empty() && !TONES.contains(&tone.as_str()) {
@@ -1825,6 +1872,14 @@ fn validate_category_input(
 }
 
 #[cfg(feature = "ssr")]
+fn validate_category_sort_order(sort_order: i64) -> Result<i64, ServerFnError> {
+    if sort_order < 0 {
+        return Err(ep_i18n::err("finance.err.category_sort_order_invalid"));
+    }
+    Ok(sort_order)
+}
+
+#[cfg(feature = "ssr")]
 pub async fn create_category_inner(
     pool: &SqlitePool,
     code: String,
@@ -1833,6 +1888,7 @@ pub async fn create_category_inner(
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
     let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    let sort_order = validate_category_sort_order(sort_order)?;
     let res = sqlx::query(
         "INSERT INTO fin_category (code, name, tone, sort_order, archived, created_at)
          VALUES (?1, ?2, ?3, ?4, 0, unixepoch())",
@@ -1876,6 +1932,7 @@ pub async fn update_category_inner(
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
     let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    let sort_order = validate_category_sort_order(sort_order)?;
     let res = sqlx::query(
         "UPDATE fin_category SET name = ?1, tone = ?2, sort_order = ?3 WHERE code = ?4",
     )

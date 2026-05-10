@@ -24,6 +24,18 @@ impl Tone {
             Self::Violet => "violet",
         }
     }
+
+    pub fn css_var(&self) -> &'static str {
+        match self {
+            Self::None => "var(--primary)",
+            Self::Green => "var(--green)",
+            Self::Amber => "var(--amber)",
+            Self::Rose => "var(--rose)",
+            Self::Blue => "var(--blue)",
+            Self::Violet => "var(--violet)",
+        }
+    }
+
     pub fn parse(s: &str) -> Self {
         match s {
             "green" => Self::Green,
@@ -61,6 +73,15 @@ mod tests {
     fn parse_unknown_tone_as_none() {
         assert_eq!(Tone::parse(""), Tone::None);
         assert_eq!(Tone::parse("custom"), Tone::None);
+    }
+
+    #[test]
+    fn css_var_only_returns_known_design_tokens() {
+        assert_eq!(Tone::Green.css_var(), "var(--green)");
+        assert_eq!(
+            Tone::parse("red);color:transparent").css_var(),
+            "var(--primary)"
+        );
     }
 
     #[test]
