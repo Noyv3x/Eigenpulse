@@ -12,6 +12,10 @@
 #   ./test.sh today
 #   ./test.sh list-txn
 #   ./test.sh expense
+#   ./test.sh workout
+#   ./test.sh note
+#   ./test.sh book
+#   ./test.sh course
 #   ./test.sh notify
 #
 # Requires: curl. `jq` is auto-detected and used for prettier output if present.
@@ -76,15 +80,73 @@ case "$cmd" in
     list-txn)
         api GET /api/v1/fin/txn | pretty
         ;;
+    workout)
+        body='{
+            "occurred_on": "2026-05-10",
+            "kind": "Shortcuts · Test Workout",
+            "program": "API",
+            "duration_m": 30,
+            "load_text": "5km",
+            "strain": "M",
+            "rpe": 7,
+            "notes": "from examples/shortcuts/test.sh"
+        }'
+        api POST /api/v1/fit/workout "$body" | pretty
+        ;;
+    list-workout)
+        api GET /api/v1/fit/workout | pretty
+        ;;
+    note)
+        body='{
+            "title": "Shortcuts · Test Note",
+            "body": "from examples/shortcuts/test.sh"
+        }'
+        api POST /api/v1/lrn/note "$body" | pretty
+        ;;
+    list-note)
+        api GET /api/v1/lrn/note | pretty
+        ;;
+    book)
+        body='{
+            "name": "Shortcuts · Test Book",
+            "author": "Eigenpulse",
+            "status": "reading"
+        }'
+        api POST /api/v1/lrn/book "$body" | pretty
+        ;;
+    list-book)
+        api GET /api/v1/lrn/book | pretty
+        ;;
+    course)
+        body='{
+            "name": "Shortcuts · Test Course",
+            "provider": "Eigenpulse",
+            "progress_pct": 25.0,
+            "due_on": "2026-06-30",
+            "tone": "amber"
+        }'
+        api POST /api/v1/lrn/course "$body" | pretty
+        ;;
+    list-course)
+        api GET /api/v1/lrn/course | pretty
+        ;;
     help|*)
         cat <<EOF
 usage: $0 <subcommand>
 
-  whoami     GET /api/v1/whoami     — verify token + see granted scopes
-  today      GET /api/v1/today      — recent activity feed (needs activity:read)
-  list-txn   GET /api/v1/fin/txn    — last 50 transactions (needs fin:read)
-  expense    POST /api/v1/fin/txn   — create ¥1.00 test expense (needs fin:write)
-  notify     POST /api/v1/notify    — push an info notification (needs notify:write)
+  whoami       GET /api/v1/whoami       — verify token + see granted scopes
+  today        GET /api/v1/today        — recent activity feed (needs activity:read)
+  list-txn     GET /api/v1/fin/txn      — last 50 transactions (needs fin:read)
+  expense      POST /api/v1/fin/txn     — create ¥1.00 test expense (needs fin:write)
+  list-workout GET /api/v1/fit/workout  — last 50 workouts (needs fit:read)
+  workout      POST /api/v1/fit/workout — create a test workout (needs fit:write)
+  list-note    GET /api/v1/lrn/note     — last 50 notes (needs lrn:read)
+  note         POST /api/v1/lrn/note    — create a test note (needs lrn:write)
+  list-book    GET /api/v1/lrn/book     — last 50 books (needs lrn:read)
+  book         POST /api/v1/lrn/book    — create a test book (needs lrn:write)
+  list-course  GET /api/v1/lrn/course   — last 50 courses (needs lrn:read)
+  course       POST /api/v1/lrn/course  — create a test course (needs lrn:write)
+  notify       POST /api/v1/notify      — push an info notification (needs notify:write)
 
 env:
   EP_BASE   = $EP_BASE

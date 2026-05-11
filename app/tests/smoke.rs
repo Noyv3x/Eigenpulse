@@ -21,6 +21,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_eigenpulse");
 struct Server {
     child: Child,
     base: String,
+    db_url: String,
     _data_dir: tempfile::TempDir,
 }
 
@@ -58,6 +59,7 @@ impl Server {
         let server = Self {
             child,
             base,
+            db_url,
             _data_dir: data_dir,
         };
         server.wait_ready();
@@ -66,6 +68,13 @@ impl Server {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
+    }
+
+    fn healthcheck_addr(&self) -> String {
+        self.base
+            .strip_prefix("http://")
+            .unwrap_or(&self.base)
+            .to_string()
     }
 
     fn wait_ready(&self) {
@@ -128,6 +137,23 @@ fn login_and_extract_session_cookie(server: &Server) -> String {
         .to_string()
 }
 
+fn generate_test_pat(server: &Server, scopes: &[&str]) -> String {
+    let db_url = server.db_url.clone();
+    let scopes = scopes.to_vec();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let pool = sqlx::SqlitePool::connect(&db_url).await.unwrap();
+            let (token, _) = ep_auth::generate_pat(&pool, "smoke open api", &scopes, None)
+                .await
+                .unwrap();
+            pool.close().await;
+            token
+        })
+}
+
 #[test]
 fn full_flow() {
     let server = Server::start();
@@ -137,6 +163,18 @@ fn full_flow() {
     let r = client.get(server.url("/healthz")).send().unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().unwrap(), "ok");
+
+    let status = Command::new(BIN)
+        .arg("--healthcheck")
+        .env("LEPTOS_SITE_ADDR", server.healthcheck_addr())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run binary healthcheck");
+    assert!(
+        status.success(),
+        "binary healthcheck should pass against running server"
+    );
 
     // Hydration artifact alias must be present after scripts/leptos-postbuild.sh.
     // Without this file, SSR pages render but the browser silently falls back to
@@ -221,6 +259,27 @@ fn full_flow() {
     assert!(body.contains("Eigenpulse"), "missing brand");
     assert!(body.contains("FIN-K01"), "missing finance KPI code");
 
+    // The in-progress modules should SSR successfully after login. These
+    // checks intentionally use stable component/card codes instead of
+    // localized copy.
+    let r = client.get(server.url("/fitness")).send().unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().unwrap();
+    assert!(body.contains("FIT-K01"), "missing fitness KPI code");
+    assert!(body.contains("FIT-S-NEW"), "missing fitness entry form");
+    assert!(
+        body.contains("FIT-SES-01"),
+        "missing fitness sessions table"
+    );
+
+    let r = client.get(server.url("/learning")).send().unwrap();
+    assert_eq!(r.status(), 200);
+    let body = r.text().unwrap();
+    assert!(body.contains("LRN-K01"), "missing learning KPI code");
+    assert!(body.contains("LRN-BK-01"), "missing learning books card");
+    assert!(body.contains("LRN-N-01"), "missing learning notes card");
+    assert!(body.contains("LRN-CRS-01"), "missing learning courses card");
+
     // Logout is state-changing: GET must not destroy the session.
     let r = client.get(server.url("/logout")).send().unwrap();
     assert_eq!(r.status(), 405);
@@ -243,6 +302,246 @@ fn full_flow() {
         .send()
         .unwrap();
     assert_eq!(r.status(), 401);
+
+    let pat = generate_test_pat(
+        &server,
+        &[
+            ep_core::SCOPE_FIT_READ,
+            ep_core::SCOPE_FIT_WRITE,
+            ep_core::SCOPE_LRN_READ,
+            ep_core::SCOPE_LRN_WRITE,
+        ],
+    );
+
+    let r = client
+        .post(server.url("/api/v1/fit/workout"))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "occurred_on": "2026-05-10",
+            "kind": "Smoke Run",
+            "program": "API",
+            "duration_m": 31,
+            "load_text": "5km",
+            "strain": "M",
+            "rpe": 7,
+            "notes": "created from smoke"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let fit_doc = r
+        .json::<serde_json::Value>()
+        .unwrap()
+        .pointer("/doc_id")
+        .and_then(|v| v.as_str())
+        .expect("fit create doc_id")
+        .to_string();
+    assert!(fit_doc.starts_with("FIT-S-"));
+
+    let r = client
+        .patch(server.url(&format!("/api/v1/fit/workout/{fit_doc}")))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "kind": "Smoke Tempo",
+            "duration_m": 36,
+            "strain": "H"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .get(server.url("/api/v1/fit/workout"))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rows = r.json::<serde_json::Value>().unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |row| row.pointer("/doc_id").and_then(|v| v.as_str()) == Some(&fit_doc)
+                    && row.pointer("/kind").and_then(|v| v.as_str()) == Some("Smoke Tempo")
+            ),
+        "patched fitness workout should be visible in open API list"
+    );
+
+    let r = client
+        .delete(server.url(&format!("/api/v1/fit/workout/{fit_doc}")))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .post(server.url("/api/v1/lrn/note"))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "title": "Smoke note",
+            "body": "created from smoke"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let note_doc = r
+        .json::<serde_json::Value>()
+        .unwrap()
+        .pointer("/doc_id")
+        .and_then(|v| v.as_str())
+        .expect("note create doc_id")
+        .to_string();
+    assert!(note_doc.starts_with("LRN-N-"));
+
+    let r = client
+        .patch(server.url(&format!("/api/v1/lrn/note/{note_doc}")))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "title": "Smoke note revised"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .get(server.url("/api/v1/lrn/note"))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rows = r.json::<serde_json::Value>().unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |row| row.pointer("/doc_id").and_then(|v| v.as_str()) == Some(&note_doc)
+                    && row.pointer("/title").and_then(|v| v.as_str()) == Some("Smoke note revised")
+            ),
+        "patched learning note should be visible in open API list"
+    );
+
+    let r = client
+        .delete(server.url(&format!("/api/v1/lrn/note/{note_doc}")))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .post(server.url("/api/v1/lrn/book"))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "name": "Smoke Book",
+            "author": "Integration",
+            "status": "reading"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let book_doc = r
+        .json::<serde_json::Value>()
+        .unwrap()
+        .pointer("/doc_id")
+        .and_then(|v| v.as_str())
+        .expect("book create doc_id")
+        .to_string();
+    assert!(book_doc.starts_with("LRN-B-"));
+
+    let r = client
+        .patch(server.url(&format!("/api/v1/lrn/book/{book_doc}")))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "status": "done"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .get(server.url("/api/v1/lrn/book"))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rows = r.json::<serde_json::Value>().unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |row| row.pointer("/doc_id").and_then(|v| v.as_str()) == Some(&book_doc)
+                    && row.pointer("/status").and_then(|v| v.as_str()) == Some("done")
+            ),
+        "patched learning book should be visible in open API list"
+    );
+
+    let r = client
+        .delete(server.url(&format!("/api/v1/lrn/book/{book_doc}")))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .post(server.url("/api/v1/lrn/course"))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "name": "Smoke Course",
+            "provider": "Integration",
+            "progress_pct": 25.0,
+            "due_on": "2026-06-30",
+            "tone": "amber"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let course_doc = r
+        .json::<serde_json::Value>()
+        .unwrap()
+        .pointer("/doc_id")
+        .and_then(|v| v.as_str())
+        .expect("course create doc_id")
+        .to_string();
+    assert!(course_doc.starts_with("LRN-C-"));
+
+    let r = client
+        .patch(server.url(&format!("/api/v1/lrn/course/{course_doc}")))
+        .bearer_auth(&pat)
+        .json(&serde_json::json!({
+            "progress_pct": 80.0,
+            "tone": "green"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .get(server.url("/api/v1/lrn/course"))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rows = r.json::<serde_json::Value>().unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |row| row.pointer("/doc_id").and_then(|v| v.as_str()) == Some(&course_doc)
+                    && row.pointer("/progress").and_then(|v| v.as_f64()) == Some(0.8)
+                    && row.pointer("/tone").and_then(|v| v.as_str()) == Some("green")
+            ),
+        "patched learning course should be visible in open API list"
+    );
+
+    let r = client
+        .delete(server.url(&format!("/api/v1/lrn/course/{course_doc}")))
+        .bearer_auth(&pat)
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
 
     let r = client.post(server.url("/logout")).send().unwrap();
     assert_eq!(r.status(), 303);

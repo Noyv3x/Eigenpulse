@@ -2,11 +2,14 @@ mod model;
 mod server_fns;
 mod view;
 
+#[cfg(feature = "ssr")]
+mod api;
+
 pub use view::LearningView;
 
 #[cfg(feature = "ssr")]
 mod ssr_module {
-    use ep_core::Module;
+    use ep_core::{AppState, Module};
 
     pub struct LearningModule;
     pub static MODULE: &dyn Module = &LearningModule;
@@ -26,6 +29,10 @@ mod ssr_module {
                     include_str!("../migrations/002_remove_demo_seed.sql"),
                 ),
             ]
+        }
+
+        fn open_api(&self, state: AppState) -> axum::Router<AppState> {
+            super::api::open_api(state)
         }
     }
 

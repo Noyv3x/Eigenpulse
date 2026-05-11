@@ -10,25 +10,48 @@ use serde::{Deserialize, Serialize};
 pub(crate) const MAX_WORKOUT_KIND_CHARS: usize = 64;
 pub(crate) const MAX_WORKOUT_PROGRAM_CHARS: usize = 128;
 pub(crate) const MAX_WORKOUT_LOAD_TEXT_CHARS: usize = 128;
+pub(crate) const MAX_WORKOUT_NOTES_CHARS: usize = 2_000;
 pub(crate) const MAX_WORKOUT_DURATION_MINUTES: i64 = 24 * 60;
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
-struct WorkoutInput {
-    kind: String,
-    program: Option<String>,
-    load_text: Option<String>,
-    strain: String,
+pub struct AddWorkoutFields {
+    pub occurred_on: String,
+    pub kind: String,
+    pub program: String,
+    pub duration_m: i64,
+    pub load_text: String,
+    pub strain: String,
+    pub rpe: String,
+    pub notes: String,
 }
 
 #[cfg(feature = "ssr")]
-fn normalize_workout_input(
+#[derive(Debug)]
+pub(crate) struct WorkoutInput {
+    pub(crate) occurred_at: Option<i64>,
+    pub(crate) kind: String,
+    pub(crate) program: Option<String>,
+    pub(crate) load_text: Option<String>,
+    pub(crate) strain: String,
+    pub(crate) rpe: Option<i64>,
+    pub(crate) notes: Option<String>,
+}
+
+#[cfg(feature = "ssr")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn normalize_workout_input(
+    occurred_on: &str,
     kind: &str,
     program: &str,
     duration_m: i64,
     load_text: &str,
     strain: &str,
+    rpe: &str,
+    notes: &str,
 ) -> Result<WorkoutInput, ServerFnError> {
+    let occurred_at = normalize_occurred_on(occurred_on)?;
+
     let kind = kind.trim();
     if kind.is_empty() {
         return Err(err("fitness.err.kind_required"));
@@ -81,12 +104,66 @@ fn normalize_workout_input(
         }
     };
 
+    let rpe = ep_core::trim_to_option(rpe)
+        .map(|rpe| {
+            rpe.parse::<i64>()
+                .ok()
+                .filter(|rpe| (1..=10).contains(rpe))
+                .ok_or_else(|| err_with("fitness.err.rpe_invalid", &rpe))
+        })
+        .transpose()?;
+
+    let notes = ep_core::trim_to_option(notes);
+    if notes
+        .as_deref()
+        .is_some_and(|notes| notes.chars().count() > MAX_WORKOUT_NOTES_CHARS)
+    {
+        return Err(err_with(
+            "fitness.err.notes_too_long",
+            MAX_WORKOUT_NOTES_CHARS,
+        ));
+    }
+
     Ok(WorkoutInput {
+        occurred_at,
         kind: kind.to_string(),
         program,
         load_text,
         strain: strain_kind.as_str().to_string(),
+        rpe,
+        notes,
     })
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_occurred_on(occurred_on: &str) -> Result<Option<i64>, ServerFnError> {
+    let Some(occurred_on) = ep_core::trim_to_option(occurred_on) else {
+        return Ok(None);
+    };
+    let mut parts = occurred_on.split('-');
+    let parsed = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(y), Some(m), Some(d), None)
+            if y.len() == 4
+                && m.len() == 2
+                && d.len() == 2
+                && y.chars().all(|c| c.is_ascii_digit())
+                && m.chars().all(|c| c.is_ascii_digit())
+                && d.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            match (y.parse::<i32>(), m.parse::<u8>(), d.parse::<u8>()) {
+                (Ok(year), Ok(month), Ok(day)) => Some((year, month, day)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let Some((year, month, day)) = parsed else {
+        return Err(err_with("fitness.err.date_format", &occurred_on));
+    };
+    ep_core::ymd_to_unix_midnight(year, month, day)
+        .map(|midnight| midnight + 12 * 60 * 60)
+        .map(Some)
+        .ok_or_else(|| err_with("fitness.err.date_format", &occurred_on))
 }
 
 #[cfg(feature = "ssr")]
@@ -431,63 +508,219 @@ mod streak_tests {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[server(AddWorkout, "/api/_internal/fit", "Url", "add_workout")]
 pub async fn add_workout(
+    occurred_on: String,
     kind: String,
     program: String,
     duration_m: i64,
     load_text: String,
     strain: String,
+    rpe: String,
+    notes: String,
 ) -> Result<Workout, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let input = normalize_workout_input(&kind, &program, duration_m, &load_text, &strain)?;
         let st = ep_core::app_state_context()?;
-        let occurred = ep_core::unix_now();
-        let mut tx = st.db.begin().await.map_err(server_err)?;
-        let doc_id = ep_core::next_doc_id(
-            &mut tx,
-            "FIT",
-            ep_core::DocIdShape::TypeSerial4 { kind: "S" },
+        add_workout_inner(
+            &st.db,
+            AddWorkoutFields {
+                occurred_on,
+                kind,
+                program,
+                duration_m,
+                load_text,
+                strain,
+                rpe,
+                notes,
+            },
         )
         .await
-        .map_err(server_err)?;
-        sqlx::query(
-            "INSERT INTO fit_workout (doc_id, occurred_at, kind, program, duration_m, load_text, strain)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-        )
-        .bind(&doc_id).bind(occurred).bind(&input.kind)
-        .bind(&input.program).bind(duration_m).bind(&input.load_text).bind(&input.strain)
-        .execute(&mut *tx).await.map_err(server_err)?;
-        sqlx::query(
-            "INSERT INTO activity (occurred_at, module, doc_id, summary, status)
-             VALUES (?1, 'FIT', ?2, ?3, ?4)",
-        )
-        .bind(occurred)
-        .bind(&doc_id)
-        .bind(&input.kind)
-        .bind(&input.strain)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
-        tx.commit().await.map_err(server_err)?;
-        Ok(Workout {
-            doc_id,
-            occurred_at: occurred,
-            kind: input.kind,
-            program: input.program,
-            duration_m,
-            load_text: input.load_text,
-            strain: Some(input.strain),
-            rpe: None,
-            notes: None,
-        })
     }
     #[cfg(not(feature = "ssr"))]
     {
         Err(server_err("ssr-only"))
     }
+}
+
+#[cfg(feature = "ssr")]
+pub async fn add_workout_inner(
+    pool: &sqlx::SqlitePool,
+    fields: AddWorkoutFields,
+) -> Result<Workout, ServerFnError> {
+    let input = normalize_workout_input(
+        &fields.occurred_on,
+        &fields.kind,
+        &fields.program,
+        fields.duration_m,
+        &fields.load_text,
+        &fields.strain,
+        &fields.rpe,
+        &fields.notes,
+    )?;
+    let occurred = input.occurred_at.unwrap_or_else(ep_core::unix_now);
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let doc_id = ep_core::next_doc_id(
+        &mut tx,
+        "FIT",
+        ep_core::DocIdShape::TypeSerial4 { kind: "S" },
+    )
+    .await
+    .map_err(server_err)?;
+    sqlx::query(
+        "INSERT INTO fit_workout
+            (doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind(&doc_id)
+    .bind(occurred)
+    .bind(&input.kind)
+    .bind(&input.program)
+    .bind(fields.duration_m)
+    .bind(&input.load_text)
+    .bind(&input.strain)
+    .bind(input.rpe)
+    .bind(&input.notes)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    sqlx::query(
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, status)
+         VALUES (?1, 'FIT', ?2, ?3, ?4)",
+    )
+    .bind(occurred)
+    .bind(&doc_id)
+    .bind(&input.kind)
+    .bind(&input.strain)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Workout {
+        doc_id,
+        occurred_at: occurred,
+        kind: input.kind,
+        program: input.program,
+        duration_m: fields.duration_m,
+        load_text: input.load_text,
+        strain: Some(input.strain),
+        rpe: input.rpe,
+        notes: input.notes,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[server(UpdateWorkout, "/api/_internal/fit", "Url", "update_workout")]
+pub async fn update_workout(
+    doc_id: String,
+    occurred_on: String,
+    kind: String,
+    program: String,
+    duration_m: i64,
+    load_text: String,
+    strain: String,
+    rpe: String,
+    notes: String,
+) -> Result<Workout, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let input = normalize_workout_input(
+            &occurred_on,
+            &kind,
+            &program,
+            duration_m,
+            &load_text,
+            &strain,
+            &rpe,
+            &notes,
+        )?;
+        let st = ep_core::app_state_context()?;
+        update_workout_inner(&st.db, &doc_id, input, duration_m).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn update_workout_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+    input: WorkoutInput,
+    duration_m: i64,
+) -> Result<Workout, ServerFnError> {
+    type Row = (
+        String,
+        i64,
+        String,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    );
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let row: Option<Row> = sqlx::query_as(
+        "UPDATE fit_workout
+            SET occurred_at = COALESCE(?1, occurred_at),
+                kind = ?2,
+                program = ?3,
+                duration_m = ?4,
+                load_text = ?5,
+                strain = ?6,
+                rpe = ?7,
+                notes = ?8
+          WHERE doc_id = ?9
+          RETURNING doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes",
+    )
+    .bind(input.occurred_at)
+    .bind(&input.kind)
+    .bind(&input.program)
+    .bind(duration_m)
+    .bind(&input.load_text)
+    .bind(&input.strain)
+    .bind(input.rpe)
+    .bind(&input.notes)
+    .bind(doc_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    let row = match row {
+        Some(row) => row,
+        None => return Err(err_with("fitness.err.workout_not_found", doc_id)),
+    };
+    sqlx::query(
+        "UPDATE activity
+            SET occurred_at = ?1,
+                summary = ?2,
+                status = ?3
+          WHERE module = 'FIT' AND doc_id = ?4",
+    )
+    .bind(row.1)
+    .bind(&row.2)
+    .bind(row.6.as_deref().unwrap_or(""))
+    .bind(doc_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Workout {
+        doc_id: row.0,
+        occurred_at: row.1,
+        kind: row.2,
+        program: row.3,
+        duration_m: row.4,
+        load_text: row.5,
+        strain: row.6,
+        rpe: row.7,
+        notes: row.8,
+    })
 }
 
 #[cfg(all(test, feature = "ssr"))]
@@ -496,47 +729,92 @@ mod tests {
 
     #[test]
     fn normalize_workout_input_trims_fields_and_defaults_blank_strain() {
-        let got = normalize_workout_input("  Run  ", "  Zone 2  ", 45, "  5km  ", "   ").unwrap();
+        let got = normalize_workout_input(
+            "",
+            "  Run  ",
+            "  Zone 2  ",
+            45,
+            "  5km  ",
+            "   ",
+            " 7 ",
+            " ok ",
+        )
+        .unwrap();
+        assert_eq!(got.occurred_at, None);
         assert_eq!(got.kind, "Run");
         assert_eq!(got.program.as_deref(), Some("Zone 2"));
         assert_eq!(got.load_text.as_deref(), Some("5km"));
         assert_eq!(got.strain, "M");
+        assert_eq!(got.rpe, Some(7));
+        assert_eq!(got.notes.as_deref(), Some("ok"));
     }
 
     #[test]
     fn normalize_workout_input_keeps_valid_strain() {
-        let got = normalize_workout_input("Lift", "", 60, "", " H ").unwrap();
+        let got = normalize_workout_input("", "Lift", "", 60, "", " H ", "", "").unwrap();
         assert_eq!(got.program, None);
         assert_eq!(got.load_text, None);
         assert_eq!(got.strain, "H");
+        assert_eq!(got.rpe, None);
+        assert_eq!(got.notes, None);
     }
 
     #[test]
     fn normalize_workout_input_rejects_invalid_values() {
-        assert!(normalize_workout_input("   ", "", 30, "", "M").is_err());
-        assert!(normalize_workout_input("Run", "", 0, "", "M").is_err());
-        assert!(
-            normalize_workout_input("Run", "", MAX_WORKOUT_DURATION_MINUTES + 1, "", "M").is_err()
-        );
-        assert!(normalize_workout_input("Run", "", 30, "", "easy").is_err());
+        assert!(normalize_workout_input("", "   ", "", 30, "", "M", "", "").is_err());
+        assert!(normalize_workout_input("", "Run", "", 0, "", "M", "", "").is_err());
+        assert!(normalize_workout_input(
+            "",
+            "Run",
+            "",
+            MAX_WORKOUT_DURATION_MINUTES + 1,
+            "",
+            "M",
+            "",
+            ""
+        )
+        .is_err());
+        assert!(normalize_workout_input("", "Run", "", 30, "", "easy", "", "").is_err());
+        assert!(normalize_workout_input("", "Run", "", 30, "", "M", "0", "").is_err());
+        assert!(normalize_workout_input("", "Run", "", 30, "", "M", "11", "").is_err());
+        assert!(normalize_workout_input("", "Run", "", 30, "", "M", "hard", "").is_err());
+    }
+
+    #[test]
+    fn normalize_workout_input_accepts_backdated_session_date() {
+        let got = normalize_workout_input("2026-05-08", "Run", "", 30, "", "M", "", "").unwrap();
+        assert_eq!(got.occurred_at, Some(1_778_241_600));
+        assert!(normalize_workout_input("2026/05/08", "Run", "", 30, "", "M", "", "").is_err());
+        assert!(normalize_workout_input("2026-02-31", "Run", "", 30, "", "M", "", "").is_err());
     }
 
     #[test]
     fn normalize_workout_input_enforces_text_lengths() {
-        let kind_err =
-            normalize_workout_input(&"x".repeat(MAX_WORKOUT_KIND_CHARS + 1), "", 30, "", "M")
-                .expect_err("long kind should fail");
+        let kind_err = normalize_workout_input(
+            "",
+            &"x".repeat(MAX_WORKOUT_KIND_CHARS + 1),
+            "",
+            30,
+            "",
+            "M",
+            "",
+            "",
+        )
+        .expect_err("long kind should fail");
         assert_eq!(
             ep_i18n::parse_err(&kind_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("fitness.err.kind_too_long", "64"))
         );
 
         let program_err = normalize_workout_input(
+            "",
             "Run",
             &"x".repeat(MAX_WORKOUT_PROGRAM_CHARS + 1),
             30,
             "",
             "M",
+            "",
+            "",
         )
         .expect_err("long program should fail");
         assert_eq!(
@@ -545,16 +823,35 @@ mod tests {
         );
 
         let load_err = normalize_workout_input(
+            "",
             "Run",
             "",
             30,
             &"x".repeat(MAX_WORKOUT_LOAD_TEXT_CHARS + 1),
             "M",
+            "",
+            "",
         )
         .expect_err("long load text should fail");
         assert_eq!(
             ep_i18n::parse_err(&load_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("fitness.err.load_text_too_long", "128"))
+        );
+
+        let notes_err = normalize_workout_input(
+            "",
+            "Run",
+            "",
+            30,
+            "",
+            "M",
+            "",
+            &"x".repeat(MAX_WORKOUT_NOTES_CHARS + 1),
+        )
+        .expect_err("long notes should fail");
+        assert_eq!(
+            ep_i18n::parse_err(&notes_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
+            Some(("fitness.err.notes_too_long", "2000"))
         );
     }
 
@@ -607,6 +904,9 @@ mod tests {
             "CREATE TABLE activity (
                 module TEXT NOT NULL,
                 doc_id TEXT NOT NULL,
+                occurred_at INTEGER,
+                summary TEXT,
+                status TEXT,
                 link_doc TEXT
             )",
         )
@@ -687,6 +987,50 @@ mod tests {
                 .unwrap();
         assert_eq!(doc_ref, None);
     }
+
+    #[tokio::test]
+    async fn update_workout_inner_updates_workout_and_activity() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO fit_workout
+                (doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes)
+             VALUES ('FIT-S-0001', 1_700_000_000, 'Run', 'Base', 30, '3km', 'L', 5, 'old')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO activity (module, doc_id, occurred_at, summary, status)
+             VALUES ('FIT', 'FIT-S-0001', 1_700_000_000, 'Run', 'L')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let input =
+            normalize_workout_input("2026-05-08", "Lift", "PPL", 55, "10t", "H", "8", "good")
+                .unwrap();
+        let got = update_workout_inner(&pool, "FIT-S-0001", input, 55)
+            .await
+            .expect("update workout");
+
+        assert_eq!(got.kind, "Lift");
+        assert_eq!(got.program.as_deref(), Some("PPL"));
+        assert_eq!(got.duration_m, 55);
+        assert_eq!(got.load_text.as_deref(), Some("10t"));
+        assert_eq!(got.strain.as_deref(), Some("H"));
+        assert_eq!(got.rpe, Some(8));
+        assert_eq!(got.notes.as_deref(), Some("good"));
+        assert_eq!(got.occurred_at, 1_778_241_600);
+
+        let activity: (i64, String, String) = sqlx::query_as(
+            "SELECT occurred_at, summary, status FROM activity WHERE module = 'FIT' AND doc_id = 'FIT-S-0001'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(activity, (1_778_241_600, "Lift".into(), "H".into()));
+    }
 }
 
 #[server(DeleteWorkout, "/api/_internal/fit", "Url", "delete_workout")]
@@ -705,7 +1049,10 @@ pub async fn delete_workout(doc_id: String) -> Result<(), ServerFnError> {
 }
 
 #[cfg(feature = "ssr")]
-async fn delete_workout_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
+pub async fn delete_workout_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+) -> Result<(), ServerFnError> {
     let mut tx = pool.begin().await.map_err(server_err)?;
     let deleted = sqlx::query("DELETE FROM fit_workout WHERE doc_id = ?1")
         .bind(doc_id)

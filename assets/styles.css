@@ -422,6 +422,32 @@ body {
   .fin-op-form [style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
 }
 
+/* Forms and tables must stay usable on phone-width screens. Many module
+   forms define their desktop grid inline so the SSR markup stays compact;
+   this media rule only targets grids inside forms, leaving chart/report grids
+   intact. */
+.card-body form input,
+.card-body form select,
+.card-body form textarea {
+  max-width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .card-body form { width: 100%; }
+  .card-body form [style*="grid-template-columns"] {
+    width: 100%;
+    grid-template-columns: 1fr !important;
+  }
+  .card-body form.hstack { align-items: stretch !important; }
+  .card-body form.hstack input,
+  .card-body form.hstack select,
+  .card-body form.hstack textarea,
+  .card-body form.hstack button {
+    width: 100% !important;
+  }
+}
+
 /* --- KPI tiles --- */
 .kpi-grid {
   display: grid;
@@ -515,6 +541,21 @@ body {
 .tbl .amt-pos { color: var(--primary-ink); font-weight: 500; }
 .tbl .amt-neg { color: var(--ink); font-weight: 500; }
 [data-theme="dark"] .tbl .amt-pos { color: var(--primary); }
+
+@media (max-width: 760px) {
+  .tbl {
+    display: table;
+    max-width: 100%;
+    table-layout: auto;
+    white-space: normal;
+  }
+  .tbl thead th,
+  .tbl tbody td {
+    padding: 8px 6px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
 
 /* --- Layout grids --- */
 .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }

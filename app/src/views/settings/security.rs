@@ -45,6 +45,22 @@ const ALL_SCOPES: &[(&str, &str)] = &[
         "app.settings.security.scope.fin_write",
     ),
     (
+        ep_core::SCOPE_FIT_READ,
+        "app.settings.security.scope.fit_read",
+    ),
+    (
+        ep_core::SCOPE_FIT_WRITE,
+        "app.settings.security.scope.fit_write",
+    ),
+    (
+        ep_core::SCOPE_LRN_READ,
+        "app.settings.security.scope.lrn_read",
+    ),
+    (
+        ep_core::SCOPE_LRN_WRITE,
+        "app.settings.security.scope.lrn_write",
+    ),
+    (
         ep_core::SCOPE_NOTIFY_WRITE,
         "app.settings.security.scope.notify_write",
     ),
@@ -471,7 +487,7 @@ pub fn PatView() -> impl IntoView {
                     </div>
                     <fieldset style="border:1px solid var(--border);border-radius:8px;padding:8px 12px">
                         <legend class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;padding:0 4px">{t(locale, "app.settings.security.field.scopes")}</legend>
-                        <input name="scopes" required placeholder="activity:read fin:read fin:write notify:write" value="activity:read fin:read fin:write notify:write"
+                        <input name="scopes" required placeholder="activity:read fin:read fin:write fit:read fit:write lrn:read lrn:write notify:write" value="activity:read fin:read fin:write fit:read fit:write lrn:read lrn:write notify:write"
                                style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono);font-size:12px"/>
                         <div class="hstack" style="gap:8px;margin-top:8px;flex-wrap:wrap;font-size:11px;color:var(--ink-3)">
                             {ALL_SCOPES.iter().map(|(scope, label_key)| view! {

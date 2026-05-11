@@ -8,20 +8,39 @@ use leptos::server_fn::ServerFnError;
 
 pub(crate) const MAX_BOOK_NAME_CHARS: usize = 128;
 pub(crate) const MAX_BOOK_AUTHOR_CHARS: usize = 128;
+pub(crate) const MAX_COURSE_NAME_CHARS: usize = 128;
+pub(crate) const MAX_COURSE_PROVIDER_CHARS: usize = 128;
 pub(crate) const MAX_NOTE_TITLE_CHARS: usize = 128;
 pub(crate) const MAX_NOTE_BODY_CHARS: usize = 10_000;
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
-struct BookInput {
-    name: String,
-    author: Option<String>,
-    status: String,
-    progress: f64,
+pub struct AddNoteFields {
+    pub title: String,
+    pub body: String,
 }
 
 #[cfg(feature = "ssr")]
-fn normalize_book_input(
+#[derive(Debug)]
+pub(crate) struct BookInput {
+    pub(crate) name: String,
+    pub(crate) author: Option<String>,
+    pub(crate) status: String,
+    pub(crate) progress: f64,
+}
+
+#[cfg(feature = "ssr")]
+#[derive(Debug)]
+pub(crate) struct CourseInput {
+    pub(crate) name: String,
+    pub(crate) provider: Option<String>,
+    pub(crate) progress: f64,
+    pub(crate) due_on: Option<String>,
+    pub(crate) tone: Option<String>,
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) fn normalize_book_input(
     name: &str,
     author: &str,
     status: &str,
@@ -63,13 +82,13 @@ fn normalize_book_input(
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
-struct NoteInput {
-    title: String,
-    body: Option<String>,
+pub(crate) struct NoteInput {
+    pub(crate) title: String,
+    pub(crate) body: Option<String>,
 }
 
 #[cfg(feature = "ssr")]
-fn normalize_note_input(title: &str, body: &str) -> Result<NoteInput, ServerFnError> {
+pub(crate) fn normalize_note_input(title: &str, body: &str) -> Result<NoteInput, ServerFnError> {
     let title = title.trim();
     if title.is_empty() {
         return Err(err("learning.err.title_required"));
@@ -96,6 +115,107 @@ fn normalize_note_input(title: &str, body: &str) -> Result<NoteInput, ServerFnEr
 }
 
 #[cfg(feature = "ssr")]
+pub(crate) fn normalize_course_input(
+    name: &str,
+    provider: &str,
+    progress_pct: f64,
+    due_on: &str,
+    tone: &str,
+) -> Result<CourseInput, ServerFnError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(err("learning.err.course_name_required"));
+    }
+    if name.chars().count() > MAX_COURSE_NAME_CHARS {
+        return Err(err_with(
+            "learning.err.course_name_too_long",
+            MAX_COURSE_NAME_CHARS,
+        ));
+    }
+
+    let provider = ep_core::trim_to_option(provider);
+    if provider
+        .as_deref()
+        .is_some_and(|provider| provider.chars().count() > MAX_COURSE_PROVIDER_CHARS)
+    {
+        return Err(err_with(
+            "learning.err.course_provider_too_long",
+            MAX_COURSE_PROVIDER_CHARS,
+        ));
+    }
+
+    let progress = normalize_progress_pct(progress_pct)?;
+    let due_on = normalize_due_on(due_on)?;
+    let tone = normalize_tone(tone)?;
+
+    Ok(CourseInput {
+        name: name.to_string(),
+        provider,
+        progress,
+        due_on,
+        tone,
+    })
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_progress_pct(progress_pct: f64) -> Result<f64, ServerFnError> {
+    if !progress_pct.is_finite() {
+        return Err(err("learning.err.progress_invalid"));
+    }
+    if !(0.0..=100.0).contains(&progress_pct) {
+        return Err(err("learning.err.progress_invalid"));
+    }
+    Ok(progress_pct / 100.0)
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_due_on(due_on: &str) -> Result<Option<String>, ServerFnError> {
+    let Some(due_on) = ep_core::trim_to_option(due_on) else {
+        return Ok(None);
+    };
+    let mut parts = due_on.split('-');
+    let parsed = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(y), Some(m), Some(d), None)
+            if y.len() == 4
+                && m.len() == 2
+                && d.len() == 2
+                && y.chars().all(|c| c.is_ascii_digit())
+                && m.chars().all(|c| c.is_ascii_digit())
+                && d.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            match (y.parse::<i32>(), m.parse::<u8>(), d.parse::<u8>()) {
+                (Ok(year), Ok(month), Ok(day)) => Some((year, month, day)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let valid = parsed.is_some_and(|(year, month, day)| {
+        ep_core::ymd_to_unix_midnight(year, month, day).is_some()
+    });
+    if valid {
+        Ok(Some(due_on))
+    } else {
+        Err(err_with("learning.err.due_on_invalid", &due_on))
+    }
+}
+
+#[cfg(feature = "ssr")]
+fn normalize_tone(tone: &str) -> Result<Option<String>, ServerFnError> {
+    let Some(tone) = ep_core::trim_to_option(tone) else {
+        return Ok(None);
+    };
+    if ep_core::Tone::parse(&tone) == ep_core::Tone::None && tone != "none" {
+        return Err(err_with("learning.err.tone_invalid", &tone));
+    }
+    if tone == "none" {
+        Ok(None)
+    } else {
+        Ok(Some(tone))
+    }
+}
+
+#[cfg(feature = "ssr")]
 fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
     match ep_core::normalize_doc_id_input(doc_id) {
         Ok(doc_id) => Ok(doc_id),
@@ -104,6 +224,221 @@ fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
             Err(err_with("learning.err.doc_id_invalid", &doc_id))
         }
     }
+}
+
+#[server(AddCourse, "/api/_internal/lrn", "Url", "add_course")]
+pub async fn add_course(
+    name: String,
+    provider: String,
+    progress_pct: f64,
+    due_on: String,
+    tone: String,
+) -> Result<Course, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let st = ep_core::app_state_context()?;
+        let input = normalize_course_input(&name, &provider, progress_pct, &due_on, &tone)?;
+        add_course_inner(&st.db, input).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn add_course_inner(
+    pool: &sqlx::SqlitePool,
+    input: CourseInput,
+) -> Result<Course, ServerFnError> {
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let doc_id = ep_core::next_doc_id(
+        &mut tx,
+        "LRN",
+        ep_core::DocIdShape::TypeSerial4 { kind: "C" },
+    )
+    .await
+    .map_err(server_err)?;
+    sqlx::query(
+        "INSERT INTO lrn_course (doc_id, name, provider, progress, due_on, tone)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&doc_id)
+    .bind(&input.name)
+    .bind(&input.provider)
+    .bind(input.progress)
+    .bind(&input.due_on)
+    .bind(&input.tone)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    sqlx::query(
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, status)
+         VALUES (?1, 'LRN', ?2, ?3, ?4)",
+    )
+    .bind(ep_core::unix_now())
+    .bind(&doc_id)
+    .bind(&input.name)
+    .bind(format!("{:.0}%", input.progress * 100.0))
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Course {
+        doc_id,
+        name: input.name,
+        provider: input.provider,
+        progress: input.progress,
+        due_on: input.due_on,
+        tone: input.tone,
+    })
+}
+
+#[server(
+    UpdateCourseProgress,
+    "/api/_internal/lrn",
+    "Url",
+    "update_course_progress"
+)]
+pub async fn update_course_progress(
+    doc_id: String,
+    progress_pct: f64,
+) -> Result<Course, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let progress = normalize_progress_pct(progress_pct)?;
+        let st = ep_core::app_state_context()?;
+        type CourseRow = (
+            String,
+            String,
+            Option<String>,
+            f64,
+            Option<String>,
+            Option<String>,
+        );
+        let mut tx = st.db.begin().await.map_err(server_err)?;
+        let row: Option<CourseRow> = sqlx::query_as(
+            "UPDATE lrn_course
+                SET progress = ?1
+              WHERE doc_id = ?2 AND archived = 0
+              RETURNING doc_id, name, provider, progress, due_on, tone",
+        )
+        .bind(progress)
+        .bind(&doc_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(server_err)?;
+        let row = match row {
+            Some(row) => row,
+            None => return Err(err_with("learning.err.course_not_found", &doc_id)),
+        };
+        sqlx::query("UPDATE activity SET status = ?1 WHERE module = 'LRN' AND doc_id = ?2")
+            .bind(format!("{:.0}%", progress * 100.0))
+            .bind(&doc_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
+        tx.commit().await.map_err(server_err)?;
+        Ok(Course {
+            doc_id: row.0,
+            name: row.1,
+            provider: row.2,
+            progress: normalize_progress(row.3),
+            due_on: row.4,
+            tone: row.5,
+        })
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
+#[server(UpdateCourse, "/api/_internal/lrn", "Url", "update_course")]
+pub async fn update_course(
+    doc_id: String,
+    name: String,
+    provider: String,
+    progress_pct: f64,
+    due_on: String,
+    tone: String,
+) -> Result<Course, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let input = normalize_course_input(&name, &provider, progress_pct, &due_on, &tone)?;
+        let st = ep_core::app_state_context()?;
+        update_course_inner(&st.db, &doc_id, input).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn update_course_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+    input: CourseInput,
+) -> Result<Course, ServerFnError> {
+    type CourseRow = (
+        String,
+        String,
+        Option<String>,
+        f64,
+        Option<String>,
+        Option<String>,
+    );
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let row: Option<CourseRow> = sqlx::query_as(
+        "UPDATE lrn_course
+            SET name = ?1,
+                provider = ?2,
+                progress = ?3,
+                due_on = ?4,
+                tone = ?5
+          WHERE doc_id = ?6 AND archived = 0
+          RETURNING doc_id, name, provider, progress, due_on, tone",
+    )
+    .bind(&input.name)
+    .bind(&input.provider)
+    .bind(input.progress)
+    .bind(&input.due_on)
+    .bind(&input.tone)
+    .bind(doc_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    let row = match row {
+        Some(row) => row,
+        None => return Err(err_with("learning.err.course_not_found", doc_id)),
+    };
+    sqlx::query(
+        "UPDATE activity
+            SET summary = ?1,
+                status = ?2
+          WHERE module = 'LRN' AND doc_id = ?3",
+    )
+    .bind(&row.1)
+    .bind(format!("{:.0}%", row.3 * 100.0))
+    .bind(doc_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Course {
+        doc_id: row.0,
+        name: row.1,
+        provider: row.2,
+        progress: normalize_progress(row.3),
+        due_on: row.4,
+        tone: row.5,
+    })
 }
 
 #[cfg(feature = "ssr")]
@@ -266,36 +601,128 @@ pub async fn add_book(name: String, author: String, status: String) -> Result<Bo
         ep_auth::require_user_for_server_fn().await?;
         let input = normalize_book_input(&name, &author, &status)?;
         let st = ep_core::app_state_context()?;
-        let mut tx = st.db.begin().await.map_err(server_err)?;
-        let doc_id = ep_core::next_doc_id(
-            &mut tx,
-            "LRN",
-            ep_core::DocIdShape::TypeSerial4 { kind: "B" },
-        )
-        .await
-        .map_err(server_err)?;
-        sqlx::query(
-            "INSERT INTO lrn_book (doc_id, name, author, status, progress) VALUES (?1, ?2, ?3, ?4, ?5)"
-        ).bind(&doc_id).bind(&input.name).bind(&input.author).bind(&input.status).bind(input.progress)
-         .execute(&mut *tx).await.map_err(server_err)?;
-        let occurred = ep_core::unix_now();
-        sqlx::query(
-            "INSERT INTO activity (occurred_at, module, doc_id, summary, status) VALUES (?1, 'LRN', ?2, ?3, ?4)"
-        ).bind(occurred).bind(&doc_id).bind(&input.name).bind(&input.status)
-         .execute(&mut *tx).await.map_err(server_err)?;
-        tx.commit().await.map_err(server_err)?;
-        Ok(Book {
-            doc_id,
-            name: input.name,
-            author: input.author,
-            status: input.status,
-            progress: input.progress,
-        })
+        add_book_inner(&st.db, input).await
     }
     #[cfg(not(feature = "ssr"))]
     {
         Err(server_err("ssr-only"))
     }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn add_book_inner(
+    pool: &sqlx::SqlitePool,
+    input: BookInput,
+) -> Result<Book, ServerFnError> {
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let doc_id = ep_core::next_doc_id(
+        &mut tx,
+        "LRN",
+        ep_core::DocIdShape::TypeSerial4 { kind: "B" },
+    )
+    .await
+    .map_err(server_err)?;
+    sqlx::query(
+        "INSERT INTO lrn_book (doc_id, name, author, status, progress) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&doc_id)
+    .bind(&input.name)
+    .bind(&input.author)
+    .bind(&input.status)
+    .bind(input.progress)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    let occurred = ep_core::unix_now();
+    sqlx::query(
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, status) VALUES (?1, 'LRN', ?2, ?3, ?4)",
+    )
+    .bind(occurred)
+    .bind(&doc_id)
+    .bind(&input.name)
+    .bind(&input.status)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Book {
+        doc_id,
+        name: input.name,
+        author: input.author,
+        status: input.status,
+        progress: input.progress,
+    })
+}
+
+#[server(UpdateBook, "/api/_internal/lrn", "Url", "update_book")]
+pub async fn update_book(
+    doc_id: String,
+    name: String,
+    author: String,
+    status: String,
+) -> Result<Book, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let input = normalize_book_input(&name, &author, &status)?;
+        let st = ep_core::app_state_context()?;
+        update_book_inner(&st.db, &doc_id, input).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn update_book_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+    input: BookInput,
+) -> Result<Book, ServerFnError> {
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let row: Option<(String, String, Option<String>, String, f64)> = sqlx::query_as(
+        "UPDATE lrn_book
+            SET name = ?1,
+                author = ?2,
+                status = ?3,
+                progress = ?4
+          WHERE doc_id = ?5
+          RETURNING doc_id, name, author, status, progress",
+    )
+    .bind(&input.name)
+    .bind(&input.author)
+    .bind(&input.status)
+    .bind(input.progress)
+    .bind(doc_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    let row = match row {
+        Some(row) => row,
+        None => return Err(err_with("learning.err.book_not_found", doc_id)),
+    };
+    sqlx::query(
+        "UPDATE activity
+            SET summary = ?1,
+                status = ?2
+          WHERE module = 'LRN' AND doc_id = ?3",
+    )
+    .bind(&row.1)
+    .bind(&row.3)
+    .bind(doc_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Book {
+        doc_id: row.0,
+        name: row.1,
+        author: row.2,
+        status: row.3,
+        progress: row.4,
+    })
 }
 
 #[server(CycleBookStatus, "/api/_internal/lrn", "Url", "cycle_book_status")]
@@ -364,25 +791,51 @@ pub async fn delete_book(doc_id: String) -> Result<(), ServerFnError> {
     }
 }
 
+#[server(DeleteCourse, "/api/_internal/lrn", "Url", "delete_course")]
+pub async fn delete_course(doc_id: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let st = ep_core::app_state_context()?;
+        delete_course_inner(&st.db, &doc_id).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
 #[server(AddNote, "/api/_internal/lrn", "Url", "add_note")]
 pub async fn add_note(title: String, body: String) -> Result<Note, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
-        let input = normalize_note_input(&title, &body)?;
         let st = ep_core::app_state_context()?;
-        let mut tx = st.db.begin().await.map_err(server_err)?;
-        let doc_id = ep_core::next_doc_id(
-            &mut tx,
-            "LRN",
-            ep_core::DocIdShape::TypeSerial4 { kind: "N" },
-        )
-        .await
-        .map_err(server_err)?;
-        let updated_at = ep_core::unix_now();
-        sqlx::query(
-            "INSERT INTO lrn_note (doc_id, title, body, updated_at) VALUES (?1, ?2, ?3, ?4)",
-        )
+        add_note_inner(&st.db, AddNoteFields { title, body }).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(server_err("ssr-only"))
+    }
+}
+
+#[cfg(feature = "ssr")]
+pub async fn add_note_inner(
+    pool: &sqlx::SqlitePool,
+    fields: AddNoteFields,
+) -> Result<Note, ServerFnError> {
+    let input = normalize_note_input(&fields.title, &fields.body)?;
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let doc_id = ep_core::next_doc_id(
+        &mut tx,
+        "LRN",
+        ep_core::DocIdShape::TypeSerial4 { kind: "N" },
+    )
+    .await
+    .map_err(server_err)?;
+    let updated_at = ep_core::unix_now();
+    sqlx::query("INSERT INTO lrn_note (doc_id, title, body, updated_at) VALUES (?1, ?2, ?3, ?4)")
         .bind(&doc_id)
         .bind(&input.title)
         .bind(&input.body)
@@ -390,22 +843,90 @@ pub async fn add_note(title: String, body: String) -> Result<Note, ServerFnError
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
-        sqlx::query(
-            "INSERT INTO activity (occurred_at, module, doc_id, summary) VALUES (?1, 'LRN', ?2, ?3)"
-        ).bind(updated_at).bind(&doc_id).bind(&input.title)
-         .execute(&mut *tx).await.map_err(server_err)?;
-        tx.commit().await.map_err(server_err)?;
-        Ok(Note {
-            doc_id,
-            title: input.title,
-            body: input.body,
-            updated_at,
-        })
+    sqlx::query(
+        "INSERT INTO activity (occurred_at, module, doc_id, summary) VALUES (?1, 'LRN', ?2, ?3)",
+    )
+    .bind(updated_at)
+    .bind(&doc_id)
+    .bind(&input.title)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Note {
+        doc_id,
+        title: input.title,
+        body: input.body,
+        updated_at,
+    })
+}
+
+#[server(UpdateNote, "/api/_internal/lrn", "Url", "update_note")]
+pub async fn update_note(
+    doc_id: String,
+    title: String,
+    body: String,
+) -> Result<Note, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let doc_id = normalize_doc_id(&doc_id)?;
+        let input = normalize_note_input(&title, &body)?;
+        let st = ep_core::app_state_context()?;
+        update_note_inner(&st.db, &doc_id, input).await
     }
     #[cfg(not(feature = "ssr"))]
     {
         Err(server_err("ssr-only"))
     }
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn update_note_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+    input: NoteInput,
+) -> Result<Note, ServerFnError> {
+    let updated_at = ep_core::unix_now();
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let row: Option<(String, String, Option<String>, i64)> = sqlx::query_as(
+        "UPDATE lrn_note
+            SET title = ?1,
+                body = ?2,
+                updated_at = ?3
+          WHERE doc_id = ?4
+          RETURNING doc_id, title, body, updated_at",
+    )
+    .bind(&input.title)
+    .bind(&input.body)
+    .bind(updated_at)
+    .bind(doc_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    let row = match row {
+        Some(row) => row,
+        None => return Err(err_with("learning.err.note_not_found", doc_id)),
+    };
+    sqlx::query(
+        "UPDATE activity
+            SET occurred_at = ?1,
+                summary = ?2
+          WHERE module = 'LRN' AND doc_id = ?3",
+    )
+    .bind(row.3)
+    .bind(&row.1)
+    .bind(doc_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Note {
+        doc_id: row.0,
+        title: row.1,
+        body: row.2,
+        updated_at: row.3,
+    })
 }
 
 #[cfg(all(test, feature = "ssr"))]
@@ -483,6 +1004,28 @@ mod tests {
     }
 
     #[test]
+    fn normalize_course_input_trims_and_converts_progress() {
+        let got = normalize_course_input("  Rust  ", "  Book  ", 42.5, " 2026-07-15 ", " blue ")
+            .expect("valid course");
+        assert_eq!(got.name, "Rust");
+        assert_eq!(got.provider.as_deref(), Some("Book"));
+        assert_eq!(got.progress, 0.425);
+        assert_eq!(got.due_on.as_deref(), Some("2026-07-15"));
+        assert_eq!(got.tone.as_deref(), Some("blue"));
+    }
+
+    #[test]
+    fn normalize_course_input_rejects_invalid_values() {
+        assert!(normalize_course_input("   ", "", 10.0, "", "").is_err());
+        assert!(normalize_course_input("Course", "", -1.0, "", "").is_err());
+        assert!(normalize_course_input("Course", "", 101.0, "", "").is_err());
+        assert!(normalize_course_input("Course", "", f64::NAN, "", "").is_err());
+        assert!(normalize_course_input("Course", "", 10.0, "2026/07/15", "").is_err());
+        assert!(normalize_course_input("Course", "", 10.0, "2026-02-31", "").is_err());
+        assert!(normalize_course_input("Course", "", 10.0, "", "cyan").is_err());
+    }
+
+    #[test]
     fn normalize_doc_id_trims_and_rejects_blank() {
         assert_eq!(normalize_doc_id("  LRN-B-0001  ").unwrap(), "LRN-B-0001");
         assert!(normalize_doc_id("   ").is_err());
@@ -536,6 +1079,20 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
+            "CREATE TABLE lrn_course (
+                doc_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT,
+                progress REAL NOT NULL DEFAULT 0,
+                due_on TEXT,
+                tone TEXT,
+                archived INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "CREATE TABLE module_link (
                 source_doc TEXT NOT NULL,
                 target_doc TEXT NOT NULL,
@@ -550,6 +1107,9 @@ mod tests {
             "CREATE TABLE activity (
                 module TEXT NOT NULL,
                 doc_id TEXT NOT NULL,
+                occurred_at INTEGER,
+                summary TEXT,
+                status TEXT,
                 link_doc TEXT
             )",
         )
@@ -677,6 +1237,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_book_inner_updates_book_and_activity() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO lrn_book (doc_id, name, author, status, progress)
+             VALUES ('LRN-B-0001', 'Old', 'A', 'todo', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO activity (module, doc_id, summary, status)
+             VALUES ('LRN', 'LRN-B-0001', 'Old', 'todo')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let input = normalize_book_input(" New ", " B ", "done").unwrap();
+        let got = update_book_inner(&pool, "LRN-B-0001", input)
+            .await
+            .expect("update book");
+
+        assert_eq!(got.name, "New");
+        assert_eq!(got.author.as_deref(), Some("B"));
+        assert_eq!(got.status, "done");
+        assert_eq!(got.progress, 1.0);
+
+        let activity: (String, String) = sqlx::query_as(
+            "SELECT summary, status FROM activity WHERE module = 'LRN' AND doc_id = 'LRN-B-0001'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(activity, ("New".into(), "done".into()));
+    }
+
+    #[tokio::test]
     async fn delete_note_inner_clears_external_references() {
         let pool = ref_cleanup_pool().await;
         sqlx::query(
@@ -699,6 +1296,119 @@ mod tests {
         assert_eq!(notes, 0);
         assert_external_refs_cleared(&pool, "LRN-N-0001").await;
     }
+
+    #[tokio::test]
+    async fn delete_course_inner_clears_note_course_references_and_external_refs() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO lrn_course (doc_id, name, progress)
+             VALUES ('LRN-C-0001', 'Course', 0.4)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO lrn_note (doc_id, title, course_doc, updated_at)
+             VALUES ('LRN-N-0001', 'Note', 'LRN-C-0001', 1_700_000_000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_external_refs(&pool, "LRN-C-0001").await;
+
+        delete_course_inner(&pool, "LRN-C-0001")
+            .await
+            .expect("delete course");
+
+        let courses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lrn_course")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(courses, 0);
+        let course_doc: Option<String> =
+            sqlx::query_scalar("SELECT course_doc FROM lrn_note WHERE doc_id = 'LRN-N-0001'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(course_doc, None);
+        assert_external_refs_cleared(&pool, "LRN-C-0001").await;
+    }
+
+    #[tokio::test]
+    async fn update_course_inner_updates_course_and_activity() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO lrn_course (doc_id, name, provider, progress, due_on, tone)
+             VALUES ('LRN-C-0001', 'Old', 'Provider A', 0.2, '2026-05-01', 'blue')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO activity (module, doc_id, summary, status)
+             VALUES ('LRN', 'LRN-C-0001', 'Old', '20%')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let input =
+            normalize_course_input("New", "Provider B", 75.0, "2026-06-30", "green").unwrap();
+        let got = update_course_inner(&pool, "LRN-C-0001", input)
+            .await
+            .expect("update course");
+
+        assert_eq!(got.name, "New");
+        assert_eq!(got.provider.as_deref(), Some("Provider B"));
+        assert_eq!(got.progress, 0.75);
+        assert_eq!(got.due_on.as_deref(), Some("2026-06-30"));
+        assert_eq!(got.tone.as_deref(), Some("green"));
+
+        let activity: (String, String) = sqlx::query_as(
+            "SELECT summary, status FROM activity WHERE module = 'LRN' AND doc_id = 'LRN-C-0001'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(activity, ("New".into(), "75%".into()));
+    }
+
+    #[tokio::test]
+    async fn update_note_inner_updates_note_and_activity() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO lrn_note (doc_id, title, body, updated_at)
+             VALUES ('LRN-N-0001', 'Old', 'old body', 1_700_000_000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO activity (module, doc_id, occurred_at, summary)
+             VALUES ('LRN', 'LRN-N-0001', 1_700_000_000, 'Old')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let input = normalize_note_input("  New  ", "  new body  ").unwrap();
+        let got = update_note_inner(&pool, "LRN-N-0001", input)
+            .await
+            .expect("update note");
+
+        assert_eq!(got.title, "New");
+        assert_eq!(got.body.as_deref(), Some("new body"));
+        assert!(got.updated_at >= 1_700_000_000);
+
+        let activity: (String, i64) = sqlx::query_as(
+            "SELECT summary, occurred_at FROM activity WHERE module = 'LRN' AND doc_id = 'LRN-N-0001'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(activity.0, "New");
+        assert_eq!(activity.1, got.updated_at);
+    }
 }
 
 #[server(DeleteNote, "/api/_internal/lrn", "Url", "delete_note")]
@@ -717,19 +1427,31 @@ pub async fn delete_note(doc_id: String) -> Result<(), ServerFnError> {
 }
 
 #[cfg(feature = "ssr")]
-async fn delete_book_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
+pub(crate) async fn delete_book_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+) -> Result<(), ServerFnError> {
     delete_learning_doc_inner(pool, LearningDocKind::Book, doc_id).await
 }
 
 #[cfg(feature = "ssr")]
-async fn delete_note_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
+pub async fn delete_note_inner(pool: &sqlx::SqlitePool, doc_id: &str) -> Result<(), ServerFnError> {
     delete_learning_doc_inner(pool, LearningDocKind::Note, doc_id).await
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) async fn delete_course_inner(
+    pool: &sqlx::SqlitePool,
+    doc_id: &str,
+) -> Result<(), ServerFnError> {
+    delete_learning_doc_inner(pool, LearningDocKind::Course, doc_id).await
 }
 
 #[cfg(feature = "ssr")]
 #[derive(Clone, Copy)]
 enum LearningDocKind {
     Book,
+    Course,
     Note,
 }
 
@@ -738,6 +1460,7 @@ impl LearningDocKind {
     fn delete_sql(self) -> &'static str {
         match self {
             Self::Book => "DELETE FROM lrn_book WHERE doc_id = ?1",
+            Self::Course => "DELETE FROM lrn_course WHERE doc_id = ?1",
             Self::Note => "DELETE FROM lrn_note WHERE doc_id = ?1",
         }
     }
@@ -745,6 +1468,7 @@ impl LearningDocKind {
     fn not_found_key(self) -> &'static str {
         match self {
             Self::Book => "learning.err.book_not_found",
+            Self::Course => "learning.err.course_not_found",
             Self::Note => "learning.err.note_not_found",
         }
     }
@@ -759,6 +1483,13 @@ async fn delete_learning_doc_inner(
     let mut tx = pool.begin().await.map_err(server_err)?;
     if matches!(kind, LearningDocKind::Book) {
         sqlx::query("UPDATE lrn_note SET book_doc = NULL WHERE book_doc = ?1")
+            .bind(doc_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    }
+    if matches!(kind, LearningDocKind::Course) {
+        sqlx::query("UPDATE lrn_note SET course_doc = NULL WHERE course_doc = ?1")
             .bind(doc_id)
             .execute(&mut *tx)
             .await

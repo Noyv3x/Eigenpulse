@@ -27,6 +27,10 @@ in an example PAT that immediately becomes a phishing risk.
    - `activity:read` — read the cross-module Today feed
    - `fin:read` — list recent Finance transactions
    - `fin:write` — record expenses / income
+   - `fit:read` — list recent Fitness workouts
+   - `fit:write` — record workouts
+   - `lrn:read` — list recent Learning notes
+   - `lrn:write` — record notes
    - `notify:write` — push notifications
    - `*` only if you want one token to do everything (less safe)
 4. **Copy the token shown** (`ep_pat_…`). Eigenpulse stores only a SHA-256
@@ -47,6 +51,14 @@ export EP_CATEGORY_CODE='YOUR_CATEGORY_CODE'   # existing Finance category
 ./test.sh today         # reads the Today feed
 ./test.sh list-txn      # lists recent Finance transactions
 ./test.sh expense       # posts a small test expense
+./test.sh list-workout  # lists recent Fitness workouts
+./test.sh workout       # records a small test workout
+./test.sh list-note     # lists recent Learning notes
+./test.sh note          # creates a test Learning note
+./test.sh list-book     # lists Learning books
+./test.sh book          # creates a test Learning book
+./test.sh list-course   # lists active Learning courses
+./test.sh course        # creates a test Learning course
 ./test.sh notify        # pushes a test notification
 ```
 
@@ -114,6 +126,48 @@ Returns `200 { "doc_id": "FIN-26092" }`.
 If the amount is below `-500.0` the server also fans out a "大额支出"
 notification through every enabled channel — useful for "did I really mean to
 swipe this" auditing.
+
+### `POST /api/v1/fit/workout` — record a workout
+
+Required scope: `fit:write` (for read use `fit:read`).
+
+```jsonc
+{
+  "occurred_on": "2026-05-10",      // optional YYYY-MM-DD; blank = now
+  "kind":        "Strength · Push", // required
+  "program":     "PPL-5D",          // optional
+  "duration_m":  60,                // required, 1..1440
+  "load_text":   "7,840kg",         // optional
+  "strain":      "M",               // optional L | M | H, default M
+  "rpe":         7,                 // optional 1..10
+  "notes":       "felt good"        // optional
+}
+```
+
+Returns `200 { "doc_id": "FIT-S-0413" }`. Use
+`PATCH /api/v1/fit/workout/{doc_id}` to update any subset of fields and
+`DELETE /api/v1/fit/workout/{doc_id}` to delete it.
+
+### Learning endpoints — notes, books, courses
+
+Required scopes: `lrn:write` for writes, `lrn:read` for lists.
+
+```jsonc
+// POST /api/v1/lrn/note
+{ "title": "Cache modes", "body": "write-through vs write-back" }
+
+// POST /api/v1/lrn/book
+{ "name": "Designing Data-Intensive Apps", "author": "Kleppmann", "status": "reading" }
+
+// POST /api/v1/lrn/course
+{ "name": "Rust", "provider": "Book", "progress_pct": 25.0, "due_on": "2026-06-30", "tone": "amber" }
+```
+
+Each create endpoint returns `200 { "doc_id": "LRN-..." }`. The corresponding
+`GET /api/v1/lrn/{note|book|course}` endpoints return the latest 50 rows;
+`PATCH /api/v1/lrn/{note|book|course}/{doc_id}` updates any subset of fields;
+`DELETE /api/v1/lrn/{note|book|course}/{doc_id}` removes the row and clears
+cross-module references.
 
 ### `POST /api/v1/notify` — push a notification
 

@@ -159,7 +159,8 @@ struct PatchTxnInput {
     pub category_code: Option<String>,
     pub account_code: Option<String>,
     pub amount: Option<f64>,
-    pub note: Option<String>,
+    #[serde(default, deserialize_with = "ep_core::deserialize_nullable_patch")]
+    pub note: Option<Option<String>>,
     pub occurred_at: Option<String>,
 }
 
@@ -191,11 +192,9 @@ async fn patch_txn(
             &doc_id,
         )));
     };
-    // For optional text fields we can't tell "field omitted" from
-    // "field set to null" in this JSON shape. Convention: missing/null keeps
-    // current value; blank/whitespace clears note=NULL.
     let new_note: Option<String> = match input.note {
-        Some(s) => Some(s),
+        Some(Some(s)) => Some(s),
+        Some(None) => None,
         None => cn,
     };
     let fields = UpdateTxnFields {
@@ -645,6 +644,21 @@ fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_txn_note_distinguishes_omitted_null_and_value() {
+        let omitted: PatchTxnInput =
+            serde_json::from_value(serde_json::json!({})).expect("omitted note should deserialize");
+        assert_eq!(omitted.note, None);
+
+        let cleared: PatchTxnInput = serde_json::from_value(serde_json::json!({"note": null}))
+            .expect("null note should deserialize");
+        assert_eq!(cleared.note, Some(None));
+
+        let replaced: PatchTxnInput = serde_json::from_value(serde_json::json!({"note": "memo"}))
+            .expect("string note should deserialize");
+        assert_eq!(replaced.note, Some(Some("memo".into())));
+    }
 
     #[test]
     fn i18n_server_errors_map_to_api_statuses_and_messages() {

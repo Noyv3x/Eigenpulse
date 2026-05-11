@@ -62,4 +62,6 @@ ENV LEPTOS_OUTPUT_NAME=eigenpulse \
 VOLUME ["/data"]
 EXPOSE 3000
 USER nonroot:nonroot
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/app/eigenpulse", "--healthcheck"]
 ENTRYPOINT ["/app/eigenpulse"]

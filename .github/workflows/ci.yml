@@ -184,14 +184,16 @@ jobs:
             -e EP_ADMIN_PASSWORD='ci-test-pw' \
             eigenpulse:ci
           for i in $(seq 1 20); do
-            if curl -fsS -m 2 http://127.0.0.1:3000/healthz > /dev/null; then
-              echo "healthz OK on attempt $i"
+            status="$(docker inspect -f '{{.State.Health.Status}}' ep-ci 2>/dev/null || true)"
+            if [ "$status" = "healthy" ] && curl -fsS -m 2 http://127.0.0.1:3000/healthz > /dev/null; then
+              echo "container healthcheck and host /healthz OK on attempt $i"
               docker rm -f ep-ci
               exit 0
             fi
             sleep 1
           done
-          echo "healthz never came up"
+          echo "container healthcheck never became healthy"
+          docker inspect -f '{{json .State.Health}}' ep-ci || true
           docker logs ep-ci || true
           docker rm -f ep-ci
           exit 1

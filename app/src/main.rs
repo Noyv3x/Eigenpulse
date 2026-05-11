@@ -12,7 +12,10 @@ use axum::{
 use ep_core::{AppState, ModuleRegistry};
 use leptos::prelude::*;
 use leptos_axum::{generate_route_list, LeptosRoutes};
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
@@ -23,6 +26,14 @@ struct Assets;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::args().any(|arg| arg == "--healthcheck") {
+        if let Err(e) = run_healthcheck() {
+            eprintln!("healthcheck failed: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -129,6 +140,49 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_healthcheck() -> anyhow::Result<()> {
+    let addr = healthcheck_addr(std::env::var("LEPTOS_SITE_ADDR").ok().as_deref());
+    let mut last_err = None;
+    for socket in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&socket, Duration::from_secs(2)) {
+            Ok(mut stream) => {
+                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                stream.write_all(
+                    b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )?;
+                let mut buf = [0u8; 128];
+                let n = stream.read(&mut buf)?;
+                let status = std::str::from_utf8(&buf[..n]).unwrap_or_default();
+                if status.starts_with("HTTP/1.1 200") || status.starts_with("HTTP/1.0 200") {
+                    return Ok(());
+                }
+                anyhow::bail!("unexpected /healthz response: {status:?}");
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(match last_err {
+        Some(e) => anyhow::anyhow!("failed to connect to {addr}: {e}"),
+        None => anyhow::anyhow!("failed to resolve healthcheck address {addr}"),
+    })
+}
+
+fn healthcheck_addr(raw: Option<&str>) -> String {
+    let raw = raw.unwrap_or("127.0.0.1:3000").trim();
+    if let Some(port) = raw.strip_prefix("0.0.0.0:") {
+        return format!("127.0.0.1:{port}");
+    }
+    if let Some(port) = raw.strip_prefix("[::]:") {
+        return format!("127.0.0.1:{port}");
+    }
+    if raw.is_empty() {
+        "127.0.0.1:3000".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 async fn shutdown_signal() {
     use tokio::signal;
     let ctrl_c = async {
@@ -225,7 +279,12 @@ fn normalize_secret(value: &str, source: &str) -> anyhow::Result<String> {
 
 fn static_cache_control(path: &str) -> &'static str {
     match path {
-        "sw.js" | "static/sw.js" | "theme-init.js" | "static/theme-init.js" => "no-cache",
+        "sw.js"
+        | "static/sw.js"
+        | "theme-init.js"
+        | "static/theme-init.js"
+        | "styles.css"
+        | "static/styles.css" => "no-cache",
         _ => "public, max-age=86400",
     }
 }
@@ -317,6 +376,21 @@ mod tests {
         assert_eq!(super::explicit_secret_value(&secret), Some(secret.as_str()));
     }
 
+    #[test]
+    fn healthcheck_addr_targets_loopback_for_bind_all_addresses() {
+        assert_eq!(super::healthcheck_addr(None), "127.0.0.1:3000");
+        assert_eq!(super::healthcheck_addr(Some("")), "127.0.0.1:3000");
+        assert_eq!(
+            super::healthcheck_addr(Some("0.0.0.0:3000")),
+            "127.0.0.1:3000"
+        );
+        assert_eq!(super::healthcheck_addr(Some("[::]:3000")), "127.0.0.1:3000");
+        assert_eq!(
+            super::healthcheck_addr(Some("127.0.0.1:4000")),
+            "127.0.0.1:4000"
+        );
+    }
+
     #[tokio::test]
     async fn read_stored_secret_treats_missing_file_as_unset() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -393,7 +467,8 @@ mod tests {
         assert_eq!(static_cache_control("static/sw.js"), "no-cache");
         assert_eq!(static_cache_control("theme-init.js"), "no-cache");
         assert_eq!(static_cache_control("static/theme-init.js"), "no-cache");
-        assert_eq!(static_cache_control("styles.css"), "public, max-age=86400");
+        assert_eq!(static_cache_control("styles.css"), "no-cache");
+        assert_eq!(static_cache_control("static/styles.css"), "no-cache");
     }
 
     #[test]
@@ -460,5 +535,31 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("no-cache")
         );
+    }
+
+    #[tokio::test]
+    async fn static_handler_serves_css_as_revalidating_asset() {
+        let response = static_handler("/static/styles.css".parse::<Uri>().unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
+    }
+
+    #[tokio::test]
+    async fn service_worker_fetches_css_network_first() {
+        let response = static_handler("/static/sw.js".parse::<Uri>().unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read sw body");
+        let body = std::str::from_utf8(&body).expect("sw body should be utf8");
+        assert!(!body.contains("'/static/styles.css',"));
+        assert!(body.contains("url.pathname === '/static/styles.css'"));
+        assert!(body.contains("fetch(req).then((res)"));
     }
 }

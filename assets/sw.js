@@ -1,9 +1,8 @@
 // Eigenpulse service worker: cache immutable-ish static assets only.
 // Authenticated HTML must always go to the network so logout/session changes
 // cannot show a stale SSR snapshot.
-const CACHE = 'ep-v0.1.4';
+const CACHE = 'ep-v0.1.5';
 const PRECACHE_ASSETS = [
-  '/static/styles.css',
   '/static/favicon.svg',
   '/static/manifest.webmanifest',
 ];
@@ -33,6 +32,21 @@ self.addEventListener('fetch', (event) => {
   // theme-init.js must track the current server bundle. It runs before
   // hydration to prevent FOUC, so stale cached code is worse than a network hit.
   if (url.pathname === '/static/theme-init.js') {
+    return;
+  }
+  // CSS is embedded in the server binary and is part of the active UI bundle.
+  // Use network-first so a deployment never renders one full visit with stale
+  // layout rules from the previous service-worker cache.
+  if (url.pathname === '/static/styles.css') {
+    event.respondWith(
+      fetch(req).then((res) => {
+        if (res.ok) {
+          const clone = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, clone));
+        }
+        return res;
+      }).catch(() => caches.match(req))
+    );
     return;
   }
   // Hydration assets use stable cargo-leptos filenames, so cache-first would

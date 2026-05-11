@@ -1,0 +1,508 @@
+use crate::model::Workout;
+use crate::server_fns::{
+    add_workout_inner, delete_workout_inner, normalize_workout_input, update_workout_inner,
+    AddWorkoutFields,
+};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::Response;
+use axum::routing::{get, patch};
+use axum::{Extension, Json, Router};
+use ep_auth::{require_scope, AuthPat};
+use ep_core::{ApiJson, AppState};
+use leptos::server_fn::ServerFnError;
+use serde::{Deserialize, Serialize};
+
+pub fn open_api(_state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/workout", get(list_workouts).post(post_workout))
+        .route(
+            "/workout/:doc_id",
+            patch(patch_workout).delete(delete_workout),
+        )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkoutInput {
+    pub occurred_on: Option<String>,
+    pub kind: String,
+    pub program: Option<String>,
+    pub duration_m: i64,
+    pub load_text: Option<String>,
+    pub strain: Option<String>,
+    pub rpe: Option<i64>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkoutCreated {
+    pub doc_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkoutDeleted {
+    pub doc_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchWorkoutInput {
+    pub occurred_on: Option<String>,
+    pub kind: Option<String>,
+    #[serde(default, deserialize_with = "ep_core::deserialize_nullable_patch")]
+    pub program: Option<Option<String>>,
+    pub duration_m: Option<i64>,
+    #[serde(default, deserialize_with = "ep_core::deserialize_nullable_patch")]
+    pub load_text: Option<Option<String>>,
+    pub strain: Option<String>,
+    #[serde(default, deserialize_with = "ep_core::deserialize_nullable_patch")]
+    pub rpe: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "ep_core::deserialize_nullable_patch")]
+    pub notes: Option<Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkoutUpdated {
+    pub doc_id: String,
+}
+
+type WorkoutListRow = (
+    String,
+    i64,
+    String,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+);
+
+async fn post_workout(
+    State(state): State<AppState>,
+    Extension(pat): Extension<AuthPat>,
+    ApiJson(input): ApiJson<WorkoutInput>,
+) -> Result<Json<WorkoutCreated>, Response> {
+    require_scope(&pat, ep_core::SCOPE_FIT_WRITE)?;
+    let workout = add_workout_inner(
+        &state.db,
+        AddWorkoutFields {
+            occurred_on: input.occurred_on.unwrap_or_default(),
+            kind: input.kind,
+            program: input.program.unwrap_or_default(),
+            duration_m: input.duration_m,
+            load_text: input.load_text.unwrap_or_default(),
+            strain: input.strain.unwrap_or_default(),
+            rpe: input.rpe.map(|rpe| rpe.to_string()).unwrap_or_default(),
+            notes: input.notes.unwrap_or_default(),
+        },
+    )
+    .await
+    .map_err(server_err_to_response)?;
+
+    Ok(Json(WorkoutCreated {
+        doc_id: workout.doc_id,
+    }))
+}
+
+async fn list_workouts(
+    State(state): State<AppState>,
+    Extension(pat): Extension<AuthPat>,
+) -> Result<Json<Vec<Workout>>, Response> {
+    require_scope(&pat, ep_core::SCOPE_FIT_READ)?;
+    let rows: Vec<WorkoutListRow> = sqlx::query_as(
+        "SELECT doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes
+           FROM fit_workout ORDER BY occurred_at DESC LIMIT 50",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_err_response)?;
+    let workouts = rows
+        .into_iter()
+        .map(|r| Workout {
+            doc_id: r.0,
+            occurred_at: r.1,
+            kind: r.2,
+            program: r.3,
+            duration_m: r.4,
+            load_text: r.5,
+            strain: r.6,
+            rpe: r.7,
+            notes: r.8,
+        })
+        .collect();
+    Ok(Json(workouts))
+}
+
+async fn delete_workout(
+    State(state): State<AppState>,
+    Extension(pat): Extension<AuthPat>,
+    Path(doc_id): Path<String>,
+) -> Result<Json<WorkoutDeleted>, Response> {
+    require_scope(&pat, ep_core::SCOPE_FIT_WRITE)?;
+    let doc_id = ep_core::normalize_doc_id_input(&doc_id)
+        .map_err(|e| match e {
+            ep_core::DocIdInputError::Required => ep_i18n::err("fitness.err.doc_id_required"),
+            ep_core::DocIdInputError::Invalid(doc_id) => {
+                ep_i18n::err_with("fitness.err.doc_id_invalid", &doc_id)
+            }
+        })
+        .map_err(server_err_to_response)?;
+    delete_workout_inner(&state.db, &doc_id)
+        .await
+        .map_err(server_err_to_response)?;
+    Ok(Json(WorkoutDeleted { doc_id }))
+}
+
+async fn patch_workout(
+    State(state): State<AppState>,
+    Extension(pat): Extension<AuthPat>,
+    Path(doc_id): Path<String>,
+    ApiJson(input): ApiJson<PatchWorkoutInput>,
+) -> Result<Json<WorkoutUpdated>, Response> {
+    require_scope(&pat, ep_core::SCOPE_FIT_WRITE)?;
+    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let cur: Option<WorkoutListRow> = sqlx::query_as(
+        "SELECT doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes
+           FROM fit_workout WHERE doc_id = ?1",
+    )
+    .bind(&doc_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_err_response)?;
+    let Some(cur) = cur else {
+        return Err(server_err_to_response(ep_i18n::err_with(
+            "fitness.err.workout_not_found",
+            &doc_id,
+        )));
+    };
+    let kind = input.kind.unwrap_or(cur.2);
+    let program = patch_nullable_string(input.program, cur.3);
+    let duration_m = input.duration_m.unwrap_or(cur.4);
+    let load_text = patch_nullable_string(input.load_text, cur.5);
+    let strain = input.strain.or(cur.6).unwrap_or_default();
+    let rpe = patch_nullable_i64(input.rpe, cur.7);
+    let notes = patch_nullable_string(input.notes, cur.8);
+    let occurred_on = input.occurred_on.unwrap_or_default();
+    let normalized = normalize_workout_input(
+        &occurred_on,
+        &kind,
+        &program,
+        duration_m,
+        &load_text,
+        &strain,
+        &rpe,
+        &notes,
+    )
+    .map_err(server_err_to_response)?;
+    update_workout_inner(&state.db, &doc_id, normalized, duration_m)
+        .await
+        .map_err(server_err_to_response)?;
+    Ok(Json(WorkoutUpdated { doc_id }))
+}
+
+fn patch_nullable_string(input: Option<Option<String>>, current: Option<String>) -> String {
+    match input {
+        Some(Some(value)) => value,
+        Some(None) => String::new(),
+        None => current.unwrap_or_default(),
+    }
+}
+
+fn patch_nullable_i64(input: Option<Option<i64>>, current: Option<i64>) -> String {
+    match input {
+        Some(Some(value)) => value.to_string(),
+        Some(None) => String::new(),
+        None => current.map(|value| value.to_string()).unwrap_or_default(),
+    }
+}
+
+fn normalize_api_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
+    ep_core::normalize_doc_id_input(doc_id).map_err(|e| match e {
+        ep_core::DocIdInputError::Required => ep_i18n::err("fitness.err.doc_id_required"),
+        ep_core::DocIdInputError::Invalid(doc_id) => {
+            ep_i18n::err_with("fitness.err.doc_id_invalid", &doc_id)
+        }
+    })
+}
+
+fn server_err_to_response(e: ServerFnError) -> Response {
+    if let ServerFnError::Args(msg) = &e {
+        if let Some((code, payload)) = ep_i18n::parse_err(&e) {
+            return error_json(
+                status_for_i18n_error(code),
+                code,
+                &message_for_i18n_error(code, payload),
+            );
+        }
+        return error_json(StatusCode::BAD_REQUEST, "bad_request", msg);
+    }
+    tracing::warn!(error = %e, "fit api helper error");
+    error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "database error",
+    )
+}
+
+fn status_for_i18n_error(code: &str) -> StatusCode {
+    if code.ends_with("_not_found") {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
+fn message_for_i18n_error(code: &str, payload: Option<&str>) -> String {
+    match payload {
+        Some(payload) => ep_i18n::tf(ep_i18n::Locale::En, code, &[("payload", payload)]),
+        None => ep_i18n::t(ep_i18n::Locale::En, code).to_string(),
+    }
+}
+
+fn db_err_response<E: std::fmt::Display>(e: E) -> Response {
+    tracing::warn!(error = %e, "fit api db error");
+    error_json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "database error",
+    )
+}
+
+fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
+    ep_core::api_error_response(status, code, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    struct NoopNotifyBus;
+
+    #[async_trait::async_trait]
+    impl ep_core::NotifyBusTrait for NoopNotifyBus {
+        async fn dispatch(&self, _msg: ep_core::NotifyMessage) -> anyhow::Result<i64> {
+            Ok(0)
+        }
+
+        fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ep_core::NotifyMessage> {
+            let (_tx, rx) = tokio::sync::broadcast::channel(1);
+            rx
+        }
+    }
+
+    async fn test_state() -> AppState {
+        let db = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query(
+            "CREATE TABLE seq (
+                module TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                last_value INTEGER NOT NULL,
+                PRIMARY KEY (module, kind)
+            )",
+        )
+        .execute(&db)
+        .await
+        .expect("seq");
+        sqlx::query(
+            "CREATE TABLE fit_workout (
+                doc_id TEXT PRIMARY KEY,
+                occurred_at INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                program TEXT,
+                duration_m INTEGER NOT NULL,
+                load_text TEXT,
+                strain TEXT,
+                rpe INTEGER,
+                notes TEXT
+            )",
+        )
+        .execute(&db)
+        .await
+        .expect("fit_workout");
+        sqlx::query(
+            "CREATE TABLE activity (
+                occurred_at INTEGER NOT NULL,
+                module TEXT NOT NULL,
+                doc_id TEXT NOT NULL,
+                link_doc TEXT,
+                summary TEXT,
+                status TEXT
+            )",
+        )
+        .execute(&db)
+        .await
+        .expect("activity");
+        sqlx::query(
+            "CREATE TABLE module_link (
+                source_doc TEXT NOT NULL,
+                target_doc TEXT NOT NULL,
+                kind TEXT NOT NULL
+            )",
+        )
+        .execute(&db)
+        .await
+        .expect("module_link");
+        sqlx::query(
+            "CREATE TABLE notification (
+                id INTEGER PRIMARY KEY,
+                doc_ref TEXT
+            )",
+        )
+        .execute(&db)
+        .await
+        .expect("notification");
+        AppState {
+            db,
+            cookie_key: cookie::Key::generate(),
+            notify: Arc::new(NoopNotifyBus),
+            leptos_options: Default::default(),
+        }
+    }
+
+    fn pat(scopes: &[&str]) -> AuthPat {
+        AuthPat {
+            id: 1,
+            name: "test".into(),
+            scopes: scopes.iter().map(|s| (*s).into()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_workout_requires_write_scope() {
+        let state = test_state().await;
+        let err = post_workout(
+            State(state),
+            Extension(pat(&[ep_core::SCOPE_FIT_READ])),
+            ep_core::ApiJson(WorkoutInput {
+                occurred_on: Some("2026-05-08".into()),
+                kind: "Run".into(),
+                program: None,
+                duration_m: 30,
+                load_text: None,
+                strain: Some("M".into()),
+                rpe: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("missing write scope should fail");
+
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn post_and_list_workout_round_trip() {
+        let state = test_state().await;
+        let Json(created) = post_workout(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_WRITE])),
+            ep_core::ApiJson(WorkoutInput {
+                occurred_on: Some("2026-05-08".into()),
+                kind: "Run".into(),
+                program: Some("Base".into()),
+                duration_m: 35,
+                load_text: Some("5km".into()),
+                strain: Some("M".into()),
+                rpe: Some(7),
+                notes: Some("felt good".into()),
+            }),
+        )
+        .await
+        .expect("create workout");
+
+        assert!(created.doc_id.starts_with("FIT-S-"));
+
+        let Json(rows) = list_workouts(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_READ])),
+        )
+        .await
+        .expect("list workouts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].doc_id, created.doc_id);
+        assert_eq!(rows[0].kind, "Run");
+        assert_eq!(rows[0].rpe, Some(7));
+
+        let Json(updated) = patch_workout(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_WRITE])),
+            Path(created.doc_id.clone()),
+            ep_core::ApiJson(PatchWorkoutInput {
+                occurred_on: None,
+                kind: Some("Tempo Run".into()),
+                program: None,
+                duration_m: Some(42),
+                load_text: Some(Some("6km".into())),
+                strain: Some("H".into()),
+                rpe: Some(Some(8)),
+                notes: None,
+            }),
+        )
+        .await
+        .expect("patch workout");
+        assert_eq!(updated.doc_id, created.doc_id);
+
+        let Json(rows) = list_workouts(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_READ])),
+        )
+        .await
+        .expect("list workouts");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].doc_id, created.doc_id);
+        assert_eq!(rows[0].kind, "Tempo Run");
+        assert_eq!(rows[0].duration_m, 42);
+        assert_eq!(rows[0].load_text.as_deref(), Some("6km"));
+        assert_eq!(rows[0].strain.as_deref(), Some("H"));
+        assert_eq!(rows[0].rpe, Some(8));
+        assert_eq!(rows[0].notes.as_deref(), Some("felt good"));
+
+        let Json(cleared) = patch_workout(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_WRITE])),
+            Path(created.doc_id.clone()),
+            ep_core::ApiJson(PatchWorkoutInput {
+                occurred_on: None,
+                kind: None,
+                program: Some(None),
+                duration_m: None,
+                load_text: Some(None),
+                strain: None,
+                rpe: Some(None),
+                notes: Some(None),
+            }),
+        )
+        .await
+        .expect("clear nullable workout fields");
+        assert_eq!(cleared.doc_id, created.doc_id);
+
+        let Json(rows) = list_workouts(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_READ])),
+        )
+        .await
+        .expect("list workouts");
+        assert_eq!(rows[0].program, None);
+        assert_eq!(rows[0].load_text, None);
+        assert_eq!(rows[0].rpe, None);
+        assert_eq!(rows[0].notes, None);
+
+        let Json(deleted) = delete_workout(
+            State(state.clone()),
+            Extension(pat(&[ep_core::SCOPE_FIT_WRITE])),
+            Path(created.doc_id.clone()),
+        )
+        .await
+        .expect("delete workout");
+        assert_eq!(deleted.doc_id, created.doc_id);
+
+        let Json(rows) = list_workouts(State(state), Extension(pat(&[ep_core::SCOPE_FIT_READ])))
+            .await
+            .expect("list workouts");
+        assert!(rows.is_empty());
+    }
+}

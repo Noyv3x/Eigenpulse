@@ -18,6 +18,12 @@ services:
       # Leave unset for LAN/NAS HTTP access so the session cookie can persist.
       EP_COOKIE_SECURE:  "${EP_COOKIE_SECURE:-0}"
       RUST_LOG:          "info"
+    healthcheck:
+      test: ["CMD", "/app/eigenpulse", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 volumes:
   ep-data: {}

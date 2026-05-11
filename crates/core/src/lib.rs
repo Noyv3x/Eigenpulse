@@ -46,12 +46,20 @@ pub use tone::Tone;
 pub const SCOPE_ACTIVITY_READ: &str = "activity:read";
 pub const SCOPE_FIN_READ: &str = "fin:read";
 pub const SCOPE_FIN_WRITE: &str = "fin:write";
+pub const SCOPE_FIT_READ: &str = "fit:read";
+pub const SCOPE_FIT_WRITE: &str = "fit:write";
+pub const SCOPE_LRN_READ: &str = "lrn:read";
+pub const SCOPE_LRN_WRITE: &str = "lrn:write";
 pub const SCOPE_NOTIFY_WRITE: &str = "notify:write";
 pub const SCOPE_ALL: &str = "*";
 pub const PAT_SCOPES: &[&str] = &[
     SCOPE_ACTIVITY_READ,
     SCOPE_FIN_READ,
     SCOPE_FIN_WRITE,
+    SCOPE_FIT_READ,
+    SCOPE_FIT_WRITE,
+    SCOPE_LRN_READ,
+    SCOPE_LRN_WRITE,
     SCOPE_NOTIFY_WRITE,
     SCOPE_ALL,
 ];
@@ -71,6 +79,16 @@ pub fn server_err<E: std::fmt::Display>(e: E) -> leptos::server_fn::ServerFnErro
     {
         leptos::server_fn::ServerFnError::ServerError(message)
     }
+}
+
+/// Deserialize PATCH fields where three states matter:
+/// field omitted = keep existing, `null` = clear existing, value = replace.
+pub fn deserialize_nullable_patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[cfg(feature = "ssr")]

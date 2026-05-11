@@ -931,6 +931,10 @@ dependencies = [
 name = "ep-fitness"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "cookie",
  "ep-auth",
  "ep-core",
  "ep-i18n",
@@ -939,6 +943,7 @@ dependencies = [
  "serde",
  "sqlx",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -966,6 +971,10 @@ dependencies = [
 name = "ep-learning"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "cookie",
  "ep-auth",
  "ep-core",
  "ep-i18n",
@@ -974,6 +983,7 @@ dependencies = [
  "serde",
  "sqlx",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
