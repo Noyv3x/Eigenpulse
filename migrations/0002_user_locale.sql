@@ -1,1 +1,0 @@
-ALTER TABLE app_user ADD COLUMN locale TEXT NOT NULL DEFAULT '';

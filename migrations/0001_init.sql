@@ -1,14 +1,7 @@
--- ⚠ This file IS an applied migration. DO NOT edit it once any database has
--- run it successfully — `sqlx::migrate!()` records its checksum and will refuse
--- to start with `MigrateError::VersionMismatch` if the bytes change. To fix
--- a schema bug, add a new `0002_*.sql` migration instead.
---
--- The single exception in this repo's history: an earlier draft of this file
--- contained `PRAGMA foreign_keys/journal_mode/synchronous` lines, which sqlx
--- rejects because each migration runs inside a transaction. That version
--- never applied anywhere, so removing those PRAGMAs (and moving them to
--- `crates/db/src/pool.rs::open_pool` via `SqliteConnectOptions`) was safe.
--- Do not treat this as license to amend `0001_init.sql` further.
+-- Development schema baseline. This pre-production project intentionally
+-- squashes historical migrations when old local databases can be discarded.
+-- After a real deployment, evolve this schema with new numbered migrations
+-- instead of editing this file.
 
 -- Single-row user table.
 CREATE TABLE app_user (
@@ -17,6 +10,7 @@ CREATE TABLE app_user (
     name          TEXT    NOT NULL DEFAULT 'Leo Chen',
     role          TEXT    NOT NULL DEFAULT 'OWNER',
     password_hash TEXT    NOT NULL,
+    locale        TEXT    NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
@@ -69,6 +63,8 @@ CREATE TABLE activity (
 );
 CREATE INDEX activity_occurred ON activity(occurred_at DESC);
 CREATE INDEX activity_module   ON activity(module, occurred_at DESC);
+CREATE INDEX activity_module_doc ON activity(module, doc_id);
+CREATE INDEX activity_link_doc ON activity(link_doc) WHERE link_doc IS NOT NULL;
 
 -- Notifications (in-app + delivery log).
 CREATE TABLE notification (

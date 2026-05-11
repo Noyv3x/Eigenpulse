@@ -19,16 +19,7 @@ mod ssr_module {
             "LRN"
         }
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[
-                (
-                    "001_learning",
-                    include_str!("../migrations/001_learning.sql"),
-                ),
-                (
-                    "002_remove_demo_seed",
-                    include_str!("../migrations/002_remove_demo_seed.sql"),
-                ),
-            ]
+            &[("001_learning", include_str!("../migrations/001_learning.sql"))]
         }
 
         fn open_api(&self, state: AppState) -> axum::Router<AppState> {
@@ -76,7 +67,7 @@ mod ssr_module {
         }
 
         #[tokio::test]
-        async fn migrations_remove_demo_learning_records_but_keep_sequences() {
+        async fn initial_migration_has_empty_learning_records_but_keeps_sequences() {
             let pool = migrated_pool().await;
             let counts = [
                 (
@@ -102,7 +93,7 @@ mod ssr_module {
                 ),
             ];
             for (table, count) in counts {
-                assert_eq!(count, 0, "{table} should not retain demo rows");
+                assert_eq!(count, 0, "{table} should start empty");
             }
 
             let seqs: Vec<(String, i64)> = sqlx::query_as(

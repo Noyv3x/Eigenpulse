@@ -70,11 +70,11 @@ async fn make_test_pool() -> anyhow::Result<SqlitePool> {
     //    code-path that production uses.
     ep_core::run_module_migrations(&pool, ep_finance::MODULE).await?;
 
-    // 3. Ensure each test starts from a known-empty fixture. The production
-    //    migrations remove historical demo data, and these deletes are now
-    //    mostly defensive no-ops. We do NOT touch `_ep_module_migration` —
-    //    the ledger must keep saying every migration applied so a subsequent
-    //    `run_module_migrations` call (idempotency check) is a no-op.
+    // 3. Ensure each test starts from a known-empty fixture. The baseline
+    //    migration no longer ships demo data, so these deletes are defensive
+    //    cleanup for tests that add their own rows. We do NOT touch
+    //    `_ep_module_migration` — the ledger must keep saying every migration
+    //    applied so a subsequent `run_module_migrations` call is a no-op.
     sqlx::query("DELETE FROM fin_txn").execute(&pool).await?;
     sqlx::query("DELETE FROM fin_budget").execute(&pool).await?;
     sqlx::query("DELETE FROM fin_account")
@@ -163,8 +163,9 @@ async fn count_links_by_kind(pool: &SqlitePool, kind: &str) -> anyhow::Result<i6
 async fn pool_helper_applies_finance_migrations() {
     let pool = make_test_pool().await.expect("pool init");
 
-    // 002_finance_crud added these columns; if 002 didn't run, the SELECT
-    // would fail with "no such column".
+    // These columns used to be added by a follow-up migration and now live in
+    // the squashed baseline; if the baseline is incomplete, the SELECT fails
+    // with "no such column".
     let row: (i64, i64) = sqlx::query_as(
         "SELECT \
             (SELECT COUNT(*) FROM pragma_table_info('fin_account') WHERE name = 'created_at'), \
@@ -173,7 +174,7 @@ async fn pool_helper_applies_finance_migrations() {
     .fetch_one(&pool)
     .await
     .expect("schema check");
-    assert_eq!(row, (1, 1), "expected 002_finance_crud columns to exist");
+    assert_eq!(row, (1, 1), "expected baseline CRUD columns to exist");
 
     // Migrations should be ledger'd as applied.
     let n: i64 =
@@ -181,7 +182,7 @@ async fn pool_helper_applies_finance_migrations() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 4, "expected all finance migrations to be ledgered");
+    assert_eq!(n, 1, "expected finance baseline migration to be ledgered");
 }
 
 /// Idempotency: running the migrations a second time should be a no-op,
@@ -193,13 +194,13 @@ async fn pool_helper_is_idempotent_on_double_apply() {
     ep_core::run_module_migrations(&pool, ep_finance::MODULE)
         .await
         .expect("second apply must be no-op");
-    // Still exactly four ledger rows.
+    // Still exactly one ledger row.
     let n: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 4);
+    assert_eq!(n, 1);
 }
 
 /// `seed_account` + `fetch_balance` round-trip. Cheap fixture-helper test

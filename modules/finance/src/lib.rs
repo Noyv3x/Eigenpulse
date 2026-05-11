@@ -32,21 +32,7 @@ mod ssr_module {
         }
 
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[
-                ("001_finance", include_str!("../migrations/001_finance.sql")),
-                (
-                    "002_finance_crud",
-                    include_str!("../migrations/002_finance_crud.sql"),
-                ),
-                (
-                    "003_finance_remove_archive_usage",
-                    include_str!("../migrations/003_finance_remove_archive_usage.sql"),
-                ),
-                (
-                    "004_remove_demo_seed",
-                    include_str!("../migrations/004_remove_demo_seed.sql"),
-                ),
-            ]
+            &[("001_finance", include_str!("../migrations/001_finance.sql"))]
         }
 
         fn open_api(&self, state: AppState) -> axum::Router<AppState> {
@@ -109,7 +95,7 @@ mod ssr_module {
         }
 
         #[tokio::test]
-        async fn migrations_remove_demo_finance_records_but_keep_sequence() {
+        async fn initial_migration_has_empty_finance_records_but_keeps_sequence() {
             let pool = migrated_pool().await;
             let counts = [
                 (
@@ -142,7 +128,7 @@ mod ssr_module {
                 ),
             ];
             for (table, count) in counts {
-                assert_eq!(count, 0, "{table} should not retain demo rows");
+                assert_eq!(count, 0, "{table} should start empty");
             }
 
             let activity_count: i64 =
@@ -152,7 +138,7 @@ mod ssr_module {
                     .unwrap();
             assert_eq!(
                 activity_count, 0,
-                "FIN activity should not retain demo rows"
+                "FIN activity should start empty"
             );
 
             let seq: i64 = sqlx::query_scalar(

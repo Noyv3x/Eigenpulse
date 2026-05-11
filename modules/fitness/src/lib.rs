@@ -19,13 +19,7 @@ mod ssr_module {
             "FIT"
         }
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[
-                ("001_fitness", include_str!("../migrations/001_fitness.sql")),
-                (
-                    "002_remove_demo_seed",
-                    include_str!("../migrations/002_remove_demo_seed.sql"),
-                ),
-            ]
+            &[("001_fitness", include_str!("../migrations/001_fitness.sql"))]
         }
 
         fn open_api(&self, state: AppState) -> axum::Router<AppState> {
@@ -73,7 +67,7 @@ mod ssr_module {
         }
 
         #[tokio::test]
-        async fn migrations_remove_demo_workouts_but_keep_sequence() {
+        async fn initial_migration_has_empty_workouts_but_keeps_sequence() {
             let pool = migrated_pool().await;
             let workouts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fit_workout")
                 .fetch_one(&pool)
