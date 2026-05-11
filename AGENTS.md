@@ -6,6 +6,8 @@ This file provides guidance to AI coding agents when working with code in this r
 
 **Eigenpulse** — A modular personal-life ERP. Full-stack Rust: Leptos 0.7 SSR + WASM hydration, axum, SQLite via sqlx. Single binary, single distroless container, multi-arch (amd64+arm64) for NAS deployment. See `README.md` for the user-facing pitch.
 
+Project status note: Eigenpulse is currently an unfinished, pre-production project and has not been used in real life yet. You may refactor boldly when it improves the design or implementation; do not optimize for migration cost, backwards compatibility, or historical baggage unless explicitly asked.
+
 ## Toolchain
 
 - **Rust ≥ 1.88** is required (transitive deps `time 0.3.47`, `home`, `icu_*` need edition2024). The repo's `rust-toolchain.toml` pins `channel = "stable"`; rustup will fetch latest stable on first `cargo` invocation. The Dockerfile uses `rust:1-bookworm` for the same reason — **do not pin to a specific minor like `1.83-bookworm`**, builds will fail.
