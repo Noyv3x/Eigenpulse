@@ -6,8 +6,8 @@ use ep_core::{
 };
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    escape_js_single_quoted, Card, ChartBars, Direction, Icon, Kpi, PageHead, RowDeleteAction,
-    TabSpec, Tabs, Tag as UiTag,
+    use_toast, Card, ChartBars, Direction, EmptyState, Icon, Kpi, PageHead, RowDeleteAction,
+    SkeletonCard, SkeletonKpi, TabSpec, Tabs, Tag as UiTag,
 };
 use leptos::prelude::*;
 
@@ -60,6 +60,37 @@ struct FinanceUiState {
     txn_modal_open: RwSignal<bool>,
     txn_modal_mode: RwSignal<String>,
     filters: LedgerFilters,
+}
+
+/// On the first time `action.value()` transitions to `Ok`, push a toast
+/// and, when supplied, close `modal_open`. Subsequent ticks for the same
+/// version (leptos resamples the value) are de-duplicated via a per-action
+/// version compare against the action's internal `version()` signal.
+fn wire_action_toast<S, F>(
+    action: ServerAction<S>,
+    toast: ep_ui::ToastStack,
+    modal_open: Option<RwSignal<bool>>,
+    msg: F,
+) where
+    S: leptos::server_fn::ServerFn + Clone + Send + Sync + 'static,
+    <S as leptos::server_fn::ServerFn>::Output: Clone + Send + Sync + 'static,
+    <S as leptos::server_fn::ServerFn>::Error: Clone + Send + Sync + 'static,
+    F: Fn(&<S as leptos::server_fn::ServerFn>::Output) -> String + Send + Sync + 'static,
+{
+    let last_seen = RwSignal::new(0usize);
+    Effect::new(move |_| {
+        let v = action.version().get();
+        if v == 0 || v == last_seen.get_untracked() {
+            return;
+        }
+        if let Some(Ok(out)) = action.value().get() {
+            toast.success(msg(&out));
+            if let Some(open) = modal_open {
+                open.set(false);
+            }
+            last_seen.set(v);
+        }
+    });
 }
 
 #[component]
@@ -121,6 +152,67 @@ pub fn FinanceView() -> impl IntoView {
         cur
     });
 
+    // Toast / modal feedback: when a server action transitions from pending
+    // to Ok, push a toast and close any open modal so the user gets a clear
+    // "done" signal without manually dismissing.
+    let toast = use_toast();
+    wire_action_toast(add, toast, Some(txn_modal_open), move |txn: &Txn| {
+        ep_i18n::tf(
+            locale,
+            "finance.toast.txn_added",
+            &[("amount", &format!("¥{}", fmt_money(txn.amount.abs())))],
+        )
+    });
+    wire_action_toast(update_txn, toast, Some(txn_modal_open), move |_| {
+        t(locale, "finance.toast.txn_updated").to_string()
+    });
+    wire_action_toast(add_transfer, toast, Some(txn_modal_open), move |_| {
+        t(locale, "finance.toast.transfer_added").to_string()
+    });
+    wire_action_toast(delete, toast, None, move |_| {
+        t(locale, "finance.toast.txn_deleted").to_string()
+    });
+    wire_action_toast(create_account, toast, None, move |a: &Account| {
+        ep_i18n::tf(locale, "finance.toast.account_added", &[("name", &a.name)])
+    });
+    wire_action_toast(update_account, toast, None, move |_| {
+        t(locale, "finance.toast.account_updated").to_string()
+    });
+    wire_action_toast(delete_account, toast, None, move |_| {
+        t(locale, "finance.toast.account_deleted").to_string()
+    });
+    wire_action_toast(create_category, toast, None, move |c: &Category| {
+        ep_i18n::tf(locale, "finance.toast.category_added", &[("name", &c.name)])
+    });
+    wire_action_toast(update_category, toast, None, move |_| {
+        t(locale, "finance.toast.category_updated").to_string()
+    });
+    wire_action_toast(delete_category, toast, None, move |_| {
+        t(locale, "finance.toast.category_deleted").to_string()
+    });
+    wire_action_toast(set_budget, toast, None, move |_| {
+        t(locale, "finance.toast.budget_saved").to_string()
+    });
+    wire_action_toast(import_budgets, toast, None, move |_| {
+        t(locale, "finance.toast.budget_imported").to_string()
+    });
+
+    // Fixed page-head action: a single "+ Add Transaction" button. When the
+    // user hasn't set up accounts or categories yet, the modal itself shows
+    // an inline hint pointing at the prerequisite tab — there is no
+    // separate onboarding component.
+    let page_actions = view! {
+        <button class="btn primary" type="button"
+                on:click=move |_| {
+                    active.set(String::from("ledger"));
+                    txn_modal_mode.set(String::from("txn"));
+                    txn_modal_open.set(true);
+                }>
+            <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
+        </button>
+    }
+    .into_any();
+
     view! {
         <div class="view">
             <PageHead
@@ -129,19 +221,14 @@ pub fn FinanceView() -> impl IntoView {
                 title=t(locale, "finance.page.title")
                 title_cn=t(locale, "finance.page.title_cn")
                 sub=t(locale, "finance.page.sub")
-                actions=view! {
-                    <button class="btn primary" type="button"
-                            on:click=move |_| {
-                                active.set(String::from("ledger"));
-                                txn_modal_mode.set(String::from("txn"));
-                                txn_modal_open.set(true);
-                            }>
-                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
-                    </button>
-                }.into_any()
+                actions=page_actions
             />
 
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
+            <Suspense fallback=move || view! {
+                <div style="margin-bottom:20px"><SkeletonCard rows=0/></div>
+                <SkeletonKpi count=4/>
+                <SkeletonCard rows=3/>
+            }>
                 {move || ledger.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(data) => render_ledger(data, ui, actions).into_any(),
@@ -261,12 +348,14 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
         </div>
     };
 
+    // Order matches the real onboarding path: Ledger (daily use) →
+    // Accounts → Categories (setup) → Budget (planning) → Reports (review).
     let tabs = vec![
         TabSpec::new("ledger", t(locale, "finance.tab.ledger")).with_count(txns_count),
-        TabSpec::new("budget", t(locale, "finance.tab.budget")).with_count(budgets_count),
         TabSpec::new("accounts", t(locale, "finance.tab.accounts")).with_count(accounts_count),
         TabSpec::new("categories", t(locale, "finance.tab.categories"))
             .with_count(categories_count),
+        TabSpec::new("budget", t(locale, "finance.tab.budget")).with_count(budgets_count),
         TabSpec::new("reports", t(locale, "finance.tab.reports")),
     ];
 
@@ -302,8 +391,6 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
                     &data_for_ledger,
                     actions.delete,
                     actions.update_txn,
-                    ui.txn_modal_open,
-                    ui.txn_modal_mode,
                     ui.filters,
                 )}
             }.into_any(),
@@ -339,7 +426,11 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
                 <div class="hstack" style="gap:16px;margin-top:8px;font-size:12.5px;color:var(--ink-3)">
                     <span class="mono">{tf(locale, "finance.banner.balance_delta", &[("sign", week_sign), ("amount", &fmt_int(m.balance_delta.abs()))])}</span>
                     <span class="mono">{tf(locale, "finance.banner.savings_rate", &[("pct", &savings_pct.to_string())])}</span>
-                    <span class="mono">{tf(locale, "finance.banner.account_count", &[("count", &d.accounts.len().to_string())])}</span>
+                    <span class="mono">{
+                        let n = d.accounts.len();
+                        if n == 1 { t(locale, "finance.banner.account_count_one").to_string() }
+                        else { tf(locale, "finance.banner.account_count_other", &[("count", &n.to_string())]) }
+                    }</span>
                 </div>
             </div>
             <div class="hstack" style="gap:20px;padding-right:8px">
@@ -400,10 +491,7 @@ fn render_txn_modal(
                         <div class="fin-modal" role="dialog" aria-modal="true">
                             <div class="fin-modal-head">
                                 <div>
-                                    <div class="card-title">
-                                        {title}
-                                        <span class="code">"FIN-OPS"</span>
-                                    </div>
+                                    <div class="card-title">{title}</div>
                                     <p class="card-sub">{sub}</p>
                                 </div>
                                 <button class="btn ghost sm" type="button"
@@ -442,70 +530,77 @@ fn render_new_txn_form(
 ) -> impl IntoView {
     let locale = use_locale();
     view! {
-            <ActionForm action=add attr:class="vstack fin-op-form" attr:style="gap:10px">
-                <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.merchant_desc")}</span>
-                        <input id="fin-new-merchant" name="merchant" required
-                               maxlength=MAX_TXN_MERCHANT_CHARS.to_string()
-                               placeholder=t(locale, "finance.placeholder.merchant") style=INPUT_STYLE/>
-                    </label>
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
-                        <input name="amount" type="number" step="0.01" min="0.01" required
-                               placeholder="42.00" style=INPUT_STYLE_MONO/>
-                    </label>
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tag")}</span>
-                        <select name="tag" style=INPUT_STYLE>
-                            <option value=Tag::Exp.as_str() selected="selected">{t(locale, "finance.tag.exp")}</option>
-                            <option value=Tag::Inc.as_str()>{t(locale, "finance.tag.inc")}</option>
-                        </select>
-                    </label>
-                </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
-                        <select name="category_code" style=INPUT_STYLE>
-                            {categories.into_iter().enumerate().map(|(i, c)| {
-                                let code = c.code.clone();
-                                let label = format!("{} {}", c.name, c.code);
-                                view! { <option value=code selected={i == 0}>{label}</option> }
-                            }).collect_view()}
-                        </select>
-                    </label>
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.account")}</span>
-                        <select name="account_code" style=INPUT_STYLE>
-                            {accounts.into_iter().enumerate().map(|(i, a)| {
-                                let code = a.code.clone();
-                                let label = format!("{} · {}", a.code, a.name);
-                                view! { <option value=code selected={i == 0}>{label}</option> }
-                            }).collect_view()}
-                        </select>
-                    </label>
-                </div>
-                <div style="display:grid;grid-template-columns:2fr 2fr auto auto;gap:10px;align-items:end">
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
-                        <input name="note" maxlength=MAX_TXN_NOTE_CHARS.to_string()
-                               placeholder="…" style=INPUT_STYLE/>
-                    </label>
-                    <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.date_default")}</span>
-                        <input name="occurred_at" type="date" style=INPUT_STYLE_MONO
-                               title=t(locale, "finance.placeholder.date_now")/>
-                    </label>
-                    <span class="error-slot" style="align-self:center">
-                        {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{server_fn_error_text(&e)}</span>
-                        })}
-                    </span>
-                    <button class="btn primary" type="submit" style="align-self:center">
-                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
-                    </button>
-                </div>
-            </ActionForm>
+        <ActionForm action=add attr:class="vstack fin-op-form" attr:style="gap:12px">
+            // Row 1 — money: amount + expense/income toggle. This is the
+            // single most consequential field, so it's prominent + first.
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <label class="vstack" style="gap:4px">
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
+                    <input name="amount" type="number" step="0.01" min="0.01" required
+                           autofocus
+                           placeholder="42.00" style=INPUT_STYLE_MONO/>
+                </label>
+                <label class="vstack" style="gap:4px">
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tag")}</span>
+                    <select name="tag" style=INPUT_STYLE>
+                        <option value=Tag::Exp.as_str() selected="selected">{t(locale, "finance.tag.short_exp")}</option>
+                        <option value=Tag::Inc.as_str()>{t(locale, "finance.tag.short_inc")}</option>
+                    </select>
+                </label>
+            </div>
+            // Row 2 — what / where.
+            <label class="vstack" style="gap:4px">
+                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.merchant_desc")}</span>
+                <input id="fin-new-merchant" name="merchant" required
+                       maxlength=MAX_TXN_MERCHANT_CHARS.to_string()
+                       placeholder=t(locale, "finance.placeholder.merchant") style=INPUT_STYLE/>
+            </label>
+            // Row 3 — categorisation: category + account side-by-side.
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <label class="vstack" style="gap:4px">
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.category")}</span>
+                    <select name="category_code" required style=INPUT_STYLE>
+                        {categories.into_iter().enumerate().map(|(i, c)| {
+                            let code = c.code.clone();
+                            view! { <option value=code selected={i == 0}>{c.name.clone()}</option> }
+                        }).collect_view()}
+                    </select>
+                </label>
+                <label class="vstack" style="gap:4px">
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.account")}</span>
+                    <select name="account_code" required style=INPUT_STYLE>
+                        {accounts.into_iter().enumerate().map(|(i, a)| {
+                            let code = a.code.clone();
+                            view! { <option value=code selected={i == 0}>{a.name.clone()}</option> }
+                        }).collect_view()}
+                    </select>
+                </label>
+            </div>
+            // Row 4 — note + date.
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+                <label class="vstack" style="gap:4px">
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
+                    <input name="note" maxlength=MAX_TXN_NOTE_CHARS.to_string()
+                           placeholder="…" style=INPUT_STYLE/>
+                </label>
+                <label class="vstack" style="gap:4px">
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.date_default")}</span>
+                    <input name="occurred_at" type="date" style=INPUT_STYLE_MONO
+                           title=t(locale, "finance.placeholder.date_now")/>
+                </label>
+            </div>
+            // Row 5 — error + actions, right-aligned.
+            <div class="hstack" style="gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                <span class="error-slot" style="flex:1">
+                    {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
+                        <span class="tag rose">{server_fn_error_text(&e)}</span>
+                    })}
+                </span>
+                <button class="btn primary" type="submit">
+                    <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.modal.submit_new")}
+                </button>
+            </div>
+        </ActionForm>
     }
 }
 
@@ -526,8 +621,7 @@ fn render_transfer_form(
                         <select name="from_account" style=INPUT_STYLE>
                             {from_accounts.into_iter().enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
-                                let label = format!("{} · {}", a.code, a.name);
-                                view! { <option value=code selected={i == 0}>{label}</option> }
+                                view! { <option value=code selected={i == 0}>{a.name.clone()}</option> }
                             }).collect_view()}
                         </select>
                     </label>
@@ -536,8 +630,7 @@ fn render_transfer_form(
                         <select name="to_account" style=INPUT_STYLE>
                             {to_accounts.into_iter().enumerate().map(|(i, a)| {
                                 let code = a.code.clone();
-                                let label = format!("{} · {}", a.code, a.name);
-                                view! { <option value=code selected={i == 1}>{label}</option> }
+                                view! { <option value=code selected={i == 1}>{a.name.clone()}</option> }
                             }).collect_view()}
                         </select>
                     </label>
@@ -575,15 +668,16 @@ fn render_ledger_tab(
     d: &LedgerData,
     delete: ServerAction<DeleteTxn>,
     update_txn: ServerAction<UpdateTxn>,
-    txn_modal_open: RwSignal<bool>,
-    txn_modal_mode: RwSignal<String>,
     filters: LedgerFilters,
 ) -> impl IntoView {
     let locale = use_locale();
     let txns = d.txns.clone();
     let cat_summary = d.category_summary.clone();
-    let cat_options = d.categories.clone();
-    let acc_options = d.accounts.clone();
+    // Share category/account vectors via `Arc` so each `render_txn_row`
+    // does a single ref-count bump instead of cloning the entire vec for
+    // every row in the table.
+    let cat_options: std::sync::Arc<Vec<Category>> = std::sync::Arc::new(d.categories.clone());
+    let acc_options: std::sync::Arc<Vec<Account>> = std::sync::Arc::new(d.accounts.clone());
     let cat_lookup: std::collections::HashMap<String, Category> = d
         .categories
         .iter()
@@ -618,58 +712,46 @@ fn render_ledger_tab(
     view! {
         <div class="grid-2" style="margin-top:20px">
             <Card title=t(locale, "finance.card.ledger.title") code="FIN-LGR-01" sub=sub>
-                <div class="hstack" style="gap:10px;margin-bottom:12px;flex-wrap:wrap">
-                    <button class="btn primary" type="button"
-                            on:click=move |_| {
-                                txn_modal_mode.set(String::from("txn"));
-                                txn_modal_open.set(true);
-                            }>
-                        <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.action.add_txn")}
-                    </button>
-                    <button class="btn" type="button"
-                            on:click=move |_| {
-                                txn_modal_mode.set(String::from("transfer"));
-                                txn_modal_open.set(true);
-                            }>
-                        <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
-                    </button>
-                    <input type="text" placeholder=t(locale, "finance.filter.search")
-                           prop:value=move || filters.merchant.get()
-                           on:input=move |ev| filters.merchant.set(event_target_value(&ev))
-                           style=format!("flex:1;min-width:160px;{}", INPUT_STYLE)/>
-                    <select prop:value=move || filters.category.get()
-                            on:change=move |ev| filters.category.set(event_target_value(&ev))
-                            style=INPUT_STYLE>
-                        <option value="">{t(locale, "finance.filter.all_categories")}</option>
-                        {cat_options.iter().map(|c| {
-                            let code = c.code.clone();
-                            let label = format!("{} {}", c.name, c.code);
-                            view! { <option value=code>{label}</option> }
-                        }).collect_view()}
-                    </select>
-                    <input type="date"
-                           prop:value=move || filters.date_from.get()
-                           on:input=move |ev| filters.date_from.set(event_target_value(&ev))
-                           style=INPUT_STYLE_MONO
-                           title=t(locale, "finance.filter.date_from")/>
-                    <input type="date"
-                           prop:value=move || filters.date_to.get()
-                           on:input=move |ev| filters.date_to.set(event_target_value(&ev))
-                           style=INPUT_STYLE_MONO
-                           title=t(locale, "finance.filter.date_to")/>
-                    <a class="btn" download="finance-export.csv" href=export_href>
-                        <Icon kind=IconKind::Export size=14/>{t(locale, "finance.action.export")}
-                    </a>
+                <div class="ledger-toolbar">
+                    <div class="hstack ledger-filters" style="gap:8px;flex-wrap:wrap">
+                        <input type="text" placeholder=t(locale, "finance.filter.search")
+                               prop:value=move || filters.merchant.get()
+                               on:input=move |ev| filters.merchant.set(event_target_value(&ev))
+                               style=format!("flex:1 1 200px;min-width:140px;{}", INPUT_STYLE)/>
+                        <select prop:value=move || filters.category.get()
+                                on:change=move |ev| filters.category.set(event_target_value(&ev))
+                                style=format!("min-width:140px;{}", INPUT_STYLE)>
+                            <option value="">{t(locale, "finance.filter.all_categories")}</option>
+                            {cat_options.iter().map(|c| {
+                                let code = c.code.clone();
+                                let name = c.name.clone();
+                                view! { <option value=code>{name}</option> }
+                            }).collect_view()}
+                        </select>
+                        <input type="date"
+                               prop:value=move || filters.date_from.get()
+                               on:input=move |ev| filters.date_from.set(event_target_value(&ev))
+                               style=format!("width:130px;{}", INPUT_STYLE_MONO)
+                               title=t(locale, "finance.filter.date_from")/>
+                        <input type="date"
+                               prop:value=move || filters.date_to.get()
+                               on:input=move |ev| filters.date_to.set(event_target_value(&ev))
+                               style=format!("width:130px;{}", INPUT_STYLE_MONO)
+                               title=t(locale, "finance.filter.date_to")/>
+                        <span style="flex:1"></span>
+                        <a class="btn" download="finance-export.csv" href=export_href>
+                            <Icon kind=IconKind::Export size=14/>{t(locale, "finance.action.export")}
+                        </a>
+                    </div>
                 </div>
                 <div class="scroll-x">
                     <table class="tbl">
                         <thead>
                             <tr>
-                                <th style="width:76px">{t(locale, "finance.field.date")}</th>
-                                <th style="width:110px">"ID"</th>
+                                <th style="width:84px">{t(locale, "finance.field.date")}</th>
                                 <th>{t(locale, "finance.field.merchant_desc")}</th>
-                                <th style="width:80px">{t(locale, "finance.field.category")}</th>
-                                <th style="width:80px">{t(locale, "finance.field.account")}</th>
+                                <th style="width:120px">{t(locale, "finance.field.category")}</th>
+                                <th style="width:120px">{t(locale, "finance.field.account")}</th>
                                 <th class="num" style="width:110px">{t(locale, "finance.field.amount")}</th>
                                 <th class="num" style="width:120px">{t(locale, "finance.field.ops")}</th>
                             </tr>
@@ -684,8 +766,6 @@ fn render_ledger_tab(
                                 let from_ts = parse_date_floor(&filters.date_from.get());
                                 let to_ts = parse_date_ceiling(&filters.date_to.get());
                                 let cat_lookup = &cat_lookup;
-                                let cat_options = &cat_options;
-                                let acc_options = &acc_options;
                                 txns.iter()
                                     .filter(|t| {
                                         (mq.is_empty() || t.merchant.to_lowercase().contains(&mq))
@@ -694,7 +774,7 @@ fn render_ledger_tab(
                                         && to_ts.map(|to| t.occurred_at <= to).unwrap_or(true)
                                     })
                                     .cloned()
-                                    .map(|t| render_txn_row(t, cat_lookup, cat_options, acc_options, delete, update_txn))
+                                    .map(|t| render_txn_row(t, cat_lookup, cat_options.clone(), acc_options.clone(), delete, update_txn))
                                     .collect_view()
                             }}
                         </tbody>
@@ -705,7 +785,15 @@ fn render_ledger_tab(
             <div class="vstack" style="gap:20px">
                 <Card title=t(locale, "finance.card.category_share.title") code="FIN-R02" sub=t(locale, "finance.card.category_share.sub")>
                     {if cat_summary.is_empty() {
-                        view! { <p class="muted">{t(locale, "finance.card.category_share.empty")}</p> }.into_any()
+                        view! {
+                            <EmptyState
+                                icon=IconKind::Coin
+                                title=t(locale, "finance.card.category_share.title")
+                                desc=t(locale, "finance.card.category_share.empty")
+                                code="FIN-R02-EMPTY"
+                                compact=true
+                            />
+                        }.into_any()
                     } else {
                         view! {
                             <div class="vstack" style="gap:10px">
@@ -715,10 +803,7 @@ fn render_ledger_tab(
                                     view! {
                                         <div>
                                             <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                                                <div style="font-size:12.5px">
-                                                    <span>{c.name.clone()}</span>
-                                                    <span class="mono dim" style="margin-left:6px;font-size:10.5px">{c.code.clone()}</span>
-                                                </div>
+                                                <div style="font-size:12.5px"><span>{c.name.clone()}</span></div>
                                                 <div class="mono" style="font-size:12px">{format!("¥{}", fmt_int(c.value))} <span class="dim">{format!("· {}%", c.pct)}</span></div>
                                             </div>
                                             <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
@@ -740,11 +825,82 @@ fn render_ledger_tab(
     }
 }
 
+/// Per-row budget delete: "delete" here means "set this period's budget
+/// for the category to zero", so we route through the `set_budget`
+/// action with three hidden fields. Shape mirrors `RowDeleteAction` but
+/// can't reuse it because that helper ships exactly one hidden field.
+fn render_budget_delete(
+    action: ServerAction<SetBudget>,
+    period: String,
+    category_code: String,
+    confirm_text: String,
+) -> impl IntoView {
+    let locale = use_locale();
+    let label = t(locale, "finance.action.delete").to_string();
+    let confirm_label = t(locale, "finance.action.confirm_delete").to_string();
+    let cancel_label = t(locale, "finance.confirm.cancel").to_string();
+    let open = RwSignal::new(false);
+    let period_inner = period.clone();
+    let category_inner = category_code.clone();
+    let confirm_inner = confirm_text.clone();
+    let confirm_label_inner = confirm_label.clone();
+    let cancel_label_inner = cancel_label.clone();
+    view! {
+        <span class="row-actions-slot">
+            <button class="btn sm danger" type="button"
+                    on:click=move |_| open.set(true)>{label}</button>
+            {move || {
+                if !open.get() {
+                    return view! { <span></span> }.into_any();
+                }
+                let period = period_inner.clone();
+                let category = category_inner.clone();
+                let confirm_text = confirm_inner.clone();
+                let confirm_label = confirm_label_inner.clone();
+                let cancel_label = cancel_label_inner.clone();
+                view! {
+                    <div class="fin-modal-backdrop confirm-backdrop"
+                         on:click=move |_| open.set(false)>
+                        <div class="fin-modal confirm-modal" role="alertdialog" aria-modal="true"
+                             on:click=move |e| e.stop_propagation()>
+                            <div class="confirm-body">
+                                <div class="confirm-icon danger">
+                                    <Icon kind=IconKind::Close size=18/>
+                                </div>
+                                <div class="confirm-text">
+                                    <div class="confirm-title">{confirm_text}</div>
+                                </div>
+                            </div>
+                            <ActionForm action=action attr:class="confirm-foot">
+                                <input type="hidden" name="period" value=period/>
+                                <input type="hidden" name="category_code" value=category/>
+                                <input type="hidden" name="amount" value="0"/>
+                                <button class="btn ghost" type="button"
+                                        on:click=move |_| open.set(false)>{cancel_label}</button>
+                                <button class="btn primary danger-action" type="submit"
+                                        on:click=move |_| open.set(false)>{confirm_label}</button>
+                            </ActionForm>
+                        </div>
+                    </div>
+                }.into_any()
+            }}
+        </span>
+    }
+}
+
 fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoView {
     let locale = use_locale();
     if items.is_empty() {
-        return view! { <p class="muted">{t(locale, "finance.card.suggestions.empty")}</p> }
-            .into_any();
+        return view! {
+            <EmptyState
+                icon=IconKind::Sparkle
+                title=t(locale, "finance.card.suggestions.title")
+                desc=t(locale, "finance.card.suggestions.empty")
+                code="FIN-RUL-EMPTY"
+                compact=true
+            />
+        }
+        .into_any();
     }
     // Wrap each row in an anchor when the rule provided a link target so the
     // suggestion is one click instead of a "look at this" toast. Inline
@@ -777,8 +933,8 @@ fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoVi
 fn render_txn_row(
     t: Txn,
     cat_lookup: &std::collections::HashMap<String, Category>,
-    cat_options: &[Category],
-    acc_options: &[Account],
+    cat_options: std::sync::Arc<Vec<Category>>,
+    acc_options: std::sync::Arc<Vec<Account>>,
     delete: ServerAction<DeleteTxn>,
     update_txn: ServerAction<UpdateTxn>,
 ) -> impl IntoView {
@@ -805,7 +961,18 @@ fn render_txn_row(
         .get(&t.category_code)
         .map(|c| Tone::parse(&c.tone))
         .unwrap_or(Tone::None);
-    let cat_label = t.category_code.clone();
+    // Resolve the human-readable name from the lookup; fall back to the
+    // raw code only when the category was deleted but transactions still
+    // reference it (the UI never shows the bare code by design).
+    let cat_label = cat_lookup
+        .get(&t.category_code)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| t.category_code.clone());
+    let account_label = acc_options
+        .iter()
+        .find(|a| a.code == t.account_code)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| t.account_code.clone());
     let doc_id = t.doc_id.clone();
 
     // Category cell renders the transfer pill on tfr rows so the user sees
@@ -845,8 +1012,7 @@ fn render_txn_row(
         .into_any()
     };
 
-    // Pre-baked prefilled values for the edit form. All clones live on the
-    // owned `t` we received by value, so they survive the closure capture.
+    // Pre-baked prefilled values for the edit form.
     let edit_doc_id = t.doc_id.clone();
     let edit_merchant = t.merchant.clone();
     let edit_amount_str = format!("{:.2}", t.amount.abs());
@@ -854,12 +1020,9 @@ fn render_txn_row(
     let edit_category = t.category_code.clone();
     let edit_note = t.note.clone().unwrap_or_default();
     let edit_date = fmt_ts_yyyymmdd(t.occurred_at);
-    let edit_title_doc = t.doc_id.clone();
     let edit_sub_merchant = t.merchant.clone();
-    let cat_opts = cat_options.to_vec();
-    let acc_opts = acc_options.to_vec();
-    let cat_opts_active: Vec<Category> = cat_opts;
-    let acc_opts_active: Vec<Account> = acc_opts;
+    let cat_opts_active = cat_options;
+    let acc_opts_active = acc_options;
 
     let edit_form = if is_tfr {
         view! { <span></span> }.into_any()
@@ -874,7 +1037,6 @@ fn render_txn_row(
                     let form_account = edit_account.clone();
                     let form_note = edit_note.clone();
                     let form_date = edit_date.clone();
-                    let title_doc = edit_title_doc.clone();
                     let sub_merchant = edit_sub_merchant.clone();
                     let form_cat_opts = cat_opts_active.clone();
                     let form_acc_opts = acc_opts_active.clone();
@@ -883,10 +1045,7 @@ fn render_txn_row(
                             <div class="fin-modal" role="dialog" aria-modal="true">
                                 <div class="fin-modal-head">
                                     <div>
-                                        <div class="card-title">
-                                            {ep_i18n::t(locale, "finance.action.edit")}
-                                            <span class="code">{title_doc}</span>
-                                        </div>
+                                        <div class="card-title">{ep_i18n::t(locale, "finance.action.edit")}</div>
                                         <p class="card-sub">{sub_merchant}</p>
                                     </div>
                                     <button class="btn ghost sm" type="button"
@@ -913,22 +1072,20 @@ fn render_txn_row(
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.category")}</span>
                                                 <select name="category_code" style=INPUT_STYLE>
-                                                    {form_cat_opts.into_iter().map(move |c| {
+                                                    {form_cat_opts.iter().map(|c| {
                                                         let selected = c.code == form_category.as_str();
                                                         let code = c.code.clone();
-                                                        let label = format!("{} {}", c.name, c.code);
-                                                        view! { <option value=code selected=selected>{label}</option> }
+                                                        view! { <option value=code selected=selected>{c.name.clone()}</option> }
                                                     }).collect_view()}
                                                 </select>
                                             </label>
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.account")}</span>
                                                 <select name="account_code" style=INPUT_STYLE>
-                                                    {form_acc_opts.into_iter().map(move |a| {
+                                                    {form_acc_opts.iter().map(|a| {
                                                         let selected = a.code == form_account.as_str();
                                                         let code = a.code.clone();
-                                                        let label = format!("{} · {}", a.code, a.name);
-                                                        view! { <option value=code selected=selected>{label}</option> }
+                                                        view! { <option value=code selected=selected>{a.name.clone()}</option> }
                                                     }).collect_view()}
                                                 </select>
                                             </label>
@@ -969,13 +1126,12 @@ fn render_txn_row(
     view! {
         <tr>
             <td class="mono dim">{date}<div style="font-size:10px;color:var(--ink-4)">{time_}</div></td>
-            <td class="doc">{t.doc_id.clone()}</td>
             <td>
                 <span class=txind></span>
                 {t.merchant.clone()}
             </td>
             <td>{cat_cell}</td>
-            <td class="mono dim">{t.account_code.clone()}</td>
+            <td class="dim">{account_label}</td>
             <td class=cls_amt>{amount_text}</td>
             <td class="num">
                 <div class="hstack" style="gap:4px;justify-content:flex-end;align-items:center">
@@ -984,7 +1140,7 @@ fn render_txn_row(
             </td>
         </tr>
         <tr class="edit-row" style:display=move || if editing.get() { "table-row" } else { "none" }>
-            <td colspan="7" style="padding:0;border:0">
+            <td colspan="6" style="padding:0;border:0">
                 {edit_form}
             </td>
         </tr>
@@ -1107,13 +1263,12 @@ fn render_budget(
                                 let row_amount = format!("{:.2}", b.amount);
                                 let row_action = set_budget;
                                 let delete_action = set_budget;
-                                let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("code", &b.category_code)]);
+                                let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("name", &name)]);
                                 view! {
                                     <div>
                                         <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
                                             <div style="font-size:13px">
                                                 <span style="font-weight:500">{name}</span>
-                                                <span class="mono dim" style="margin-left:6px;font-size:10.5px">{format!("FIN-B-{}", b.category_code)}</span>
                                             </div>
                                             <div class="mono" style="font-size:12px">
                                                 {format!("¥{} / ¥{} · ", fmt_int(b.used), fmt_int(b.amount))}
@@ -1132,16 +1287,12 @@ fn render_budget(
                                                     <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
                                                 </button>
                                             </ActionForm>
-                                            <ActionForm action=delete_action attr:style="display:inline">
-                                                <input type="hidden" name="period" value=delete_period/>
-                                                <input type="hidden" name="category_code" value=delete_category/>
-                                                <input type="hidden" name="amount" value="0"/>
-                                                <button class="btn sm" type="submit"
-                                                        style="color:var(--rose-ink)"
-                                                        onclick=format!("return confirm('{}')", escape_js_single_quoted(&delete_confirm))>
-                                                    {t(locale, "finance.action.delete")}
-                                                </button>
-                                            </ActionForm>
+                                            {render_budget_delete(
+                                                delete_action,
+                                                delete_period,
+                                                delete_category,
+                                                delete_confirm,
+                                            )}
                                         </div>
                                     </div>
                                 }
@@ -1154,7 +1305,7 @@ fn render_budget(
                                         <div class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">{t(locale, "finance.budget.unbudgeted")}</div>
                                         {unbudgeted.into_iter().map(|c| view! {
                                             <div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0">
-                                                <span>{c.name.clone()} <span class="mono dim" style="margin-left:6px;font-size:10.5px">{c.code.clone()}</span></span>
+                                                <span>{c.name.clone()}</span>
                                                 <span class="mono">{format!("¥{}", fmt_int(c.value))}</span>
                                             </div>
                                         }).collect_view()}
@@ -1182,8 +1333,8 @@ fn render_budget(
                                 <select name="category_code" style=INPUT_STYLE>
                                     {categories_for_form.into_iter().map(|c| {
                                         let code = c.code.clone();
-                                        let label = format!("{} {}", c.name, c.code);
-                                        view! { <option value=code>{label}</option> }
+                                        let name = c.name.clone();
+                                        view! { <option value=code>{name}</option> }
                                     }).collect_view()}
                                 </select>
                             </label>
@@ -1286,61 +1437,70 @@ fn render_accounts(
 
 fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl IntoView {
     let locale = use_locale();
+    let open = RwSignal::new(false);
+    let toggle = move |_| open.update(|v| *v = !*v);
+    let last_v = RwSignal::new(0usize);
+    Effect::new(move |_| {
+        let v = create_account.version().get();
+        if v != 0
+            && v != last_v.get_untracked()
+            && matches!(create_account.value().get(), Some(Ok(_)))
+        {
+            open.set(false);
+            last_v.set(v);
+        }
+    });
     view! {
         <Card title=t(locale, "finance.account.manager.title") code="FIN-ACC-MGR" sub=t(locale, "finance.account.manager.sub")>
-            <details>
-                <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+            <div class="hstack" style="margin-bottom:10px">
+                <button class="btn primary" type="button" on:click=toggle>
                     <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.account.new")}
-                </summary>
-                <ActionForm action=create_account attr:class="vstack" attr:style="gap:10px;margin-top:12px">
-                    <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr 1fr;gap:10px">
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code")}</span>
-                            <input name="code" required maxlength=MAX_ACCOUNT_CODE_CHARS.to_string() placeholder="ACC-99"
-                                   pattern=format!("[-A-Z0-9]{{{MIN_ACCOUNT_CODE_CHARS},{MAX_ACCOUNT_CODE_CHARS}}}")
-                                   title=t(locale, "finance.account.title_code_pattern")
-                                   style=INPUT_STYLE_MONO/>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                            <input name="name" required maxlength=MAX_ACCOUNT_NAME_CHARS.to_string() placeholder=t(locale, "finance.placeholder.account_name")
-                                   style=INPUT_STYLE/>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.type")}</span>
-                            <select name="type" style=INPUT_STYLE>
-                                {ACCOUNT_TYPES.iter().enumerate().map(|(i, t)| view! {
-                                    <option value=*t selected={i == 0}>{*t}</option>
-                                }).collect_view()}
-                            </select>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tone")}</span>
-                            <select name="tone" style=INPUT_STYLE>
-                                <option value="" selected="selected">"—"</option>
-                                {TONES.iter().map(|t| view! {
-                                    <option value=*t>{*t}</option>
-                                }).collect_view()}
-                            </select>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.opening_balance")}</span>
-                            <input name="opening_balance" type="number" step="0.01" value="0"
-                                   style=INPUT_STYLE_MONO/>
-                        </label>
-                    </div>
-                    <div class="hstack" style="gap:10px;align-items:center">
-                        <button class="btn primary" type="submit">
-                            <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
-                        </button>
-                        <span class="error-slot">
-                            {move || create_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{server_fn_error_text(&e)}</span>
-                            })}
-                        </span>
-                    </div>
-                </ActionForm>
-            </details>
+                </button>
+            </div>
+            {move || if open.get() {
+                view! {
+                    <ActionForm action=create_account attr:class="vstack" attr:style="gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+                        <input type="hidden" name="code" value=""/>
+                        <input type="hidden" name="tone" value=""/>
+                        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
+                                <input name="name" required autofocus
+                                       maxlength=MAX_ACCOUNT_NAME_CHARS.to_string()
+                                       placeholder=t(locale, "finance.placeholder.account_name")
+                                       style=INPUT_STYLE/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.type")}</span>
+                                <select name="type" style=INPUT_STYLE>
+                                    {ACCOUNT_TYPES.iter().enumerate().map(|(i, t)| view! {
+                                        <option value=*t selected={i == 0}>{*t}</option>
+                                    }).collect_view()}
+                                </select>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.opening_balance")}</span>
+                                <input name="opening_balance" type="number" step="0.01" value="0"
+                                       style=INPUT_STYLE_MONO/>
+                            </label>
+                        </div>
+                        <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                            <span class="error-slot" style="flex:1">
+                                {move || create_account.value().get().and_then(|r| r.err()).map(|e| view! {
+                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
+                                })}
+                            </span>
+                            <button class="btn ghost" type="button"
+                                    on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
+                            <button class="btn primary" type="submit">
+                                <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
+                            </button>
+                        </div>
+                    </ActionForm>
+                }.into_any()
+            } else {
+                view! { <span></span> }.into_any()
+            }}
         </Card>
     }
 }
@@ -1371,15 +1531,14 @@ fn render_account_card(
     let type_str = a.r#type.clone();
     let tone_str = a.tone.clone();
     let card_title = a.name.clone();
-    let card_code = a.code.clone();
     let card_sub = a.r#type.clone();
     let confirm_msg = tf(
         locale,
         "finance.account.confirm_delete",
-        &[("code", &a.code)],
+        &[("name", &a.name)],
     );
     view! {
-        <Card title=card_title code=card_code sub=card_sub>
+        <Card title=card_title sub=card_sub>
             <div class="mono" style="font-size:24px;font-weight:600;letter-spacing:-0.02em">
                 "¥" {fmt_money(a.balance)}
             </div>
@@ -1397,12 +1556,6 @@ fn render_account_card(
                     </summary>
                     <ActionForm action=update_account attr:class="vstack" attr:style="gap:8px;margin-top:8px">
                         <input type="hidden" name="code" value=code.clone()/>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code_readonly")}</span>
-                            <input type="text" disabled value=code.clone()
-                                   title=t(locale, "finance.account.title_code_readonly")
-                                   style=INPUT_STYLE_MONO/>
-                        </label>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
                             <input name="name" required maxlength=MAX_ACCOUNT_NAME_CHARS.to_string() value=name
@@ -1459,63 +1612,65 @@ fn render_categories(
     cats.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.code.cmp(&b.code)));
     let usage = d.category_usage.clone();
     let next_sort = cats.iter().map(|c| c.sort_order).max().unwrap_or(0) + 1;
+    let open = RwSignal::new(false);
+    let toggle = move |_| open.update(|v| *v = !*v);
+    let last_v = RwSignal::new(0usize);
+    Effect::new(move |_| {
+        let v = create_category.version().get();
+        if v != 0
+            && v != last_v.get_untracked()
+            && matches!(create_category.value().get(), Some(Ok(_)))
+        {
+            open.set(false);
+            last_v.set(v);
+        }
+    });
     view! {
         <Card title=t(locale, "finance.category.manager.title") code="FIN-CAT-MGR" sub=t(locale, "finance.category.manager.sub")>
-            <details>
-                <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px">
+            <div class="hstack" style="margin-bottom:10px">
+                <button class="btn primary" type="button" on:click=toggle>
                     <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.category.new")}
-                </summary>
-                <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;margin-top:12px">
-                    <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:10px">
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code")}</span>
-                            <input name="code" required maxlength=MAX_CATEGORY_CODE_CHARS.to_string() placeholder="EDU"
-                                   pattern=format!("[A-Z&]{{1,{MAX_CATEGORY_CODE_CHARS}}}")
-                                   title=t(locale, "finance.category.title_code_pattern")
-                                   style=INPUT_STYLE_MONO/>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                            <input name="name" required maxlength=MAX_CATEGORY_NAME_CHARS.to_string() placeholder=t(locale, "finance.placeholder.category_name")
-                                   style=INPUT_STYLE/>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.tone")}</span>
-                            <select name="tone" style=INPUT_STYLE>
-                                <option value="" selected="selected">"—"</option>
-                                {TONES.iter().map(|t| view! {
-                                    <option value=*t>{*t}</option>
-                                }).collect_view()}
-                            </select>
-                        </label>
-                        <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.sort_order")}</span>
-                            <input name="sort_order" type="number" step="1" min="0"
-                                   value=next_sort.to_string()
-                                   style=INPUT_STYLE_MONO/>
-                        </label>
-                    </div>
-                    <div class="hstack" style="gap:10px;align-items:center">
-                        <button class="btn primary" type="submit">
-                            <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
-                        </button>
-                        <span class="error-slot">
-                            {move || create_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{server_fn_error_text(&e)}</span>
-                            })}
-                        </span>
-                    </div>
-                </ActionForm>
-            </details>
+                </button>
+            </div>
+            {move || if open.get() {
+                view! {
+                    <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+                        <input type="hidden" name="code" value=""/>
+                        <input type="hidden" name="tone" value=""/>
+                        <input type="hidden" name="sort_order" value=next_sort.to_string()/>
+                        <div style="display:grid;grid-template-columns:1fr;gap:10px">
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
+                                <input name="name" required autofocus
+                                       maxlength=MAX_CATEGORY_NAME_CHARS.to_string()
+                                       placeholder=t(locale, "finance.placeholder.category_name")
+                                       style=INPUT_STYLE/>
+                            </label>
+                        </div>
+                        <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                            <span class="error-slot" style="flex:1">
+                                {move || create_category.value().get().and_then(|r| r.err()).map(|e| view! {
+                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
+                                })}
+                            </span>
+                            <button class="btn ghost" type="button"
+                                    on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
+                            <button class="btn primary" type="submit">
+                                <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
+                            </button>
+                        </div>
+                    </ActionForm>
+                }.into_any()
+            } else {
+                view! { <span></span> }.into_any()
+            }}
 
             <div class="scroll-x" style="margin-top:14px">
                 <table class="tbl">
                     <thead>
                         <tr>
                             <th>{t(locale, "finance.field.name")}</th>
-                            <th style="width:80px">{t(locale, "finance.field.code")}</th>
                             <th style="width:80px">{t(locale, "finance.field.tone")}</th>
-                            <th class="num" style="width:64px">{t(locale, "finance.field.sort_order")}</th>
                             <th class="num" style="width:64px">{t(locale, "finance.field.used")}</th>
                             <th class="num" style="width:220px">{t(locale, "finance.field.ops")}</th>
                         </tr>
@@ -1544,14 +1699,13 @@ fn render_category_row(
     let confirm_msg = tf(
         locale,
         "finance.category.confirm_delete",
-        &[("code", &c.code)],
+        &[("name", &c.name)],
     );
     let code = c.code.clone();
     let name = c.name.clone();
     let tone_str = c.tone.clone();
     let sort_order_str = c.sort_order.to_string();
     let display_name = c.name.clone();
-    let display_code = c.code.clone();
     let display_tone_label = if c.tone.is_empty() {
         "—".to_string()
     } else {
@@ -1560,11 +1714,9 @@ fn render_category_row(
     view! {
         <tr>
             <td>{display_name}</td>
-            <td class="mono">{display_code}</td>
             <td>
                 <UiTag tone=tone_enum>{display_tone_label}</UiTag>
             </td>
-            <td class="num mono">{c.sort_order}</td>
             <td class="num mono">{usage_count}</td>
             <td class="num">
                 <div class="hstack" style="gap:6px;justify-content:flex-end;flex-wrap:wrap">
@@ -1574,12 +1726,7 @@ fn render_category_row(
                         </summary>
                         <ActionForm action=update_category attr:class="vstack" attr:style="gap:8px;margin-top:8px;min-width:240px">
                             <input type="hidden" name="code" value=code.clone()/>
-                            <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.code_readonly")}</span>
-                                <input type="text" disabled value=code
-                                       title=t(locale, "finance.category.title_code_readonly")
-                                       style=INPUT_STYLE_MONO/>
-                            </label>
+                            <input type="hidden" name="sort_order" value=sort_order_str/>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
                                 <input name="name" required maxlength=MAX_CATEGORY_NAME_CHARS.to_string() value=name
@@ -1594,12 +1741,6 @@ fn render_category_row(
                                         view! { <option value=*t selected=selected>{*t}</option> }
                                     }).collect_view()}
                                 </select>
-                            </label>
-                            <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.sort_order")}</span>
-                                <input name="sort_order" type="number" step="1" min="0"
-                                       value=sort_order_str
-                                       style=INPUT_STYLE_MONO/>
                             </label>
                             <div class="hstack" style="gap:8px;align-items:center">
                                 <button class="btn primary" type="submit">
@@ -1735,10 +1876,7 @@ fn render_category_share_card(d: &LedgerData) -> impl IntoView {
                             view! {
                                 <div>
                                     <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                                        <div style="font-size:12.5px">
-                                            <span>{c.name.clone()}</span>
-                                            <span class="mono dim" style="margin-left:6px;font-size:10.5px">{c.code.clone()}</span>
-                                        </div>
+                                        <div style="font-size:12.5px"><span>{c.name.clone()}</span></div>
                                         <div class="mono" style="font-size:12px">{format!("¥{}", fmt_int(c.value))} <span class="dim">{format!("· {}%", c.pct)}</span></div>
                                     </div>
                                     <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>

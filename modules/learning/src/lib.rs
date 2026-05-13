@@ -19,7 +19,10 @@ mod ssr_module {
             "LRN"
         }
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[("001_learning", include_str!("../migrations/001_learning.sql"))]
+            &[(
+                "001_learning",
+                include_str!("../migrations/001_learning.sql"),
+            )]
         }
 
         fn open_api(&self, state: AppState) -> axum::Router<AppState> {

@@ -43,4 +43,8 @@ pub enum IconKind {
     Flame,
     Coin,
     Export,
+    Logout,
+    Search,
+    Close,
+    Empty,
 }

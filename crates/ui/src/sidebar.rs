@@ -131,7 +131,7 @@ pub fn Sidebar(
                 </div>
                 <form method="post" action="/logout">
                     <button class="foot-btn" type="submit" title=t!(locale, ui.sidebar.logout_title)>
-                        <Icon kind=IconKind::Menu size=14/>
+                        <Icon kind=IconKind::Logout size=14/>
                     </button>
                 </form>
             </div>

@@ -27,7 +27,7 @@ pub async fn page(
     let next = sanitize_next(q.next.as_deref());
     let err_block = if q.error.is_some() {
         format!(
-            r#"<div style="background:var(--rose-soft);color:var(--rose-ink);padding:8px 12px;border-radius:8px;font-size:13px;margin-bottom:14px">{}</div>"#,
+            r#"<div class="login-error"><svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="M9 5v4M9 12.5v.5"/></svg>{}</div>"#,
             ep_core::html_escape(t(locale, "app.login.error_bad_password")),
         )
     } else {
@@ -44,22 +44,21 @@ pub async fn page(
 <script src="/static/theme-init.js"></script>
 </head>
 <body>
-<div style="min-height:100vh;display:grid;place-items:center;background:var(--bg)">
-  <form method="post" action="/login" style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:32px 28px;width:380px;box-shadow:var(--shadow-md)">
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px">
-      <div class="brand-mark mono" style="width:34px;height:34px;background:var(--ink);color:var(--bg);border-radius:9px;display:grid;place-items:center;font-weight:700">E</div>
-      <div>
-        <div style="font-weight:600;font-size:16px">Eigenpulse</div>
-        <div class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">{meta}</div>
+<div class="login-shell">
+  <form method="post" action="/login" class="login-card">
+    <div class="login-brand">
+      <div class="brand-mark mono">E</div>
+      <div class="brand-text">
+        <strong>Eigenpulse</strong>
+        <small>{meta}</small>
       </div>
     </div>
     {err_block}
     <input type="hidden" name="next" value="{next_html}"/>
-    <label style="display:block;font-size:12px;color:var(--ink-3);margin-bottom:6px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.06em">{password_label}</label>
-    <input type="password" name="password" autofocus required
-           style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);font-family:var(--font-mono);font-size:14px;margin-bottom:16px"/>
-    <button class="btn primary" type="submit" style="width:100%;justify-content:center;padding:9px 14px;font-size:13.5px">{submit}</button>
-    <p class="muted" style="font-size:11.5px;margin-top:18px;line-height:1.5">{system_hint}</p>
+    <label class="login-field" for="login-password">{password_label}</label>
+    <input id="login-password" class="login-input mono" type="password" name="password" autocomplete="current-password" autofocus required/>
+    <button class="btn primary login-submit" type="submit">{submit}</button>
+    <p class="login-hint">{system_hint}</p>
   </form>
 </div>
 </body></html>"##,

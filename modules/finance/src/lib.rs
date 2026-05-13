@@ -13,9 +13,10 @@ pub use view::{render_net_strip, FinanceView};
 pub use api::open_api;
 #[cfg(feature = "ssr")]
 pub use server_fns::{
-    add_transfer_inner, add_txn_inner, delete_account_inner, delete_category_inner,
-    delete_txn_inner, load_month_buckets_12, parse_occurred_at, set_budget_inner, update_txn_inner,
-    AddTxnFields, UpdateTxnFields,
+    add_transfer_inner, add_txn_inner, create_account_inner, create_category_inner,
+    delete_account_inner, delete_category_inner, delete_txn_inner, load_month_buckets_12,
+    parse_occurred_at, set_budget_inner, update_account_inner, update_category_inner,
+    update_txn_inner, AddTxnFields, UpdateTxnFields,
 };
 
 #[cfg(feature = "ssr")]
@@ -136,10 +137,7 @@ mod ssr_module {
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-            assert_eq!(
-                activity_count, 0,
-                "FIN activity should start empty"
-            );
+            assert_eq!(activity_count, 0, "FIN activity should start empty");
 
             let seq: i64 = sqlx::query_scalar(
                 "SELECT last_value FROM seq WHERE module = 'FIN' AND kind = 'doc:y24'",

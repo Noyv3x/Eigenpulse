@@ -3,20 +3,15 @@ use leptos::server_fn::{client::Client, codec::PostUrl, request::ClientReq, Serv
 
 /// Per-row "delete" / "revoke" affordance for ledger-style tables.
 ///
-/// Renders an inline `<ActionForm>` carrying a single hidden field plus a
-/// red submit button with a `confirm()` JS guard, wrapped in
-/// `<span class="row-actions-slot">` so tachys' text-node walker keeps a
-/// stable anchor when the surrounding reactive content shifts. The wrapper
-/// is re-emitted by this component, so callers don't need their own outer
-/// span.
+/// Renders a small destructive-styled button. When the user clicks, an
+/// in-app [`ConfirmDialog`] appears (instead of the browser's native
+/// `confirm()` prompt); only on confirmation do we actually submit the
+/// `ActionForm` that drives the underlying server action.
 ///
 /// `value` ships as the hidden input's value. Default `field="doc_id"` fits
 /// most modules; override with `field="id"` for PAT revoke / notify channel
 /// where the server fn takes an `i64` named `id` (the wire is still string-
 /// form-data, so a stringified `i64` deserialises fine).
-///
-/// `confirm` is escaped for a single-quoted JavaScript string before being
-/// placed in the inline `onclick` handler.
 #[component]
 pub fn RowDeleteAction<S>(
     action: ServerAction<S>,
@@ -46,18 +41,51 @@ where
     let confirm_msg =
         confirm.unwrap_or_else(|| ep_i18n::t(locale, "ui.row_action.default_confirm").into());
     let label = label.unwrap_or_else(|| ep_i18n::t(locale, "ui.row_action.default_label").into());
-    let onclick = format!(
-        "return confirm('{}')",
-        escape_js_single_quoted(&confirm_msg)
-    );
+    let cancel_label = ep_i18n::t(locale, "ui.row_action.cancel_label").to_string();
+    let confirm_label = ep_i18n::t(locale, "ui.row_action.confirm_label").to_string();
+    let open = RwSignal::new(false);
+    let value_for_form = value.clone();
+    let field_for_form = field.clone();
+    let confirm_for_dialog = confirm_msg.clone();
+    let confirm_label_for_btn = confirm_label.clone();
+    let cancel_label_for_btn = cancel_label.clone();
     view! {
         <span class="row-actions-slot">
-            <ActionForm action=action attr:style="display:inline">
-                <input type="hidden" name=field value=value/>
-                <button class="btn sm" type="submit"
-                        style="color:var(--rose-ink)"
-                        onclick=onclick>{label}</button>
-            </ActionForm>
+            <button class="btn sm danger" type="button"
+                    on:click=move |_| open.set(true)>{label}</button>
+            {move || {
+                if !open.get() {
+                    return view! { <span></span> }.into_any();
+                }
+                let value_inner = value_for_form.clone();
+                let field_inner = field_for_form.clone();
+                let confirm_text = confirm_for_dialog.clone();
+                let confirm_label = confirm_label_for_btn.clone();
+                let cancel_label = cancel_label_for_btn.clone();
+                view! {
+                    <div class="fin-modal-backdrop confirm-backdrop"
+                         on:click=move |_| open.set(false)>
+                        <div class="fin-modal confirm-modal" role="alertdialog" aria-modal="true"
+                             on:click=move |e| e.stop_propagation()>
+                            <div class="confirm-body">
+                                <div class="confirm-icon danger">
+                                    <crate::Icon kind=ep_core::IconKind::Close size=18/>
+                                </div>
+                                <div class="confirm-text">
+                                    <div class="confirm-title">{confirm_text}</div>
+                                </div>
+                            </div>
+                            <ActionForm action=action attr:class="confirm-foot">
+                                <input type="hidden" name=field_inner value=value_inner/>
+                                <button class="btn ghost" type="button"
+                                        on:click=move |_| open.set(false)>{cancel_label}</button>
+                                <button class="btn primary danger-action" type="submit"
+                                        on:click=move |_| open.set(false)>{confirm_label}</button>
+                            </ActionForm>
+                        </div>
+                    </div>
+                }.into_any()
+            }}
         </span>
     }
 }

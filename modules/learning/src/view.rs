@@ -2,7 +2,10 @@ use crate::model::*;
 use crate::server_fns::*;
 use ep_core::IconKind;
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
-use ep_ui::{Card, Direction, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, Tag};
+use ep_ui::{
+    Card, Direction, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, SkeletonCard,
+    SkeletonKpi, Tag,
+};
 use leptos::prelude::*;
 
 #[derive(Clone, Copy)]
@@ -62,7 +65,11 @@ pub fn LearningView() -> impl IntoView {
                 sub=t(locale, "learning.page.sub")
             />
 
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
+            <Suspense fallback=move || view! {
+                <div style="margin-bottom:20px"><SkeletonCard rows=0/></div>
+                <SkeletonKpi count=3/>
+                <SkeletonCard rows=2/>
+            }>
                 {move || data.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_learning(d, actions).into_any(),

@@ -78,5 +78,13 @@ fn path_for(k: IconKind) -> &'static str {
             r#"<circle cx="9" cy="9" r="6.5"/><path d="M9 5v8M7 7h3a1.5 1.5 0 0 1 0 3h-3M7 10h3a1.5 1.5 0 0 1 0 3h-3"/>"#
         }
         IconKind::Export => r#"<path d="M9 3v8M6 6l3-3 3 3"/><path d="M3 13v2h12v-2"/>"#,
+        IconKind::Logout => {
+            r#"<path d="M9 3H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h5"/><path d="M12 6l3 3-3 3"/><path d="M7 9h8"/>"#
+        }
+        IconKind::Search => r#"<circle cx="8" cy="8" r="4.5"/><path d="M11.5 11.5l3.5 3.5"/>"#,
+        IconKind::Close => r#"<path d="M4 4l10 10M14 4L4 14"/>"#,
+        IconKind::Empty => {
+            r#"<rect x="3" y="4" width="12" height="11" rx="1.5"/><path d="M6 8h6M6 11h4"/>"#
+        }
     }
 }

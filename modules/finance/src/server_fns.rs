@@ -10,9 +10,12 @@ use sqlx::SqlitePool;
 
 pub(crate) const MAX_TXN_MERCHANT_CHARS: usize = 128;
 pub(crate) const MAX_TXN_NOTE_CHARS: usize = 2_000;
+#[allow(dead_code)]
 pub(crate) const MIN_ACCOUNT_CODE_CHARS: usize = 2;
+#[allow(dead_code)]
 pub(crate) const MAX_ACCOUNT_CODE_CHARS: usize = 16;
 pub(crate) const MAX_ACCOUNT_NAME_CHARS: usize = 64;
+#[allow(dead_code)]
 pub(crate) const MAX_CATEGORY_CODE_CHARS: usize = 8;
 pub(crate) const MAX_CATEGORY_NAME_CHARS: usize = 32;
 
@@ -212,7 +215,11 @@ mod tests {
 
     #[test]
     fn validate_category_input_enforces_shared_field_limits() {
-        assert!(validate_category_input("", "Food", "").is_err());
+        // Empty code is now allowed — the helper auto-generates one later.
+        assert_eq!(
+            validate_category_input("", "Food", "").unwrap(),
+            ("".to_string(), "Food".to_string(), "".to_string())
+        );
         assert!(
             validate_category_input(&"A".repeat(MAX_CATEGORY_CODE_CHARS + 1), "Food", "").is_err()
         );
@@ -223,6 +230,22 @@ mod tests {
             validate_category_input(" F&B ", " Food ", "amber").unwrap(),
             ("F&B".to_string(), "Food".to_string(), "amber".to_string())
         );
+    }
+
+    #[test]
+    fn slugify_to_code_handles_ascii_and_chinese() {
+        assert_eq!(
+            slugify_to_code("Cash Wallet", MAX_ACCOUNT_CODE_CHARS),
+            "CASH-WALLET"
+        );
+        assert_eq!(
+            slugify_to_code("My  Savings Acct!!", MAX_ACCOUNT_CODE_CHARS),
+            "MY-SAVINGS-ACCT"
+        );
+        // Chinese-only names produce empty slugs — callers fall back to ACC-N.
+        assert_eq!(slugify_to_code("招行储蓄", MAX_ACCOUNT_CODE_CHARS), "");
+        // Truncation should not leave a trailing dash.
+        assert_eq!(slugify_to_code("Foo-Bar-Baz-Qux", 8), "FOO-BAR");
     }
 
     #[test]
@@ -1596,12 +1619,15 @@ fn validate_account_input(
     let name = name.trim().to_string();
     let r#type = r#type.trim().to_string();
     let tone = tone.trim().to_string();
-    if code.len() < MIN_ACCOUNT_CODE_CHARS || code.len() > MAX_ACCOUNT_CODE_CHARS {
+    if !code.is_empty()
+        && (code.len() < MIN_ACCOUNT_CODE_CHARS || code.len() > MAX_ACCOUNT_CODE_CHARS)
+    {
         return Err(ep_i18n::err("finance.err.account_code_format"));
     }
-    if !code
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
+    if !code.is_empty()
+        && !code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
     {
         return Err(ep_i18n::err("finance.err.account_code_charset"));
     }
@@ -1621,6 +1647,178 @@ fn validate_account_input(
         ));
     }
     Ok((code, name, r#type, tone))
+}
+
+/// `true` when an account row with `candidate` exists *other* than the
+/// (optional) `exclude` code. Used by [`unique_account_code`] so a
+/// rename that lands on the same slug as the current row's own code is
+/// treated as available.
+#[cfg(feature = "ssr")]
+async fn account_code_taken(
+    conn: &mut sqlx::SqliteConnection,
+    candidate: &str,
+    exclude: Option<&str>,
+) -> Result<bool, ServerFnError> {
+    if exclude == Some(candidate) {
+        return Ok(false);
+    }
+    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM fin_account WHERE code = ?1 LIMIT 1")
+        .bind(candidate)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(server_err)?;
+    Ok(r.is_some())
+}
+
+/// Pick a unique account code that mirrors `name`. Tries the ASCII slug
+/// first (e.g. "Cash Wallet" → "CASH-WALLET"). When the slug is empty
+/// (non-ASCII names like "招行储蓄"), seeds the search from a stable
+/// fingerprint hashed off `name` rather than always starting at `ACC-1`
+/// — that way renaming "招行储蓄" → "工行储蓄" actually rotates the
+/// generated code (`ACC-3742` → `ACC-5891`) instead of leaving the row
+/// stuck on its original fallback slot regardless of how many times the
+/// user edits the name. The `exclude` argument lets updates keep their
+/// current row's code "available" against themselves.
+#[cfg(feature = "ssr")]
+async fn unique_account_code(
+    conn: &mut sqlx::SqliteConnection,
+    name: &str,
+    exclude: Option<&str>,
+) -> Result<String, ServerFnError> {
+    let slug = slugify_to_code(name, MAX_ACCOUNT_CODE_CHARS);
+    if !slug.is_empty() && !account_code_taken(conn, &slug, exclude).await? {
+        return Ok(slug);
+    }
+    let limit = fallback_seed_range("ACC-", MAX_ACCOUNT_CODE_CHARS);
+    let seed = name_fingerprint(name, limit);
+    for offset in 0..limit {
+        let n = ((seed + offset) % limit) + 1;
+        let candidate = format!("ACC-{n}");
+        if candidate.len() > MAX_ACCOUNT_CODE_CHARS {
+            continue;
+        }
+        if !account_code_taken(conn, &candidate, exclude).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(ep_i18n::err("finance.err.account_code_format"))
+}
+
+/// `true` when a category row with `candidate` exists *other* than the
+/// (optional) `exclude` code.
+#[cfg(feature = "ssr")]
+async fn category_code_taken(
+    conn: &mut sqlx::SqliteConnection,
+    candidate: &str,
+    exclude: Option<&str>,
+) -> Result<bool, ServerFnError> {
+    if exclude == Some(candidate) {
+        return Ok(false);
+    }
+    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM fin_category WHERE code = ?1 LIMIT 1")
+        .bind(candidate)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(server_err)?;
+    Ok(r.is_some())
+}
+
+/// Pick a unique category code that mirrors `name`. Slug character class
+/// is `[A-Z&]` (matches `validate_category_input`); fallback (when the
+/// name has no ASCII letters to slugify) is `CATN`, seeded from a stable
+/// fingerprint of `name` so renaming "餐饮" → "饮食" rotates `CAT37` to
+/// some other slot instead of leaving the row stuck on the same code.
+#[cfg(feature = "ssr")]
+async fn unique_category_code(
+    conn: &mut sqlx::SqliteConnection,
+    name: &str,
+    exclude: Option<&str>,
+) -> Result<String, ServerFnError> {
+    let slug: String = slugify_to_code(name, MAX_CATEGORY_CODE_CHARS)
+        .chars()
+        .filter(|c| c.is_ascii_uppercase() || *c == '&')
+        .collect();
+    if !slug.is_empty() && !category_code_taken(conn, &slug, exclude).await? {
+        return Ok(slug);
+    }
+    let limit = fallback_seed_range("CAT", MAX_CATEGORY_CODE_CHARS);
+    let seed = name_fingerprint(name, limit);
+    for offset in 0..limit {
+        let n = ((seed + offset) % limit) + 1;
+        let candidate = format!("CAT{n}");
+        if candidate.len() > MAX_CATEGORY_CODE_CHARS {
+            continue;
+        }
+        if !category_code_taken(conn, &candidate, exclude).await? {
+            return Ok(candidate);
+        }
+    }
+    Err(ep_i18n::err("finance.err.category_code_format"))
+}
+
+/// Largest `N` we'll try for a `{prefix}{N}` fallback code that still fits
+/// `max_chars`. Returns the count of valid candidates (so callers can use
+/// `1..=count`).
+#[cfg(feature = "ssr")]
+fn fallback_seed_range(prefix: &str, max_chars: usize) -> u64 {
+    let digit_budget = max_chars.saturating_sub(prefix.len());
+    if digit_budget == 0 {
+        return 0;
+    }
+    let mut max: u64 = 0;
+    for _ in 0..digit_budget {
+        max = max * 10 + 9;
+    }
+    max
+}
+
+/// Stable per-name fingerprint mapped into `[0, modulus)`. Used to seed the
+/// fallback `{prefix}{N}` search so different names land on different
+/// starting slots even when the slugifier can't extract ASCII letters.
+/// The intentional simplicity (FNV-1a style mix) is fine here: we only need
+/// a deterministic shuffle, not a cryptographic hash.
+#[cfg(feature = "ssr")]
+fn name_fingerprint(name: &str, modulus: u64) -> u64 {
+    if modulus == 0 {
+        return 0;
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for byte in name.as_bytes() {
+        h ^= u64::from(*byte);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h % modulus
+}
+
+/// Build an ASCII slug from a name suitable for use as an account/category
+/// code. Strips non-ASCII (so Chinese names → empty slug, falling back to
+/// the numbered scheme), uppercases ASCII letters, replaces runs of
+/// non-alphanumeric runs with a single `-`, trims dashes.
+#[cfg(feature = "ssr")]
+fn slugify_to_code(name: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_dash = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            for c in ch.to_uppercase() {
+                out.push(c);
+            }
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.len() > max_chars {
+        out.truncate(max_chars);
+        while out.ends_with('-') {
+            out.pop();
+        }
+    }
+    out
 }
 
 #[cfg(feature = "ssr")]
@@ -1645,6 +1843,12 @@ pub async fn create_account_inner(
         return Err(ep_i18n::err("finance.err.opening_balance_invalid"));
     }
     let (code, name, r#type, tone) = validate_account_input(&code, &name, &r#type, &tone)?;
+    let code = if code.is_empty() {
+        let mut conn = pool.acquire().await.map_err(server_err)?;
+        unique_account_code(&mut conn, &name, None).await?
+    } else {
+        code
+    };
     let res = sqlx::query(
         "INSERT INTO fin_account (code, name, type, tone, balance, archived, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())",
@@ -1689,23 +1893,101 @@ pub async fn update_account_inner(
     r#type: String,
     tone: String,
 ) -> Result<Account, ServerFnError> {
+    update_account_inner_with(pool, code, name, r#type, tone, /* rename_code */ true).await
+}
+
+/// Internal counterpart of [`update_account_inner`] that lets the caller
+/// opt out of the name-driven code rename. The OpenAPI PATCH handler
+/// passes `rename_code = false` so external API consumers (PATs / Shortcuts)
+/// keep a stable key for the resource they just touched. The UI passes
+/// `true` so renaming "Cash" → "Wallet" keeps the internal `code` aligned
+/// with the human-visible name.
+#[cfg(feature = "ssr")]
+pub async fn update_account_inner_with(
+    pool: &SqlitePool,
+    code: String,
+    name: String,
+    r#type: String,
+    tone: String,
+    rename_code: bool,
+) -> Result<Account, ServerFnError> {
     let (code, name, r#type, tone) = validate_account_input(&code, &name, &r#type, &tone)?;
-    let res = sqlx::query("UPDATE fin_account SET name = ?1, type = ?2, tone = ?3 WHERE code = ?4")
+    if code.is_empty() {
+        return Err(ep_i18n::err("finance.err.account_code_format"));
+    }
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    // Re-derive the canonical code from the new name when the caller asks
+    // for it. The UI never shows the code, so leaving a stale slug ("CASH"
+    // for an account renamed to "Wallet") would only surface in CSV
+    // exports / PAT API responses. The SQLite schema lacks
+    // ON UPDATE CASCADE, so we walk every referencing table
+    // (`fin_txn.account_code`) inside the same transaction.
+    //
+    // `defer_foreign_keys = ON` lets the FK check run at COMMIT time rather
+    // than after every statement, so updating `fin_account.code` before
+    // patching the `fin_txn.account_code` rows that still reference the
+    // old key doesn't trip a constraint failure mid-transaction.
+    sqlx::query("PRAGMA defer_foreign_keys = ON")
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    // Read the current name so we can tell whether this update actually
+    // changes it; renaming the internal code on a tone-only edit (or any
+    // other field-only edit) would gratuitously invalidate any manually
+    // assigned code (PATCH /api/v1/fin/account/{code} can install one).
+    let cur_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM fin_account WHERE code = ?1")
+            .bind(&code)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    let name_changed = cur_name.as_deref() != Some(name.as_str());
+    let new_code = if rename_code && name_changed {
+        unique_account_code(&mut tx, &name, Some(&code)).await?
+    } else {
+        code.clone()
+    };
+    let res = if new_code != code {
+        let res = sqlx::query(
+            "UPDATE fin_account SET code = ?1, name = ?2, type = ?3, tone = ?4 WHERE code = ?5",
+        )
+        .bind(&new_code)
         .bind(&name)
         .bind(&r#type)
         .bind(&tone)
         .bind(&code)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(server_err)?;
+        if res.rows_affected() == 0 {
+            return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
+        }
+        sqlx::query("UPDATE fin_txn SET account_code = ?1 WHERE account_code = ?2")
+            .bind(&new_code)
+            .bind(&code)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
+        res
+    } else {
+        sqlx::query("UPDATE fin_account SET name = ?1, type = ?2, tone = ?3 WHERE code = ?4")
+            .bind(&name)
+            .bind(&r#type)
+            .bind(&tone)
+            .bind(&code)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?
+    };
     if res.rows_affected() == 0 {
         return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
     }
+    tx.commit().await.map_err(server_err)?;
     let row: (String, String, String, String, f64, bool, i64) = sqlx::query_as(
         "SELECT code, name, type, tone, balance, archived, created_at
            FROM fin_account WHERE code = ?1",
     )
-    .bind(&code)
+    .bind(&new_code)
     .fetch_one(pool)
     .await
     .map_err(server_err)?;
@@ -1852,10 +2134,17 @@ fn validate_category_input(
     let code = code.trim().to_string();
     let name = name.trim().to_string();
     let tone = tone.trim().to_string();
-    // Inline char-class check (no regex dep). Accepts `&` for seed code F&B.
-    if code.is_empty()
-        || code.len() > MAX_CATEGORY_CODE_CHARS
-        || !code.chars().all(|c| c.is_ascii_uppercase() || c == '&')
+    // Inline char-class check (no regex dep). Accepts `&` for seed code
+    // F&B and ASCII digits so the `CATN` fallback codes generated for
+    // non-ASCII names (e.g. "餐饮") survive a round-trip through this
+    // validator on update. An empty `code` is allowed at the input
+    // boundary and gets a generated value before insert (see
+    // `unique_category_code`).
+    if !code.is_empty()
+        && (code.len() > MAX_CATEGORY_CODE_CHARS
+            || !code
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '&'))
     {
         return Err(ep_i18n::err("finance.err.category_code_format"));
     }
@@ -1888,6 +2177,12 @@ pub async fn create_category_inner(
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
     let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    let code = if code.is_empty() {
+        let mut conn = pool.acquire().await.map_err(server_err)?;
+        unique_category_code(&mut conn, &name, None).await?
+    } else {
+        code
+    };
     let sort_order = validate_category_sort_order(sort_order)?;
     let res = sqlx::query(
         "INSERT INTO fin_category (code, name, tone, sort_order, archived, created_at)
@@ -1931,26 +2226,103 @@ pub async fn update_category_inner(
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
-    let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
-    let sort_order = validate_category_sort_order(sort_order)?;
-    let res = sqlx::query(
-        "UPDATE fin_category SET name = ?1, tone = ?2, sort_order = ?3 WHERE code = ?4",
+    update_category_inner_with(
+        pool, code, name, tone, sort_order, /* rename_code */ true,
     )
-    .bind(&name)
-    .bind(&tone)
-    .bind(sort_order)
-    .bind(&code)
-    .execute(pool)
     .await
-    .map_err(server_err)?;
+}
+
+/// Internal counterpart of [`update_category_inner`]; mirrors
+/// [`update_account_inner_with`]. UI callers (`#[server] update_category`)
+/// opt into the rename; OpenAPI PATCH consumers opt out so external clients
+/// continue to address the resource by its original code.
+#[cfg(feature = "ssr")]
+pub async fn update_category_inner_with(
+    pool: &SqlitePool,
+    code: String,
+    name: String,
+    tone: String,
+    sort_order: i64,
+    rename_code: bool,
+) -> Result<Category, ServerFnError> {
+    let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    if code.is_empty() {
+        return Err(ep_i18n::err("finance.err.category_code_format"));
+    }
+    let sort_order = validate_category_sort_order(sort_order)?;
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    // Same cascade logic as `update_account_inner_with`: the UI never shows
+    // the category code, so renaming "Food" → "Dining" needs to bring the
+    // internal `code` along too. Walk `fin_txn` and `fin_budget` inside
+    // this transaction (SQLite schema has no ON UPDATE CASCADE), and defer
+    // FK checks to COMMIT so the parent-then-children order is allowed.
+    sqlx::query("PRAGMA defer_foreign_keys = ON")
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    // Same guard as `update_account_inner_with`: only re-derive a code
+    // when the human-readable name actually changed. A tone-only or
+    // sort-order-only edit must leave a manually assigned code (set via
+    // the OpenAPI PATCH path) alone.
+    let cur_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM fin_category WHERE code = ?1")
+            .bind(&code)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    let name_changed = cur_name.as_deref() != Some(name.as_str());
+    let new_code = if rename_code && name_changed {
+        unique_category_code(&mut tx, &name, Some(&code)).await?
+    } else {
+        code.clone()
+    };
+    let res = if new_code != code {
+        let res = sqlx::query(
+            "UPDATE fin_category SET code = ?1, name = ?2, tone = ?3, sort_order = ?4 WHERE code = ?5",
+        )
+        .bind(&new_code)
+        .bind(&name)
+        .bind(&tone)
+        .bind(sort_order)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+        if res.rows_affected() == 0 {
+            return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
+        }
+        sqlx::query("UPDATE fin_txn SET category_code = ?1 WHERE category_code = ?2")
+            .bind(&new_code)
+            .bind(&code)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
+        sqlx::query("UPDATE fin_budget SET category_code = ?1 WHERE category_code = ?2")
+            .bind(&new_code)
+            .bind(&code)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?;
+        res
+    } else {
+        sqlx::query("UPDATE fin_category SET name = ?1, tone = ?2, sort_order = ?3 WHERE code = ?4")
+            .bind(&name)
+            .bind(&tone)
+            .bind(sort_order)
+            .bind(&code)
+            .execute(&mut *tx)
+            .await
+            .map_err(server_err)?
+    };
     if res.rows_affected() == 0 {
         return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
     }
+    tx.commit().await.map_err(server_err)?;
     let row: (String, String, String, i64, bool, i64) = sqlx::query_as(
         "SELECT code, name, tone, sort_order, archived, created_at
            FROM fin_category WHERE code = ?1",
     )
-    .bind(&code)
+    .bind(&new_code)
     .fetch_one(pool)
     .await
     .map_err(server_err)?;

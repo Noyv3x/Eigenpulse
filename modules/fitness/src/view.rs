@@ -2,7 +2,10 @@ use crate::model::Workout;
 use crate::server_fns::*;
 use ep_core::{IconKind, Tone};
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
-use ep_ui::{Card, ChartBars, Direction, Icon, Kpi, PageHead, Ring, RowDeleteAction, Tag};
+use ep_ui::{
+    Card, ChartBars, Direction, Icon, Kpi, PageHead, Ring, RowDeleteAction, SkeletonCard,
+    SkeletonKpi, Tag,
+};
 use leptos::prelude::*;
 
 #[component]
@@ -32,7 +35,11 @@ pub fn FitnessView() -> impl IntoView {
                 sub=t(locale, "fitness.page.sub")
             />
 
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
+            <Suspense fallback=move || view! {
+                <div style="margin-bottom:20px"><SkeletonCard rows=0/></div>
+                <SkeletonKpi count=4/>
+                <SkeletonCard rows=2/>
+            }>
                 {move || data.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_fitness(d, add, update, delete).into_any(),

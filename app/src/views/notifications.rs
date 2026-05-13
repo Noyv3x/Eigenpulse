@@ -1,7 +1,8 @@
+use ep_core::IconKind;
 use ep_i18n::{server_fn_error_text, t, use_locale};
 #[cfg(feature = "hydrate")]
 use ep_ui::use_unread_signal;
-use ep_ui::{Card, PageHead, Tag as UiTag};
+use ep_ui::{Card, EmptyState, PageHead, Tag as UiTag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -144,10 +145,22 @@ pub fn NotificationsView() -> impl IntoView {
                 title_cn=t(locale, "app.notifications.page.title_cn")
             />
             <Card>
-                <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
+                <Suspense fallback=move || view! {
+                    <span class="skeleton-line" style="height:18px;width:35%;margin-bottom:10px;display:block"></span>
+                    <span class="skeleton-line" style="height:14px;margin-bottom:8px;display:block"></span>
+                    <span class="skeleton-line" style="height:14px;margin-bottom:8px;display:block"></span>
+                    <span class="skeleton-line" style="height:14px;display:block"></span>
+                }>
                     {move || r.get().map(|res| match res {
                         Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</p> }.into_any(),
-                        Ok(rows) if rows.is_empty() => view! { <p class="muted">{t(locale, "app.notifications.empty")}</p> }.into_any(),
+                        Ok(rows) if rows.is_empty() => view! {
+                            <EmptyState
+                                icon=IconKind::Bell
+                                title=t(locale, "app.notifications.empty")
+                                desc=t(locale, "app.notifications.empty_hint")
+                                code="NOT-EMPTY"
+                            />
+                        }.into_any(),
                         Ok(rows) => view! {
                             <div class="vstack" style="gap:0">
                                 {rows.into_iter().map(render_notification_row).collect_view()}
@@ -170,7 +183,10 @@ fn render_notification_row(n: NotificationRow) -> AnyView {
     let when = ep_core::fmt_ts_minute(Some(n.created_at));
     let body = n.body.unwrap_or_default();
     let module = n.module;
-    let doc_ref = n.doc_ref;
+    // `doc_ref` is internal correlation metadata; we kept it on the DTO so
+    // notification triage tools / API consumers still see it, but the
+    // notification UI is for the human reader and never surfaces it.
+    let _ = n.doc_ref;
     let href = n
         .link
         .as_deref()
@@ -184,7 +200,6 @@ fn render_notification_row(n: NotificationRow) -> AnyView {
                 {body}
                 <span class="mono dim" style="margin-left:8px">"· " {when}</span>
                 {module.map(|m| view! { <span class="mono dim" style="margin-left:8px">"· " {m}</span> })}
-                {doc_ref.map(|d| view! { <span class="mono dim" style="margin-left:8px">"· " {d}</span> })}
             </div>
         </div>
         <div></div>

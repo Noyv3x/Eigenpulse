@@ -1,5 +1,5 @@
 use ep_i18n::{t, use_locale, Locale};
-use ep_ui::provide_unread_signal;
+use ep_ui::{provide_toast_stack, provide_unread_signal, ToastViewport};
 use ep_ui::{provide_tweak_state, Sidebar, Topbar, TweakState};
 use leptos::prelude::*;
 use leptos_meta::*;
@@ -22,6 +22,7 @@ pub fn App() -> impl IntoView {
     provide_meta_context();
     let _tweaks = provide_tweak_state(TweakState::default());
     let _unread = provide_unread_signal(0);
+    let _toast = provide_toast_stack();
     let locale = use_locale();
     let sidebar_user_name = RwSignal::new(t(locale, "app.sidebar.account_fallback").to_string());
     let sidebar_user_meta = RwSignal::new("OWNER".to_string());
@@ -86,6 +87,7 @@ pub fn App() -> impl IntoView {
                 />
                 <Topbar sidebar_collapsed mobile_nav_open/>
                 <main class="main">
+                    <ToastViewport/>
                     <Routes fallback=NotFound>
                         <Route path=path!("")             view=crate::views::dashboard::DashboardView/>
                         <Route path=path!("today")        view=crate::views::today::TodayView/>

@@ -2,6 +2,8 @@
   "ui.sidebar.logout_title": "Log out",
   "ui.row_action.default_confirm": "Delete this item?",
   "ui.row_action.default_label": "Delete",
+  "ui.row_action.confirm_label": "Delete",
+  "ui.row_action.cancel_label": "Cancel",
   "ui.sidebar.nav.cfg": "Settings",
   "ui.sidebar.nav.dsh": "Dashboard",
   "ui.sidebar.nav.fin": "Finance",

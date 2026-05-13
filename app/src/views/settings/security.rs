@@ -525,10 +525,24 @@ pub fn PatView() -> impl IntoView {
             <div style="margin-top:24px"></div>
 
             <Card title=t(locale, "app.settings.security.list.title") code="CFG-SEC-LST">
-                <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:120px">{t(locale, "app.common.loading")}</div> }>
+                <Suspense fallback=move || view! {
+                    <div style="display:flex;flex-direction:column;gap:10px;padding:6px 0">
+                        <span class="skeleton-line" style="height:14px;width:50%;display:block"></span>
+                        <span class="skeleton-line" style="height:14px;display:block"></span>
+                        <span class="skeleton-line" style="height:14px;display:block"></span>
+                    </div>
+                }>
                     {move || pats.get().map(|res| match res {
                         Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</p> }.into_any(),
-                        Ok(rows) if rows.is_empty() => view! { <p class="muted">{t(locale, "app.settings.security.list.empty")}</p> }.into_any(),
+                        Ok(rows) if rows.is_empty() => view! {
+                            <ep_ui::EmptyState
+                                icon=ep_core::IconKind::Settings
+                                title=t(locale, "app.settings.security.list.empty_title")
+                                desc=t(locale, "app.settings.security.list.empty")
+                                code="CFG-SEC-EMPTY"
+                                compact=true
+                            />
+                        }.into_any(),
                         Ok(rows) => view! {
                             <table class="tbl">
                                 <thead>

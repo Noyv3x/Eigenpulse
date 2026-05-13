@@ -6,7 +6,9 @@ use ep_core::{fmt_int, IconKind};
 #[cfg(feature = "ssr")]
 use ep_core::{fmt_ts_hm, server_err};
 use ep_i18n::{server_fn_error_text, t, use_locale};
-use ep_ui::{Card, Direction, Icon, Kpi, PageHead, SectionLabel, Tag};
+use ep_ui::{
+    Card, Direction, EmptyState, Kpi, PageHead, SectionLabel, SkeletonCard, SkeletonKpi, Tag,
+};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -144,7 +146,11 @@ pub fn DashboardView() -> impl IntoView {
                 sub=t(locale, "app.dashboard.page.subtitle")
             />
 
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:160px">{t(locale, "app.common.loading")}</div> }>
+            <Suspense fallback=move || view! {
+                <SkeletonKpi count=5/>
+                <SectionLabel index="§ 02".to_string()>{t(locale, "app.dashboard.activity.title")}</SectionLabel>
+                <SkeletonCard rows=2/>
+            }>
                 {move || r.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_body(d).into_any(),
@@ -177,62 +183,56 @@ fn render_body(d: DashboardData) -> impl IntoView {
         <SectionLabel index="§ 02".to_string()>{t(locale, "app.dashboard.activity.title")}</SectionLabel>
 
         <Card>
-            <div class="scroll-x">
-                <table class="tbl">
-                    <thead>
-                        <tr>
-                            <th style="width:110px">{t(locale, "app.dashboard.table.time")}</th>
-                            <th style="width:90px">{t(locale, "app.dashboard.table.module")}</th>
-                            <th style="width:130px">{t(locale, "app.dashboard.table.doc")}</th>
-                            <th>{t(locale, "app.dashboard.table.description")}</th>
-                            <th style="width:120px">{t(locale, "app.dashboard.table.link")}</th>
-                            <th class="num" style="width:140px">{t(locale, "app.dashboard.table.amount_status")}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {if recent.is_empty() {
-                            view! {
+            {if recent.is_empty() {
+                view! {
+                    <EmptyState
+                        icon=IconKind::Empty
+                        title=t(locale, "app.dashboard.activity.title")
+                        desc=t(locale, "app.dashboard.activity.empty")
+                        code="DSH-EMPTY"
+                    />
+                }.into_any()
+            } else {
+                view! {
+                    <div class="scroll-x">
+                        <table class="tbl">
+                            <thead>
                                 <tr>
-                                    <td colspan="6" class="muted">{t(locale, "app.dashboard.activity.empty")}</td>
+                                    <th style="width:120px">{t(locale, "app.dashboard.table.time")}</th>
+                                    <th style="width:90px">{t(locale, "app.dashboard.table.module")}</th>
+                                    <th>{t(locale, "app.dashboard.table.description")}</th>
+                                    <th class="num" style="width:140px">{t(locale, "app.dashboard.table.amount_status")}</th>
                                 </tr>
-                            }.into_any()
-                        } else {
-                            view! {
-                                <>
-                                    {recent.into_iter().map(|r| {
-                            let tone = match r.module.as_str() {
-                                "FIN" => ep_core::Tone::Amber,
-                                "FIT" => ep_core::Tone::Green,
-                                "LRN" => ep_core::Tone::Blue,
-                                _ => ep_core::Tone::None,
-                            };
-                            let amt = match r.amount {
-                                Some(v) if v >= 0.0 => view! { <td class="num amt-pos">{format!("+¥{}", fmt_int(v))}</td> }.into_any(),
-                                Some(v) => view! { <td class="num amt-neg">{format!("−¥{}", fmt_int(v.abs()))}</td> }.into_any(),
-                                None => view! { <td class="num dim">"—"</td> }.into_any(),
-                            };
-                            view! {
-                                <tr>
-                                    <td class="mono dim">{r.time}</td>
-                                    <td><Tag tone=tone>{r.module.clone()}</Tag></td>
-                                    <td class="doc">{r.doc_id.clone()}</td>
-                                    <td>{r.summary.clone()}</td>
-                                    <td class="mono dim">
-                                        {match r.link_doc {
-                                            Some(l) => view! { <span><Icon kind=IconKind::Link size=11/>" "{l}</span> }.into_any(),
-                                            None => view! { <span>"—"</span> }.into_any(),
-                                        }}
-                                    </td>
-                                    {amt}
-                                </tr>
-                            }
-                                    }).collect_view()}
-                                </>
-                            }.into_any()
-                        }}
-                    </tbody>
-                </table>
-            </div>
+                            </thead>
+                            <tbody>
+                                {recent.into_iter().map(|r| {
+                                    let tone = match r.module.as_str() {
+                                        "FIN" => ep_core::Tone::Amber,
+                                        "FIT" => ep_core::Tone::Green,
+                                        "LRN" => ep_core::Tone::Blue,
+                                        _ => ep_core::Tone::None,
+                                    };
+                                    let amt = match r.amount {
+                                        Some(v) if v >= 0.0 => view! { <td class="num amt-pos">{format!("+¥{}", fmt_int(v))}</td> }.into_any(),
+                                        Some(v) => view! { <td class="num amt-neg">{format!("−¥{}", fmt_int(v.abs()))}</td> }.into_any(),
+                                        None => view! { <td class="num dim">"—"</td> }.into_any(),
+                                    };
+                                    let _ = r.doc_id;
+                                    let _ = r.link_doc;
+                                    view! {
+                                        <tr>
+                                            <td class="mono dim">{r.time}</td>
+                                            <td><Tag tone=tone>{r.module.clone()}</Tag></td>
+                                            <td>{r.summary.clone()}</td>
+                                            {amt}
+                                        </tr>
+                                    }
+                                }).collect_view()}
+                            </tbody>
+                        </table>
+                    </div>
+                }.into_any()
+            }}
         </Card>
     }
 }

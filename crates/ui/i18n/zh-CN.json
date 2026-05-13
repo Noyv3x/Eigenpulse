@@ -2,6 +2,8 @@
   "ui.sidebar.logout_title": "退出登录",
   "ui.row_action.default_confirm": "确认删除？",
   "ui.row_action.default_label": "删除",
+  "ui.row_action.confirm_label": "删除",
+  "ui.row_action.cancel_label": "取消",
   "ui.sidebar.nav.cfg": "Settings · 系统设置",
   "ui.sidebar.nav.dsh": "Dashboard · 全局仪表",
   "ui.sidebar.nav.fin": "Finance · 财务管理",

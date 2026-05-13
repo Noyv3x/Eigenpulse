@@ -12,6 +12,10 @@ pub fn Card(
 ) -> impl IntoView {
     let class = format!("card {}", class.unwrap_or_default());
     let title_clone = title.clone();
+    // Drop empty strings so an upstream `sub=""` doesn't render a stray
+    // `<div class="card-sub">` (used by today/finance to suppress the
+    // sub-label when the card is empty).
+    let sub = sub.filter(|s| !s.trim().is_empty());
     let has_head = title.is_some() || code.is_some() || sub.is_some() || actions.is_some();
     view! {
         <div class=class>

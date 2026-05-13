@@ -2,7 +2,10 @@ use ep_core::IconKind;
 use ep_core::{fmt_int, fmt_money};
 use ep_finance::{CategorySummary, MonthBucket};
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
-use ep_ui::{Card, ChartBars, Direction, Icon, Kpi, PageHead, Ring, Tag};
+use ep_ui::{
+    Card, ChartBars, Direction, EmptyState, Icon, Kpi, PageHead, Ring, SkeletonCard, SkeletonKpi,
+    Tag,
+};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -162,7 +165,14 @@ pub fn ReportsView() -> impl IntoView {
                 title_cn=t(locale, "app.reports.page.title_cn")
                 sub=t(locale, "app.reports.page.sub")
             />
-            <Suspense fallback=move || view! { <div class="placeholder-img" style="min-height:200px">{t(locale, "app.common.loading")}</div> }>
+            <Suspense fallback=move || view! {
+                <SkeletonKpi count=4/>
+                <div style="margin-bottom:20px"><SkeletonCard rows=3/></div>
+                <div class="grid-2">
+                    <SkeletonCard rows=2/>
+                    <SkeletonCard rows=2/>
+                </div>
+            }>
                 {move || data.get().map(|res| match res {
                     Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
                     Ok(d) => render_reports(d).into_any(),
@@ -257,7 +267,15 @@ fn render_category_share(d: &ReportsData) -> impl IntoView {
     view! {
         <Card title=t(locale, "app.reports.category.title") code="RPT-CAT-01" sub=title_sub>
             {if empty {
-                view! { <p class="muted">{t(locale, "app.reports.category.empty")}</p> }.into_any()
+                view! {
+                    <EmptyState
+                        icon=IconKind::Coin
+                        title=t(locale, "app.reports.category.title")
+                        desc=t(locale, "app.reports.category.empty")
+                        code="RPT-CAT-EMPTY"
+                        compact=true
+                    />
+                }.into_any()
             } else {
                 view! {
                     <div class="vstack" style="gap:10px">
@@ -267,13 +285,11 @@ fn render_category_share(d: &ReportsData) -> impl IntoView {
                             // bars never look uniformly tiny (same rule the FIN
                             // finance expense-mix card uses, see modules/finance/src/view.rs).
                             let pct = (c.pct * 3.0).min(100.0);
+                            let _ = c.code;
                             view! {
                                 <div>
                                     <div class="cat-row-head">
-                                        <div>
-                                            <span>{c.name.clone()}</span>
-                                            <span class="mono dim cat-row-code">{c.code.clone()}</span>
-                                        </div>
+                                        <div><span>{c.name.clone()}</span></div>
                                         <div class="mono cat-row-value">
                                             {format!("¥{}", fmt_int(c.value))}
                                             <span class="dim">{format!(" · {}%", c.pct)}</span>
@@ -303,12 +319,12 @@ fn render_account_health(d: &ReportsData) -> impl IntoView {
             <div class="vstack" style="gap:14px">
                 {rows.into_iter().map(|a| {
                     let tone = ep_core::Tone::parse(&a.tone);
+                    let _ = a.code;
                     view! {
                         <div class="acc-row">
                             <div class="acc-row-meta">
                                 <div class="acc-row-name">
                                     {a.name.clone()}
-                                    <span class="mono dim acc-row-code">{a.code.clone()}</span>
                                 </div>
                                 <div class="acc-row-tags">
                                     <Tag tone=tone>{a.r#type.clone()}</Tag>

@@ -2,7 +2,7 @@ use crate::model::{Account, Category, Txn};
 use crate::server_fns::{
     add_transfer_inner, add_txn_inner, create_account_inner, create_category_inner,
     delete_account_inner, delete_category_inner, dispatch_large_expense_notification,
-    list_accounts_inner, set_budget_inner, update_account_inner, update_category_inner,
+    list_accounts_inner, set_budget_inner, update_account_inner_with, update_category_inner_with,
     update_txn_inner, AddTxnFields, UpdateTxnFields,
 };
 use axum::extract::{Path, State};
@@ -335,12 +335,18 @@ async fn patch_account(
             &code,
         )));
     };
-    let acc = update_account_inner(
+    // External API consumers (PATs / Shortcuts) addressed the account by
+    // its current `code`; renaming the row out from under them would break
+    // those callers, so PATCH always leaves the code in place even when
+    // the name changes. The UI's server fn uses the rename-enabled wrapper
+    // — see `update_account_inner`.
+    let acc = update_account_inner_with(
         &state.db,
         code,
         input.name.unwrap_or(cur_name),
         input.r#type.unwrap_or(cur_type),
         input.tone.unwrap_or(cur_tone),
+        false,
     )
     .await
     .map_err(server_err_to_response)?;
@@ -456,12 +462,15 @@ async fn patch_category(
             &code,
         )));
     };
-    let cat = update_category_inner(
+    // See `update_account` handler — same rationale: external API callers
+    // get a stable resource key, the UI gets cascade renaming.
+    let cat = update_category_inner_with(
         &state.db,
         code,
         input.name.unwrap_or(cur_name),
         input.tone.unwrap_or(cur_tone),
         input.sort_order.unwrap_or(cur_sort),
+        false,
     )
     .await
     .map_err(server_err_to_response)?;

@@ -1,5 +1,5 @@
 {
-  "core.nav.section.core": "Core · CORE",
-  "core.nav.section.modules": "Modules · MODULES",
-  "core.nav.section.system": "System · SYSTEM"
+  "core.nav.section.core": "Core",
+  "core.nav.section.modules": "Modules",
+  "core.nav.section.system": "System"
 }

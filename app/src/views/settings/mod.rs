@@ -110,7 +110,11 @@ pub fn SettingsIndex() -> impl IntoView {
             <div class="grid-2">
                 <Card title=t(locale, "app.settings.index.account_card.title") code="CFG-ACC">
                     <Suspense fallback=move || view! {
-                        <div class="placeholder-img" style="min-height:96px">{t(locale, "app.common.loading")}</div>
+                        <div style="display:flex;flex-direction:column;gap:8px;padding:6px 0">
+                            <span class="skeleton-line" style="height:14px;width:60%;display:block"></span>
+                            <span class="skeleton-line" style="height:14px;width:55%;display:block"></span>
+                            <span class="skeleton-line" style="height:14px;width:40%;display:block"></span>
+                        </div>
                     }>
                         {move || summary.get().map(|res| match res {
                             Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</p> }.into_any(),
@@ -129,7 +133,11 @@ pub fn SettingsIndex() -> impl IntoView {
                 </Card>
                 <Card title=t(locale, "app.settings.index.data_card.title") code="CFG-DATA">
                     <Suspense fallback=move || view! {
-                        <div class="placeholder-img" style="min-height:96px">{t(locale, "app.common.loading")}</div>
+                        <div style="display:flex;flex-direction:column;gap:8px;padding:6px 0">
+                            <span class="skeleton-line" style="height:14px;width:60%;display:block"></span>
+                            <span class="skeleton-line" style="height:14px;width:55%;display:block"></span>
+                            <span class="skeleton-line" style="height:14px;width:40%;display:block"></span>
+                        </div>
                     }>
                         {move || summary.get().map(|res| match res {
                             Err(e) => view! { <p>{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</p> }.into_any(),

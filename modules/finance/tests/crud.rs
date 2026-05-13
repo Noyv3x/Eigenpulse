@@ -1780,3 +1780,266 @@ async fn delete_rejects_when_multiple_distinct_tfr_partners() {
         "ACC-FROM stays at transferred-out balance"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cascade rename: when a category/account is renamed, its derived `code`
+// should follow and every referencing row (`fin_txn`, `fin_budget`) should
+// be remapped in the same transaction. The Rust schema lacks
+// `ON UPDATE CASCADE`, so this is implemented in code; tests pin the
+// invariant.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn update_category_renames_code_and_cascades_to_txns_and_budgets() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-1", 1_000.0).await.unwrap();
+
+    // Create a category with empty code so the helper generates one from
+    // the name (slug "FOOD").
+    let cat =
+        ep_finance::create_category_inner(&pool, String::new(), "Food".into(), String::new(), 0)
+            .await
+            .expect("create category");
+    assert_eq!(cat.code, "FOOD", "initial slug from English name");
+
+    // Drop one transaction + one budget pointing at FOOD.
+    let txn = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            merchant: "Diner".into(),
+            category_code: "FOOD".into(),
+            account_code: "ACC-1".into(),
+            amount: -42.0,
+            tag: "exp".into(),
+            note: None,
+            linked_doc_id: None,
+            occurred_at: 1_700_000_000,
+        },
+    )
+    .await
+    .expect("add txn");
+    ep_finance::set_budget_inner(&pool, "2026-05", "FOOD", 1_000.0)
+        .await
+        .expect("set budget");
+
+    // Rename to "Dining" → slug "DINING" is fresh, so the cascade renames.
+    let renamed =
+        ep_finance::update_category_inner(&pool, "FOOD".into(), "Dining".into(), String::new(), 0)
+            .await
+            .expect("rename category");
+    assert_eq!(renamed.code, "DINING");
+
+    // fin_category: old slug gone, new slug present.
+    let old: Option<i64> = sqlx::query_scalar("SELECT 1 FROM fin_category WHERE code = 'FOOD'")
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+    assert!(old.is_none(), "old code FOOD must be gone");
+    let new: i64 = sqlx::query_scalar("SELECT 1 FROM fin_category WHERE code = 'DINING'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(new, 1);
+
+    // fin_txn: cascade updated the txn we just inserted.
+    let txn_cat: String = sqlx::query_scalar("SELECT category_code FROM fin_txn WHERE doc_id = ?1")
+        .bind(&txn.doc_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(txn_cat, "DINING", "fin_txn.category_code follows");
+
+    // fin_budget: cascade updated the budget row as well.
+    let budget_cat: String =
+        sqlx::query_scalar("SELECT category_code FROM fin_budget WHERE period = '2026-05'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(budget_cat, "DINING", "fin_budget.category_code follows");
+}
+
+#[tokio::test]
+async fn update_account_renames_code_and_cascades_to_txns() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_category(&pool, "FOOD", "Food").await.unwrap();
+    let acct = ep_finance::create_account_inner(
+        &pool,
+        String::new(),
+        "Cash Wallet".into(),
+        "Cash".into(),
+        String::new(),
+        500.0,
+    )
+    .await
+    .expect("create account");
+    assert_eq!(acct.code, "CASH-WALLET");
+
+    let txn = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            merchant: "Lunch".into(),
+            category_code: "FOOD".into(),
+            account_code: "CASH-WALLET".into(),
+            amount: -12.0,
+            tag: "exp".into(),
+            note: None,
+            linked_doc_id: None,
+            occurred_at: 1_700_000_000,
+        },
+    )
+    .await
+    .expect("add txn");
+
+    let renamed = ep_finance::update_account_inner(
+        &pool,
+        "CASH-WALLET".into(),
+        "Petty Cash".into(),
+        "Cash".into(),
+        String::new(),
+    )
+    .await
+    .expect("rename account");
+    assert_eq!(renamed.code, "PETTY-CASH");
+
+    let txn_acct: String = sqlx::query_scalar("SELECT account_code FROM fin_txn WHERE doc_id = ?1")
+        .bind(&txn.doc_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(txn_acct, "PETTY-CASH", "fin_txn.account_code follows");
+}
+
+#[tokio::test]
+async fn update_category_keeps_code_when_slug_unchanged() {
+    let pool = make_test_pool().await.expect("pool");
+    let cat =
+        ep_finance::create_category_inner(&pool, String::new(), "Food".into(), String::new(), 0)
+            .await
+            .expect("create category");
+    assert_eq!(cat.code, "FOOD");
+
+    // Renaming to a name whose slug is identical ("FOOD") must keep the
+    // existing code (no spurious "FOOD-1" generation).
+    let same =
+        ep_finance::update_category_inner(&pool, "FOOD".into(), "Food".into(), "amber".into(), 2)
+            .await
+            .expect("update");
+    assert_eq!(same.code, "FOOD");
+    assert_eq!(same.tone, "amber");
+    assert_eq!(same.sort_order, 2);
+}
+
+#[tokio::test]
+async fn update_category_falls_back_to_numbered_when_slug_taken() {
+    let pool = make_test_pool().await.expect("pool");
+
+    // Pre-seed a sibling category occupying the slug we'd otherwise pick.
+    let first =
+        ep_finance::create_category_inner(&pool, String::new(), "Food".into(), String::new(), 0)
+            .await
+            .expect("seed");
+    assert_eq!(first.code, "FOOD");
+
+    let second =
+        ep_finance::create_category_inner(&pool, String::new(), "Dining".into(), String::new(), 0)
+            .await
+            .expect("seed");
+    assert_eq!(second.code, "DINING");
+
+    // Rename `DINING` to "Food" — slug "FOOD" is taken by the first row,
+    // so the helper must fall back to a numbered code (CAT1 / CAT2 / …).
+    let renamed =
+        ep_finance::update_category_inner(&pool, "DINING".into(), "Food".into(), String::new(), 0)
+            .await
+            .expect("rename");
+    assert!(
+        renamed.code != "DINING" && renamed.code != "FOOD",
+        "should pick a fresh fallback code, got {}",
+        renamed.code
+    );
+    assert!(
+        renamed.code.starts_with("CAT"),
+        "fallback follows CATN scheme, got {}",
+        renamed.code
+    );
+}
+#[tokio::test]
+async fn update_category_rotates_fallback_code_when_name_changes_in_non_ascii() {
+    // When the human-readable name has no ASCII letters the slugifier
+    // returns "". Older versions of the helper then walked CAT1 / CAT2
+    // / … and gave the same fallback slot back to the row on every
+    // rename. The current implementation seeds the search from a stable
+    // fingerprint hashed off the new name, so editing the name actually
+    // produces a different fallback code.
+    let pool = make_test_pool().await.expect("pool");
+    let first =
+        ep_finance::create_category_inner(&pool, String::new(), "餐饮".into(), String::new(), 0)
+            .await
+            .expect("create category");
+    assert!(
+        first.code.starts_with("CAT"),
+        "Chinese name should fall back to CATN, got {}",
+        first.code
+    );
+
+    let renamed = ep_finance::update_category_inner(
+        &pool,
+        first.code.clone(),
+        "饮食".into(),
+        String::new(),
+        0,
+    )
+    .await
+    .expect("rename");
+    assert!(
+        renamed.code.starts_with("CAT"),
+        "still falls back to CATN, got {}",
+        renamed.code
+    );
+    assert_ne!(
+        renamed.code, first.code,
+        "rename must rotate the fallback code so the slot stops being sticky"
+    );
+}
+#[tokio::test]
+async fn update_category_keeps_manual_code_when_name_unchanged() {
+    // Simulates a row whose code was set out-of-band (e.g. via the OpenAPI
+    // PATCH path, or a SQL-level migration). A subsequent UI edit that
+    // only changes tone / sort_order — leaving `name` alone — must not
+    // rotate the code to a slug derived from the unchanged name.
+    let pool = make_test_pool().await.expect("pool");
+    seed_category(&pool, "MYCAT", "Food").await.unwrap();
+
+    let renamed =
+        ep_finance::update_category_inner(&pool, "MYCAT".into(), "Food".into(), "amber".into(), 5)
+            .await
+            .expect("update tone+sort_order only");
+    assert_eq!(
+        renamed.code, "MYCAT",
+        "unchanged name must leave a manually-assigned code in place"
+    );
+    assert_eq!(renamed.tone, "amber");
+    assert_eq!(renamed.sort_order, 5);
+}
+
+#[tokio::test]
+async fn update_account_keeps_manual_code_when_name_unchanged() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "MYACC", 100.0).await.unwrap();
+
+    let renamed = ep_finance::update_account_inner(
+        &pool,
+        "MYACC".into(),
+        "Test MYACC".into(),
+        "Cash".into(),
+        "green".into(),
+    )
+    .await
+    .expect("update type+tone only");
+    assert_eq!(
+        renamed.code, "MYACC",
+        "unchanged name must leave a manually-assigned code in place"
+    );
+    assert_eq!(renamed.tone, "green");
+    assert_eq!(renamed.r#type, "Cash");
+}
