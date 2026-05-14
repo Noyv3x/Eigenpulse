@@ -32,7 +32,7 @@ mod state;
 
 pub use escape::html_escape;
 pub use fmt::{
-    fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, fmt_ts_minute, thousands_sep,
+    fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, fmt_ts_minute, parse_ymd, thousands_sep,
     unix_to_ymdhm, ymd_to_unix_midnight,
 };
 pub use nav::{IconKind, NavSection};

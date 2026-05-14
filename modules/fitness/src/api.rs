@@ -1,10 +1,9 @@
 use crate::model::Workout;
 use crate::server_fns::{
-    add_workout_inner, delete_workout_inner, normalize_workout_input, update_workout_inner,
-    AddWorkoutFields,
+    add_workout_inner, delete_workout_inner, normalize_doc_id, normalize_workout_input,
+    update_workout_inner, AddWorkoutFields,
 };
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, patch};
 use axum::{Extension, Json, Router};
@@ -65,18 +64,6 @@ pub struct WorkoutUpdated {
     pub doc_id: String,
 }
 
-type WorkoutListRow = (
-    String,
-    i64,
-    String,
-    Option<String>,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-    Option<String>,
-);
-
 async fn post_workout(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
@@ -109,27 +96,13 @@ async fn list_workouts(
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Workout>>, Response> {
     require_scope(&pat, ep_core::SCOPE_FIT_READ)?;
-    let rows: Vec<WorkoutListRow> = sqlx::query_as(
+    let workouts = sqlx::query_as::<_, Workout>(
         "SELECT doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes
            FROM fit_workout ORDER BY occurred_at DESC LIMIT 50",
     )
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
-    let workouts = rows
-        .into_iter()
-        .map(|r| Workout {
-            doc_id: r.0,
-            occurred_at: r.1,
-            kind: r.2,
-            program: r.3,
-            duration_m: r.4,
-            load_text: r.5,
-            strain: r.6,
-            rpe: r.7,
-            notes: r.8,
-        })
-        .collect();
     Ok(Json(workouts))
 }
 
@@ -139,14 +112,7 @@ async fn delete_workout(
     Path(doc_id): Path<String>,
 ) -> Result<Json<WorkoutDeleted>, Response> {
     require_scope(&pat, ep_core::SCOPE_FIT_WRITE)?;
-    let doc_id = ep_core::normalize_doc_id_input(&doc_id)
-        .map_err(|e| match e {
-            ep_core::DocIdInputError::Required => ep_i18n::err("fitness.err.doc_id_required"),
-            ep_core::DocIdInputError::Invalid(doc_id) => {
-                ep_i18n::err_with("fitness.err.doc_id_invalid", &doc_id)
-            }
-        })
-        .map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     delete_workout_inner(&state.db, &doc_id)
         .await
         .map_err(server_err_to_response)?;
@@ -160,8 +126,8 @@ async fn patch_workout(
     ApiJson(input): ApiJson<PatchWorkoutInput>,
 ) -> Result<Json<WorkoutUpdated>, Response> {
     require_scope(&pat, ep_core::SCOPE_FIT_WRITE)?;
-    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
-    let cur: Option<WorkoutListRow> = sqlx::query_as(
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let cur: Option<Workout> = sqlx::query_as(
         "SELECT doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes
            FROM fit_workout WHERE doc_id = ?1",
     )
@@ -175,13 +141,13 @@ async fn patch_workout(
             &doc_id,
         )));
     };
-    let kind = input.kind.unwrap_or(cur.2);
-    let program = patch_nullable_string(input.program, cur.3);
-    let duration_m = input.duration_m.unwrap_or(cur.4);
-    let load_text = patch_nullable_string(input.load_text, cur.5);
-    let strain = input.strain.or(cur.6).unwrap_or_default();
-    let rpe = patch_nullable_i64(input.rpe, cur.7);
-    let notes = patch_nullable_string(input.notes, cur.8);
+    let kind = input.kind.unwrap_or(cur.kind);
+    let program = patch_nullable_string(input.program, cur.program);
+    let duration_m = input.duration_m.unwrap_or(cur.duration_m);
+    let load_text = patch_nullable_string(input.load_text, cur.load_text);
+    let strain = input.strain.or(cur.strain).unwrap_or_default();
+    let rpe = patch_nullable_i64(input.rpe, cur.rpe);
+    let notes = patch_nullable_string(input.notes, cur.notes);
     let occurred_on = input.occurred_on.unwrap_or_default();
     let normalized = normalize_workout_input(
         &occurred_on,
@@ -216,66 +182,21 @@ fn patch_nullable_i64(input: Option<Option<i64>>, current: Option<i64>) -> Strin
     }
 }
 
-fn normalize_api_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
-    ep_core::normalize_doc_id_input(doc_id).map_err(|e| match e {
-        ep_core::DocIdInputError::Required => ep_i18n::err("fitness.err.doc_id_required"),
-        ep_core::DocIdInputError::Invalid(doc_id) => {
-            ep_i18n::err_with("fitness.err.doc_id_invalid", &doc_id)
-        }
-    })
-}
+// Error mapping delegates to the shared implementation in `ep_i18n::api_error`.
 
 fn server_err_to_response(e: ServerFnError) -> Response {
-    if let ServerFnError::Args(msg) = &e {
-        if let Some((code, payload)) = ep_i18n::parse_err(&e) {
-            return error_json(
-                status_for_i18n_error(code),
-                code,
-                &message_for_i18n_error(code, payload),
-            );
-        }
-        return error_json(StatusCode::BAD_REQUEST, "bad_request", msg);
-    }
-    tracing::warn!(error = %e, "fit api helper error");
-    error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "database error",
-    )
-}
-
-fn status_for_i18n_error(code: &str) -> StatusCode {
-    if code.ends_with("_not_found") {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::BAD_REQUEST
-    }
-}
-
-fn message_for_i18n_error(code: &str, payload: Option<&str>) -> String {
-    match payload {
-        Some(payload) => ep_i18n::tf(ep_i18n::Locale::En, code, &[("payload", payload)]),
-        None => ep_i18n::t(ep_i18n::Locale::En, code).to_string(),
-    }
+    ep_i18n::i18n_error_response(e, "fitness open api")
 }
 
 fn db_err_response<E: std::fmt::Display>(e: E) -> Response {
-    tracing::warn!(error = %e, "fit api db error");
-    error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "database error",
-    )
-}
-
-fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
-    ep_core::api_error_response(status, code, message)
+    ep_i18n::db_error_response(e, "fitness open api")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::extract::State;
+    use axum::http::StatusCode;
     use std::sync::Arc;
 
     struct NoopNotifyBus;

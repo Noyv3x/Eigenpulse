@@ -3,10 +3,17 @@ use crate::server_fns::*;
 use ep_core::IconKind;
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    Card, Direction, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, SkeletonCard,
+    Card, Direction, ErrorSlot, Heatmap, Icon, Kpi, PageHead, Ring, RowDeleteAction, SkeletonCard,
     SkeletonKpi, Tag,
 };
 use leptos::prelude::*;
+
+// Shared inline-style tokens for the form controls on this page — mirrors the
+// same constants in `finance::view` so a styling tweak is a single edit.
+const INPUT_STYLE: &str =
+    "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
+const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
+const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
 
 #[derive(Clone, Copy)]
 struct LearningActions {
@@ -99,7 +106,7 @@ fn render_learning(d: LearningData, actions: LearningActions) -> impl IntoView {
             <div class="module-glyph lrn mono">"LRN"</div>
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
-                    <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "learning.banner.status")}</span>
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "learning.banner.status")}</span>
                     <Tag tone=ep_core::Tone::Blue dot=true>{tf(locale, "learning.banner.notes", &[("count", &s.notes_30d.to_string())])}</Tag>
                 </div>
                 <div style="font-size:22px;font-weight:600;letter-spacing:-0.01em">
@@ -164,22 +171,18 @@ fn render_body(d: LearningData, actions: LearningActions) -> impl IntoView {
                     <div style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end">
                         <input name="name" required maxlength=MAX_BOOK_NAME_CHARS.to_string()
                                placeholder=t(locale, "learning.field.book")
-                               style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                               style=INPUT_STYLE/>
                         <input name="author" maxlength=MAX_BOOK_AUTHOR_CHARS.to_string()
                                placeholder=t(locale, "learning.field.author")
-                               style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
-                        <select name="status" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
+                               style=INPUT_STYLE/>
+                        <select name="status" style=INPUT_STYLE>
                             <option value="todo" selected="selected">{t(locale, "learning.status.todo")}</option>
                             <option value="reading">{t(locale, "learning.status.reading")}</option>
                             <option value="done">{t(locale, "learning.status.done")}</option>
                         </select>
                         <button class="btn primary sm" type="submit">{t(locale, "learning.submit.add")}</button>
                     </div>
-                    <span class="error-slot">
-                        {move || add_book.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{server_fn_error_text(&e)}</span>
-                        })}
-                    </span>
+                    <ErrorSlot action=add_book/>
                 </ActionForm>
 
                 <table class="tbl">
@@ -248,28 +251,20 @@ fn render_body(d: LearningData, actions: LearningActions) -> impl IntoView {
                         }).collect_view()}
                     </tbody>
                 </table>
-                <span class="error-slot">
-                    {move || update_book.value().get().and_then(|r| r.err()).map(|e| view! {
-                        <span class="tag rose">{server_fn_error_text(&e)}</span>
-                    })}
-                </span>
+                <ErrorSlot action=update_book/>
             </Card>
 
             <Card title=t(locale, "learning.card.notes.title") code="LRN-N-01" sub=t(locale, "learning.card.notes.sub")>
                 <ActionForm action=add_note attr:class="vstack" attr:style="gap:8px;margin-bottom:12px">
                     <input name="title" required maxlength=MAX_NOTE_TITLE_CHARS.to_string()
                            placeholder=t(locale, "learning.field.title")
-                           style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                           style=INPUT_STYLE/>
                     <textarea name="body" rows="2" maxlength=MAX_NOTE_BODY_CHARS.to_string()
                               placeholder=t(locale, "learning.field.body")
                               style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono);font-size:12px"></textarea>
                     <div class="hstack" style="gap:8px">
                         <button class="btn primary sm" type="submit"><Icon kind=IconKind::Plus size=12/>{t(locale, "learning.submit.add_note")}</button>
-                        <span class="error-slot">
-                            {move || add_note.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{server_fn_error_text(&e)}</span>
-                            })}
-                        </span>
+                        <ErrorSlot action=add_note/>
                     </div>
                 </ActionForm>
 
@@ -306,11 +301,7 @@ fn render_body(d: LearningData, actions: LearningActions) -> impl IntoView {
                         }
                     }).collect_view()}
                 </div>
-                <span class="error-slot">
-                    {move || update_note.value().get().and_then(|r| r.err()).map(|e| view! {
-                        <span class="tag rose">{server_fn_error_text(&e)}</span>
-                    })}
-                </span>
+                <ErrorSlot action=update_note/>
             </Card>
         </div>
 
@@ -321,15 +312,15 @@ fn render_body(d: LearningData, actions: LearningActions) -> impl IntoView {
                 <div style="display:grid;grid-template-columns:2fr 1fr 100px 140px 110px auto;gap:8px;align-items:end">
                     <input name="name" required maxlength=MAX_COURSE_NAME_CHARS.to_string()
                            placeholder=t(locale, "learning.field.course")
-                           style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                           style=INPUT_STYLE/>
                     <input name="provider" maxlength=MAX_COURSE_PROVIDER_CHARS.to_string()
                            placeholder=t(locale, "learning.field.provider")
-                           style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                           style=INPUT_STYLE/>
                     <input name="progress_pct" type="number" min="0" max="100" step="1" value="0"
-                           style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
+                           style=INPUT_STYLE_MONO/>
                     <input name="due_on" type="date"
-                           style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
-                    <select name="tone" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
+                           style=INPUT_STYLE_MONO/>
+                    <select name="tone" style=INPUT_STYLE>
                         <option value="blue" selected="selected">{t(locale, "learning.tone.blue")}</option>
                         <option value="green">{t(locale, "learning.tone.green")}</option>
                         <option value="amber">{t(locale, "learning.tone.amber")}</option>
@@ -338,11 +329,7 @@ fn render_body(d: LearningData, actions: LearningActions) -> impl IntoView {
                     </select>
                     <button class="btn primary sm" type="submit">{t(locale, "learning.submit.add_course")}</button>
                 </div>
-                <span class="error-slot">
-                    {move || add_course.value().get().and_then(|r| r.err()).map(|e| view! {
-                        <span class="tag rose">{server_fn_error_text(&e)}</span>
-                    })}
-                </span>
+                <ErrorSlot action=add_course/>
             </ActionForm>
             <div class="vstack" style="gap:0">
                 {d.courses.into_iter().map(|c| {
@@ -400,11 +387,7 @@ fn render_body(d: LearningData, actions: LearningActions) -> impl IntoView {
                     }
                 }).collect_view()}
             </div>
-            <span class="error-slot">
-                {move || update_course.value().get().and_then(|r| r.err()).map(|e| view! {
-                    <span class="tag rose">{server_fn_error_text(&e)}</span>
-                })}
-            </span>
+            <ErrorSlot action=update_course/>
         </Card>
     }
 }

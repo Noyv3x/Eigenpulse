@@ -4,9 +4,12 @@ use leptos::server_fn::{client::Client, codec::PostUrl, request::ClientReq, Serv
 /// Per-row "delete" / "revoke" affordance for ledger-style tables.
 ///
 /// Renders a small destructive-styled button. When the user clicks, an
-/// in-app [`ConfirmDialog`] appears (instead of the browser's native
+/// in-app confirmation dialog appears (instead of the browser's native
 /// `confirm()` prompt); only on confirmation do we actually submit the
-/// `ActionForm` that drives the underlying server action.
+/// `ActionForm` that drives the underlying server action. The dialog chrome
+/// is kept inline here rather than shared: submitting `<ActionForm>` children
+/// through a generic slot collides with Leptos's build-multiple-times
+/// semantics on owned-`String` attributes.
 ///
 /// `value` ships as the hidden input's value. Default `field="doc_id"` fits
 /// most modules; override with `field="id"` for PAT revoke / notify channel

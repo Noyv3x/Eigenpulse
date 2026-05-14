@@ -4,7 +4,10 @@ use sqlx::SqlitePool;
 
 pub const MAX_CHANNEL_NAME_CHARS: usize = 64;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Channel metadata without `config_json` — secrets must never reach a DTO
+/// returned over the wire. Columns line up with `notify_channel`, so
+/// `sqlx::FromRow` decodes a row directly (SQLite `INTEGER` 0/1 → `bool`).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct NotifyChannelSummary {
     pub id: i64,
     pub kind: String,
@@ -15,24 +18,14 @@ pub struct NotifyChannelSummary {
 }
 
 pub async fn list_channels(pool: &SqlitePool) -> anyhow::Result<Vec<NotifyChannelSummary>> {
-    let rows: Vec<(i64, String, String, i64, String, i64)> = sqlx::query_as(
+    let rows = sqlx::query_as::<_, NotifyChannelSummary>(
         "SELECT id, kind, name, enabled, min_severity, created_at
            FROM notify_channel
           ORDER BY created_at DESC",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| NotifyChannelSummary {
-            id: r.0,
-            kind: r.1,
-            name: r.2,
-            enabled: r.3 != 0,
-            min_severity: r.4,
-            created_at: r.5,
-        })
-        .collect())
+    Ok(rows)
 }
 
 pub async fn create_channel(

@@ -6,7 +6,6 @@ use crate::server_fns::{
     update_txn_inner, AddTxnFields, UpdateTxnFields,
 };
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
 use axum::{Extension, Json, Router};
@@ -57,18 +56,6 @@ pub struct TxnDeleted {
     pub doc_id: String,
 }
 
-type TxnListRow = (
-    String,
-    i64,
-    String,
-    String,
-    String,
-    f64,
-    String,
-    Option<String>,
-    Option<String>,
-);
-
 async fn post_txn(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
@@ -102,24 +89,10 @@ async fn list_txn(
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Txn>>, Response> {
     require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
-    let rows: Vec<TxnListRow> = sqlx::query_as(
+    let txns = sqlx::query_as::<_, Txn>(
         "SELECT doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id
            FROM fin_txn ORDER BY occurred_at DESC LIMIT 50"
     ).fetch_all(&state.db).await.map_err(db_err_response)?;
-    let txns = rows
-        .into_iter()
-        .map(|r| Txn {
-            doc_id: r.0,
-            occurred_at: r.1,
-            merchant: r.2,
-            category_code: r.3,
-            account_code: r.4,
-            amount: r.5,
-            tag: r.6,
-            note: r.7,
-            linked_doc_id: r.8,
-        })
-        .collect();
     Ok(Json(txns))
 }
 
@@ -132,14 +105,7 @@ async fn delete_txn(
     let doc_id = crate::server_fns::normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     let existed = crate::server_fns::delete_txn_inner(&state.db, &doc_id)
         .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "fin delete_txn helper error");
-            error_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "database error",
-            )
-        })?;
+        .map_err(db_err_response)?;
     if !existed {
         return Err(server_err_to_response(ep_i18n::err_with(
             "finance.err.txn_not_found",
@@ -380,8 +346,7 @@ async fn list_category(
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Category>>, Response> {
     require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
-    type Row = (String, String, String, i64, bool, i64);
-    let rows: Vec<Row> = sqlx::query_as(
+    let cats = sqlx::query_as::<_, Category>(
         "SELECT code, name, tone, sort_order, archived, created_at
            FROM fin_category
           ORDER BY sort_order ASC, code ASC",
@@ -389,17 +354,6 @@ async fn list_category(
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
-    let cats = rows
-        .into_iter()
-        .map(|r| Category {
-            code: r.0,
-            name: r.1,
-            tone: r.2,
-            sort_order: r.3,
-            archived: r.4,
-            created_at: r.5,
-        })
-        .collect();
     Ok(Json(cats))
 }
 
@@ -504,7 +458,7 @@ struct ListBudgetQuery {
     period: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 struct BudgetRow {
     period: String,
     category_code: String,
@@ -519,8 +473,7 @@ async fn list_budget(
     require_scope(&pat, ep_core::SCOPE_FIN_READ)?;
     let period =
         crate::server_fns::normalize_budget_period(&q.period).map_err(server_err_to_response)?;
-    type Row = (String, String, f64);
-    let rows: Vec<Row> = sqlx::query_as(
+    let out = sqlx::query_as::<_, BudgetRow>(
         "SELECT period, category_code, amount
            FROM fin_budget WHERE period = ?1 ORDER BY category_code",
     )
@@ -528,14 +481,6 @@ async fn list_budget(
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
-    let out = rows
-        .into_iter()
-        .map(|r| BudgetRow {
-            period: r.0,
-            category_code: r.1,
-            amount: r.2,
-        })
-        .collect();
     Ok(Json(out))
 }
 
@@ -598,56 +543,15 @@ async fn delete_budget(
 // Error mapping
 // ---------------------------------------------------------------------------
 
-/// Domain `Args` errors keep their i18n code/message; everything else is
-/// logged and hidden behind a generic 500.
+// Both helpers delegate to the shared implementation in `ep_i18n::api_error`;
+// the `context` label is what distinguishes finance logs from other modules.
+
 fn server_err_to_response(e: ServerFnError) -> Response {
-    if let ServerFnError::Args(msg) = &e {
-        if let Some((code, payload)) = ep_i18n::parse_err(&e) {
-            return error_json(
-                status_for_i18n_error(code),
-                code,
-                &message_for_i18n_error(code, payload),
-            );
-        }
-        return error_json(StatusCode::BAD_REQUEST, "bad_request", msg);
-    }
-    tracing::warn!(error = %e, "fin api helper error");
-    error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "database error",
-    )
+    ep_i18n::i18n_error_response(e, "finance open api")
 }
 
-fn status_for_i18n_error(code: &str) -> StatusCode {
-    if code.ends_with("_not_found") {
-        StatusCode::NOT_FOUND
-    } else if code.ends_with("_taken") {
-        StatusCode::CONFLICT
-    } else {
-        StatusCode::BAD_REQUEST
-    }
-}
-
-fn message_for_i18n_error(code: &str, payload: Option<&str>) -> String {
-    match payload {
-        Some(payload) => ep_i18n::tf(ep_i18n::Locale::En, code, &[("payload", payload)]),
-        None => ep_i18n::t(ep_i18n::Locale::En, code).to_string(),
-    }
-}
-
-/// 500 wrapper that logs server-side; the response message stays generic.
 fn db_err_response<E: std::fmt::Display>(e: E) -> Response {
-    tracing::warn!(error = %e, "fin api db error");
-    error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "database error",
-    )
-}
-
-fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
-    ep_core::api_error_response(status, code, message)
+    ep_i18n::db_error_response(e, "finance open api")
 }
 
 #[cfg(test)]
@@ -667,25 +571,5 @@ mod tests {
         let replaced: PatchTxnInput = serde_json::from_value(serde_json::json!({"note": "memo"}))
             .expect("string note should deserialize");
         assert_eq!(replaced.note, Some(Some("memo".into())));
-    }
-
-    #[test]
-    fn i18n_server_errors_map_to_api_statuses_and_messages() {
-        assert_eq!(
-            status_for_i18n_error("finance.err.txn_not_found"),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            status_for_i18n_error("finance.err.account_code_taken"),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            status_for_i18n_error("finance.err.amount_must_be_nonzero"),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            message_for_i18n_error("finance.err.txn_not_found", Some("FIN-1")),
-            "Transaction 'FIN-1' not found"
-        );
     }
 }

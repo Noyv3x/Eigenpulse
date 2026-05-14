@@ -7,6 +7,10 @@ use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
+/// Mirrors the `notification` table for `sqlx::FromRow` (server-only). `read`
+/// is derived in SQL (`read_at IS NOT NULL AS read`) rather than being a raw
+/// column, so the row decodes straight into this struct with no tuple mapping.
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationRow {
     pub id: i64,
@@ -20,46 +24,20 @@ pub struct NotificationRow {
     pub read: bool,
 }
 
-#[cfg(feature = "ssr")]
-type NotificationQueryRow = (
-    i64,
-    i64,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<i64>,
-);
-
 #[server(ListNotifications, "/api/_internal/cfg", "Url", "list_notifications")]
 pub async fn list_notifications() -> Result<Vec<NotificationRow>, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        let rows: Vec<NotificationQueryRow> = sqlx::query_as(
-            "SELECT id, created_at, severity, module, title, body, link, doc_ref, read_at
-                   FROM notification ORDER BY created_at DESC LIMIT 100",
+        sqlx::query_as::<_, NotificationRow>(
+            "SELECT id, created_at, severity, module, title, body, link, doc_ref,
+                    read_at IS NOT NULL AS read
+               FROM notification ORDER BY created_at DESC LIMIT 100",
         )
         .fetch_all(&state.db)
         .await
-        .map_err(ep_core::server_err)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| NotificationRow {
-                id: r.0,
-                created_at: r.1,
-                severity: r.2,
-                module: r.3,
-                title: r.4,
-                body: r.5,
-                link: r.6,
-                doc_ref: r.7,
-                read: r.8.is_some(),
-            })
-            .collect())
+        .map_err(ep_core::server_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -276,5 +254,63 @@ mod tests {
                 .expect("count"),
             2
         );
+    }
+
+    /// Pins the `list_notifications` projection: the `read_at IS NOT NULL AS read`
+    /// expression must decode into `NotificationRow.read: bool` via `FromRow`,
+    /// and the optional text columns must round-trip NULL → `None`.
+    #[cfg(feature = "ssr")]
+    #[tokio::test]
+    async fn notification_row_decodes_derived_read_flag_and_nullable_columns() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("pool");
+        sqlx::query(
+            "CREATE TABLE notification (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                severity TEXT NOT NULL,
+                module TEXT,
+                title TEXT NOT NULL,
+                body TEXT,
+                link TEXT,
+                doc_ref TEXT,
+                read_at INTEGER
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("schema");
+        sqlx::query(
+            "INSERT INTO notification
+                (created_at, severity, module, title, body, link, doc_ref, read_at)
+             VALUES
+                (200, 'warn', 'FIN', 'seen',   'b', '/finance', 'FIN-1', 123),
+                (100, 'info', NULL,  'unseen', NULL, NULL,      NULL,    NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+        let rows = sqlx::query_as::<_, super::NotificationRow>(
+            "SELECT id, created_at, severity, module, title, body, link, doc_ref,
+                    read_at IS NOT NULL AS read
+               FROM notification ORDER BY created_at DESC LIMIT 100",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 2);
+        // Newest first: the row with a `read_at` decodes `read = true`.
+        assert!(rows[0].read);
+        assert_eq!(rows[0].module.as_deref(), Some("FIN"));
+        assert_eq!(rows[0].doc_ref.as_deref(), Some("FIN-1"));
+        // The unread row: `read_at IS NULL` → `read = false`, NULLs → `None`.
+        assert!(!rows[1].read);
+        assert_eq!(rows[1].module, None);
+        assert_eq!(rows[1].body, None);
+        assert_eq!(rows[1].link, None);
+        assert_eq!(rows[1].doc_ref, None);
     }
 }

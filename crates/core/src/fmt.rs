@@ -94,6 +94,25 @@ pub fn ymd_to_unix_midnight(year: i32, month: u8, day: u8) -> Option<i64> {
     Some(days * 86_400)
 }
 
+/// Parse a strict `YYYY-MM-DD` calendar date — exactly 4-2-2 ASCII digits with
+/// single `-` separators — into `(year, month, day)`. Returns `None` for any
+/// other shape. This only validates the textual shape; pair with
+/// [`ymd_to_unix_midnight`] to reject impossible dates like `2026-02-31`.
+pub fn parse_ymd(s: &str) -> Option<(i32, u8, u8)> {
+    let mut parts = s.split('-');
+    let (y, m, d) = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(y), Some(m), Some(d), None) => (y, m, d),
+        _ => return None,
+    };
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    if !(y.bytes().chain(m.bytes()).chain(d.bytes())).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((y.parse().ok()?, m.parse().ok()?, d.parse().ok()?))
+}
+
 fn civil_from_days(days: i64) -> Option<(i32, u8, u8)> {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -210,5 +229,28 @@ mod tests {
         assert_eq!(unix_to_ymdhm(-1), Some((1969, 12, 31, 23, 59)));
         assert_eq!(ymd_to_unix_midnight(2024, 2, 29), Some(1_709_164_800));
         assert_eq!(ymd_to_unix_midnight(2023, 2, 29), None);
+    }
+
+    #[test]
+    fn parse_ymd_accepts_only_strict_4_2_2_digit_shape() {
+        assert_eq!(parse_ymd("2026-05-08"), Some((2026, 5, 8)));
+        // Shape rejects: wrong widths, non-digit, wrong separator count, blanks.
+        for bad in [
+            "",
+            "2026-5-8",
+            "26-05-08",
+            "2026-05-8",
+            "2026/05/08",
+            "2026-05-08-1",
+            "abcd-05-08",
+            "2026-05",
+            " 2026-05-08 ",
+        ] {
+            assert_eq!(parse_ymd(bad), None, "bad={bad}");
+        }
+        // Shape is valid but the date is impossible — parse_ymd still returns
+        // it; ymd_to_unix_midnight is what rejects 2026-02-31.
+        assert_eq!(parse_ymd("2026-02-31"), Some((2026, 2, 31)));
+        assert_eq!(ymd_to_unix_midnight(2026, 2, 31), None);
     }
 }

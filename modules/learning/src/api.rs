@@ -1,11 +1,10 @@
 use crate::model::{Book, Course, Note};
 use crate::server_fns::{
     add_book_inner, add_course_inner, add_note_inner, delete_book_inner, delete_course_inner,
-    delete_note_inner, normalize_book_input, normalize_course_input, normalize_note_input,
-    update_book_inner, update_course_inner, update_note_inner, AddNoteFields,
+    delete_note_inner, normalize_book_input, normalize_course_input, normalize_doc_id,
+    normalize_note_input, update_book_inner, update_course_inner, update_note_inner, AddNoteFields,
 };
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, patch};
 use axum::{Extension, Json, Router};
@@ -108,17 +107,6 @@ pub struct DocUpdated {
     pub doc_id: String,
 }
 
-type NoteListRow = (String, String, Option<String>, i64);
-type BookListRow = (String, String, Option<String>, String, f64);
-type CourseListRow = (
-    String,
-    String,
-    Option<String>,
-    f64,
-    Option<String>,
-    Option<String>,
-);
-
 async fn post_note(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
@@ -193,22 +181,13 @@ async fn list_notes(
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Note>>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_READ)?;
-    let rows: Vec<NoteListRow> = sqlx::query_as(
+    let notes = sqlx::query_as::<_, Note>(
         "SELECT doc_id, title, body, updated_at
            FROM lrn_note ORDER BY updated_at DESC LIMIT 50",
     )
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
-    let notes = rows
-        .into_iter()
-        .map(|r| Note {
-            doc_id: r.0,
-            title: r.1,
-            body: r.2,
-            updated_at: r.3,
-        })
-        .collect();
     Ok(Json(notes))
 }
 
@@ -217,23 +196,13 @@ async fn list_books(
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Book>>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_READ)?;
-    let rows: Vec<BookListRow> = sqlx::query_as(
+    let books = sqlx::query_as::<_, Book>(
         "SELECT doc_id, name, author, status, progress
            FROM lrn_book ORDER BY rowid DESC LIMIT 50",
     )
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
-    let books = rows
-        .into_iter()
-        .map(|r| Book {
-            doc_id: r.0,
-            name: r.1,
-            author: r.2,
-            status: r.3,
-            progress: r.4,
-        })
-        .collect();
     Ok(Json(books))
 }
 
@@ -242,24 +211,13 @@ async fn list_courses(
     Extension(pat): Extension<AuthPat>,
 ) -> Result<Json<Vec<Course>>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_READ)?;
-    let rows: Vec<CourseListRow> = sqlx::query_as(
+    let courses = sqlx::query_as::<_, Course>(
         "SELECT doc_id, name, provider, progress, due_on, tone
            FROM lrn_course WHERE archived = 0 ORDER BY rowid DESC LIMIT 50",
     )
     .fetch_all(&state.db)
     .await
     .map_err(db_err_response)?;
-    let courses = rows
-        .into_iter()
-        .map(|r| Course {
-            doc_id: r.0,
-            name: r.1,
-            provider: r.2,
-            progress: r.3,
-            due_on: r.4,
-            tone: r.5,
-        })
-        .collect();
     Ok(Json(courses))
 }
 
@@ -270,7 +228,7 @@ async fn patch_note(
     ApiJson(input): ApiJson<PatchNoteInput>,
 ) -> Result<Json<DocUpdated>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_WRITE)?;
-    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     let cur: Option<(String, Option<String>)> =
         sqlx::query_as("SELECT title, body FROM lrn_note WHERE doc_id = ?1")
             .bind(&doc_id)
@@ -299,7 +257,7 @@ async fn patch_book(
     ApiJson(input): ApiJson<PatchBookInput>,
 ) -> Result<Json<DocUpdated>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_WRITE)?;
-    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     let cur: Option<(String, Option<String>, String)> =
         sqlx::query_as("SELECT name, author, status FROM lrn_book WHERE doc_id = ?1")
             .bind(&doc_id)
@@ -330,7 +288,7 @@ async fn patch_course(
     ApiJson(input): ApiJson<PatchCourseInput>,
 ) -> Result<Json<DocUpdated>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_WRITE)?;
-    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     type CurrentCourse = (String, Option<String>, f64, Option<String>, Option<String>);
     let cur: Option<CurrentCourse> = sqlx::query_as(
         "SELECT name, provider, progress, due_on, tone
@@ -365,14 +323,7 @@ async fn delete_note(
     Path(doc_id): Path<String>,
 ) -> Result<Json<NoteDeleted>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_WRITE)?;
-    let doc_id = ep_core::normalize_doc_id_input(&doc_id)
-        .map_err(|e| match e {
-            ep_core::DocIdInputError::Required => ep_i18n::err("learning.err.doc_id_required"),
-            ep_core::DocIdInputError::Invalid(doc_id) => {
-                ep_i18n::err_with("learning.err.doc_id_invalid", &doc_id)
-            }
-        })
-        .map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     delete_note_inner(&state.db, &doc_id)
         .await
         .map_err(server_err_to_response)?;
@@ -385,7 +336,7 @@ async fn delete_book(
     Path(doc_id): Path<String>,
 ) -> Result<Json<BookDeleted>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_WRITE)?;
-    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     delete_book_inner(&state.db, &doc_id)
         .await
         .map_err(server_err_to_response)?;
@@ -398,7 +349,7 @@ async fn delete_course(
     Path(doc_id): Path<String>,
 ) -> Result<Json<CourseDeleted>, Response> {
     require_scope(&pat, ep_core::SCOPE_LRN_WRITE)?;
-    let doc_id = normalize_api_doc_id(&doc_id).map_err(server_err_to_response)?;
+    let doc_id = normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     delete_course_inner(&state.db, &doc_id)
         .await
         .map_err(server_err_to_response)?;
@@ -413,66 +364,21 @@ fn patch_nullable_string(input: Option<Option<String>>, current: Option<String>)
     }
 }
 
-fn normalize_api_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
-    ep_core::normalize_doc_id_input(doc_id).map_err(|e| match e {
-        ep_core::DocIdInputError::Required => ep_i18n::err("learning.err.doc_id_required"),
-        ep_core::DocIdInputError::Invalid(doc_id) => {
-            ep_i18n::err_with("learning.err.doc_id_invalid", &doc_id)
-        }
-    })
-}
+// Error mapping delegates to the shared implementation in `ep_i18n::api_error`.
 
 fn server_err_to_response(e: ServerFnError) -> Response {
-    if let ServerFnError::Args(msg) = &e {
-        if let Some((code, payload)) = ep_i18n::parse_err(&e) {
-            return error_json(
-                status_for_i18n_error(code),
-                code,
-                &message_for_i18n_error(code, payload),
-            );
-        }
-        return error_json(StatusCode::BAD_REQUEST, "bad_request", msg);
-    }
-    tracing::warn!(error = %e, "lrn api helper error");
-    error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "database error",
-    )
-}
-
-fn status_for_i18n_error(code: &str) -> StatusCode {
-    if code.ends_with("_not_found") {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::BAD_REQUEST
-    }
-}
-
-fn message_for_i18n_error(code: &str, payload: Option<&str>) -> String {
-    match payload {
-        Some(payload) => ep_i18n::tf(ep_i18n::Locale::En, code, &[("payload", payload)]),
-        None => ep_i18n::t(ep_i18n::Locale::En, code).to_string(),
-    }
+    ep_i18n::i18n_error_response(e, "learning open api")
 }
 
 fn db_err_response<E: std::fmt::Display>(e: E) -> Response {
-    tracing::warn!(error = %e, "lrn api db error");
-    error_json(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "database error",
-    )
-}
-
-fn error_json(status: StatusCode, code: &str, message: &str) -> Response {
-    ep_core::api_error_response(status, code, message)
+    ep_i18n::db_error_response(e, "learning open api")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::extract::State;
+    use axum::http::StatusCode;
     use std::sync::Arc;
 
     struct NoopNotifyBus;

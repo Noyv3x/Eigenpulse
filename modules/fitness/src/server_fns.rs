@@ -140,34 +140,16 @@ fn normalize_occurred_on(occurred_on: &str) -> Result<Option<i64>, ServerFnError
     let Some(occurred_on) = ep_core::trim_to_option(occurred_on) else {
         return Ok(None);
     };
-    let mut parts = occurred_on.split('-');
-    let parsed = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(y), Some(m), Some(d), None)
-            if y.len() == 4
-                && m.len() == 2
-                && d.len() == 2
-                && y.chars().all(|c| c.is_ascii_digit())
-                && m.chars().all(|c| c.is_ascii_digit())
-                && d.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            match (y.parse::<i32>(), m.parse::<u8>(), d.parse::<u8>()) {
-                (Ok(year), Ok(month), Ok(day)) => Some((year, month, day)),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-    let Some((year, month, day)) = parsed else {
-        return Err(err_with("fitness.err.date_format", &occurred_on));
-    };
-    ep_core::ymd_to_unix_midnight(year, month, day)
-        .map(|midnight| midnight + 12 * 60 * 60)
-        .map(Some)
+    // Anchor a backdated session at local noon so DST midnight edges can't
+    // shift the day; SQLite handles the localtime→UTC conversion elsewhere.
+    ep_core::parse_ymd(&occurred_on)
+        .and_then(|(year, month, day)| ep_core::ymd_to_unix_midnight(year, month, day))
+        .map(|midnight| Some(midnight + 12 * 60 * 60))
         .ok_or_else(|| err_with("fitness.err.date_format", &occurred_on))
 }
 
 #[cfg(feature = "ssr")]
-fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
+pub(crate) fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
     match ep_core::normalize_doc_id_input(doc_id) {
         Ok(doc_id) => Ok(doc_id),
         Err(ep_core::DocIdInputError::Required) => Err(err("fitness.err.doc_id_required")),
@@ -204,39 +186,13 @@ pub async fn load_fitness() -> Result<FitnessData, ServerFnError> {
     {
         ep_auth::require_user_for_server_fn().await?;
         let st = ep_core::app_state_context()?;
-        type Row = (
-            String,
-            i64,
-            String,
-            Option<String>,
-            i64,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-        );
-        let rows: Vec<Row> = sqlx::query_as(
+        let workouts = sqlx::query_as::<_, Workout>(
             "SELECT doc_id, occurred_at, kind, program, duration_m, load_text, strain, rpe, notes
                FROM fit_workout ORDER BY occurred_at DESC LIMIT 30",
         )
         .fetch_all(&st.db)
         .await
         .map_err(server_err)?;
-
-        let workouts: Vec<Workout> = rows
-            .into_iter()
-            .map(|r| Workout {
-                doc_id: r.0,
-                occurred_at: r.1,
-                kind: r.2,
-                program: r.3,
-                duration_m: r.4,
-                load_text: r.5,
-                strain: r.6,
-                rpe: r.7,
-                notes: r.8,
-            })
-            .collect();
 
         let summary = compute_summary(&st.db).await.map_err(server_err)?;
         Ok(FitnessData { workouts, summary })
@@ -654,19 +610,8 @@ pub(crate) async fn update_workout_inner(
     input: WorkoutInput,
     duration_m: i64,
 ) -> Result<Workout, ServerFnError> {
-    type Row = (
-        String,
-        i64,
-        String,
-        Option<String>,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-    );
     let mut tx = pool.begin().await.map_err(server_err)?;
-    let row: Option<Row> = sqlx::query_as(
+    let row: Option<Workout> = sqlx::query_as(
         "UPDATE fit_workout
             SET occurred_at = COALESCE(?1, occurred_at),
                 kind = ?2,
@@ -691,7 +636,7 @@ pub(crate) async fn update_workout_inner(
     .fetch_optional(&mut *tx)
     .await
     .map_err(server_err)?;
-    let row = match row {
+    let workout = match row {
         Some(row) => row,
         None => return Err(err_with("fitness.err.workout_not_found", doc_id)),
     };
@@ -702,25 +647,15 @@ pub(crate) async fn update_workout_inner(
                 status = ?3
           WHERE module = 'FIT' AND doc_id = ?4",
     )
-    .bind(row.1)
-    .bind(&row.2)
-    .bind(row.6.as_deref().unwrap_or(""))
+    .bind(workout.occurred_at)
+    .bind(&workout.kind)
+    .bind(workout.strain.as_deref().unwrap_or(""))
     .bind(doc_id)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;
-    Ok(Workout {
-        doc_id: row.0,
-        occurred_at: row.1,
-        kind: row.2,
-        program: row.3,
-        duration_m: row.4,
-        load_text: row.5,
-        strain: row.6,
-        rpe: row.7,
-        notes: row.8,
-    })
+    Ok(workout)
 }
 
 #[cfg(all(test, feature = "ssr"))]

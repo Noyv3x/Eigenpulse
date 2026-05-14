@@ -1295,7 +1295,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outli
 /* ---------------------------------------------------------------- */
 /* Confirm dialog                                                   */
 /* ---------------------------------------------------------------- */
-.confirm-slot { display: contents; }
 .confirm-modal {
   width: min(420px, 100%);
   max-width: 420px;

@@ -6,8 +6,8 @@ use ep_core::{
 };
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    use_toast, Card, ChartBars, Direction, EmptyState, Icon, Kpi, PageHead, RowDeleteAction,
-    SkeletonCard, SkeletonKpi, TabSpec, Tabs, Tag as UiTag,
+    use_toast, Card, ChartBars, Direction, EmptyState, ErrorSlot, Icon, Kpi, PageHead,
+    RowDeleteAction, SkeletonCard, SkeletonKpi, TabSpec, Tabs, Tag as UiTag,
 };
 use leptos::prelude::*;
 
@@ -591,11 +591,7 @@ fn render_new_txn_form(
             </div>
             // Row 5 — error + actions, right-aligned.
             <div class="hstack" style="gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                <span class="error-slot" style="flex:1">
-                    {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
-                        <span class="tag rose">{server_fn_error_text(&e)}</span>
-                    })}
-                </span>
+                <ErrorSlot action=add style="flex:1"/>
                 <button class="btn primary" type="submit">
                     <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.modal.submit_new")}
                 </button>
@@ -651,11 +647,7 @@ fn render_transfer_form(
                         <input name="note" maxlength=MAX_TXN_NOTE_CHARS.to_string()
                                placeholder=t(locale, "finance.placeholder.transfer_note") style=INPUT_STYLE/>
                     </label>
-                    <span class="error-slot" style="align-self:center">
-                        {move || add_transfer.value().get().and_then(|r| r.err()).map(|e| view! {
-                            <span class="tag rose">{server_fn_error_text(&e)}</span>
-                        })}
-                    </span>
+                    <ErrorSlot action=add_transfer style="align-self:center"/>
                     <button class="btn primary" type="submit" style="align-self:center">
                         <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
                     </button>
@@ -795,23 +787,7 @@ fn render_ledger_tab(
                             />
                         }.into_any()
                     } else {
-                        view! {
-                            <div class="vstack" style="gap:10px">
-                                {cat_summary.into_iter().map(|c| {
-                                    let bar_color = Tone::parse(&c.tone).css_var();
-                                    let pct = (c.pct * 3.0).min(100.0);
-                                    view! {
-                                        <div>
-                                            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                                                <div style="font-size:12.5px"><span>{c.name.clone()}</span></div>
-                                                <div class="mono" style="font-size:12px">{format!("¥{}", fmt_int(c.value))} <span class="dim">{format!("· {}%", c.pct)}</span></div>
-                                            </div>
-                                            <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
-                                        </div>
-                                    }
-                                }).collect_view()}
-                            </div>
-                        }.into_any()
+                        render_category_share_rows(cat_summary).into_any()
                     }}
                 </Card>
 
@@ -1012,6 +988,49 @@ fn render_txn_row(
         .into_any()
     };
 
+    let edit_form = render_txn_edit_form(&t, editing, is_tfr, cat_options, acc_options, update_txn);
+
+    view! {
+        <tr>
+            <td class="mono dim">{date}<div style="font-size:10px;color:var(--ink-4)">{time_}</div></td>
+            <td>
+                <span class=txind></span>
+                {t.merchant.clone()}
+            </td>
+            <td>{cat_cell}</td>
+            <td class="dim">{account_label}</td>
+            <td class=cls_amt>{amount_text}</td>
+            <td class="num">
+                <div class="hstack" style="gap:4px;justify-content:flex-end;align-items:center">
+                    {action_cell}
+                </div>
+            </td>
+        </tr>
+        <tr class="edit-row" style:display=move || if editing.get() { "table-row" } else { "none" }>
+            <td colspan="6" style="padding:0;border:0">
+                {edit_form}
+            </td>
+        </tr>
+    }
+}
+
+/// The per-row inline edit modal for a non-transfer transaction. Lifted out of
+/// `render_txn_row` to keep that function scannable; it returns the exact same
+/// `<div class="fin-modal-slot">` subtree that was built inline before, so the
+/// DOM — and the hydrate text-node anchor — is unchanged. Transfer rows render
+/// an empty placeholder: they are edited by delete + recreate, not in place.
+fn render_txn_edit_form(
+    t: &Txn,
+    editing: RwSignal<bool>,
+    is_tfr: bool,
+    cat_options: std::sync::Arc<Vec<Category>>,
+    acc_options: std::sync::Arc<Vec<Account>>,
+    update_txn: ServerAction<UpdateTxn>,
+) -> impl IntoView {
+    let locale = use_locale();
+    if is_tfr {
+        return view! { <span></span> }.into_any();
+    }
     // Pre-baked prefilled values for the edit form.
     let edit_doc_id = t.doc_id.clone();
     let edit_merchant = t.merchant.clone();
@@ -1023,11 +1042,7 @@ fn render_txn_row(
     let edit_sub_merchant = t.merchant.clone();
     let cat_opts_active = cat_options;
     let acc_opts_active = acc_options;
-
-    let edit_form = if is_tfr {
-        view! { <span></span> }.into_any()
-    } else {
-        view! {
+    view! {
             <div class="fin-modal-slot">
                 {move || if editing.get() {
                     let form_doc_id = edit_doc_id.clone();
@@ -1102,11 +1117,7 @@ fn render_txn_row(
                                             </label>
                                         </div>
                                         <div class="hstack" style="gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                                            <span class="error-slot">
-                                                {move || update_txn.value().get().and_then(|r| r.err()).map(|e| view! {
-                                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
-                                                })}
-                                            </span>
+                                            <ErrorSlot action=update_txn/>
                                             <button class="btn ghost" type="button"
                                                     on:click=move |_| editing.set(false)>{ep_i18n::t(locale, "finance.action.cancel")}</button>
                                             <button class="btn primary" type="submit">{ep_i18n::t(locale, "finance.action.save")}</button>
@@ -1120,31 +1131,8 @@ fn render_txn_row(
                     view! { <span></span> }.into_any()
                 }}
                 </div>
-        }.into_any()
-    };
-
-    view! {
-        <tr>
-            <td class="mono dim">{date}<div style="font-size:10px;color:var(--ink-4)">{time_}</div></td>
-            <td>
-                <span class=txind></span>
-                {t.merchant.clone()}
-            </td>
-            <td>{cat_cell}</td>
-            <td class="dim">{account_label}</td>
-            <td class=cls_amt>{amount_text}</td>
-            <td class="num">
-                <div class="hstack" style="gap:4px;justify-content:flex-end;align-items:center">
-                    {action_cell}
-                </div>
-            </td>
-        </tr>
-        <tr class="edit-row" style:display=move || if editing.get() { "table-row" } else { "none" }>
-            <td colspan="6" style="padding:0;border:0">
-                {edit_form}
-            </td>
-        </tr>
     }
+    .into_any()
 }
 
 /// Format a unix-second timestamp to `YYYY-MM-DD` (UTC). Used by the inline
@@ -1153,6 +1141,78 @@ fn fmt_ts_yyyymmdd(ts: i64) -> String {
     unix_to_ymdhm(ts)
         .map(|(y, m, d, _, _)| format!("{y:04}-{m:02}-{d:02}"))
         .unwrap_or_default()
+}
+
+/// One budget row in the FIN-BDG-01 pool card — category name, used/total bar,
+/// inline amount-edit form, and the per-row delete affordance. Lifted out of
+/// `render_budget`'s per-budget `map` closure to keep that function's `view!`
+/// body readable; the emitted `<div>` subtree is unchanged.
+fn render_budget_row(
+    b: crate::model::BudgetEntry,
+    period: &str,
+    cat_lookup: &std::collections::HashMap<String, (String, String)>,
+    set_budget: ServerAction<SetBudget>,
+) -> impl IntoView {
+    let locale = use_locale();
+    let (name, tone) = cat_lookup
+        .get(&b.category_code)
+        .cloned()
+        .unwrap_or_else(|| (b.category_code.clone(), String::new()));
+    let pct_f = if b.amount > 0.0 {
+        b.used / b.amount * 100.0
+    } else {
+        0.0
+    };
+    let pct = pct_f.round() as i32;
+    let bar_color = if pct > 95 {
+        "var(--rose)"
+    } else if pct > 80 {
+        "var(--amber)"
+    } else {
+        Tone::parse(&tone).css_var()
+    };
+    let pct_class = if pct > 100 { "amt-neg" } else { "dim" };
+    let bar_width = (pct as i64).clamp(0, 100);
+    let edit_period = period.to_string();
+    let edit_category = b.category_code.clone();
+    let delete_period = period.to_string();
+    let delete_category = b.category_code.clone();
+    let row_amount = format!("{:.2}", b.amount);
+    let row_action = set_budget;
+    let delete_action = set_budget;
+    let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("name", &name)]);
+    view! {
+        <div>
+            <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+                <div style="font-size:13px">
+                    <span style="font-weight:500">{name}</span>
+                </div>
+                <div class="mono" style="font-size:12px">
+                    {format!("¥{} / ¥{} · ", fmt_int(b.used), fmt_int(b.amount))}
+                    <span class=pct_class>{format!("{}%", pct)}</span>
+                </div>
+            </div>
+            <div class="bar thick"><span style=format!("width:{}%;background:{}", bar_width, bar_color)></span></div>
+            <div class="hstack" style="gap:8px;margin-top:8px;justify-content:flex-end;flex-wrap:wrap">
+                <ActionForm action=row_action attr:class="hstack" attr:style="gap:6px;align-items:center">
+                    <input type="hidden" name="period" value=edit_period/>
+                    <input type="hidden" name="category_code" value=edit_category/>
+                    <input name="amount" type="number" step="50" min="0.01"
+                           value=row_amount
+                           style=format!("width:110px;{}", INPUT_STYLE_MONO)/>
+                    <button class="btn sm" type="submit">
+                        <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
+                    </button>
+                </ActionForm>
+                {render_budget_delete(
+                    delete_action,
+                    delete_period,
+                    delete_category,
+                    delete_confirm,
+                )}
+            </div>
+        </div>
+    }
 }
 
 fn render_budget(
@@ -1234,69 +1294,16 @@ fn render_budget(
                                         {import_button_label}
                                     </button>
                                 </ActionForm>
-                                <span class="error-slot">
-                                    {move || import_budgets.value().get().and_then(|r| r.err()).map(|e| view! {
-                                        <span class="tag rose">{server_fn_error_text(&e)}</span>
-                                    })}
-                                </span>
+                                <ErrorSlot action=import_budgets/>
                             </div>
                         </div>
                     }.into_any()
                 } else {
                     view! {
                         <div class="vstack" style="gap:14px">
-                            {budgets.into_iter().map(|b| {
-                                let (name, tone) = cat_lookup.get(&b.category_code)
-                                    .cloned()
-                                    .unwrap_or_else(|| (b.category_code.clone(), String::new()));
-                                let pct_f = if b.amount > 0.0 { b.used / b.amount * 100.0 } else { 0.0 };
-                                let pct = pct_f.round() as i32;
-                                let bar_color = if pct > 95 { "var(--rose)" }
-                                                else if pct > 80 { "var(--amber)" }
-                                                else { Tone::parse(&tone).css_var() };
-                                let pct_class = if pct > 100 { "amt-neg" } else { "dim" };
-                                let bar_width = (pct as i64).clamp(0, 100);
-                                let edit_period = period.clone();
-                                let edit_category = b.category_code.clone();
-                                let delete_period = period.clone();
-                                let delete_category = b.category_code.clone();
-                                let row_amount = format!("{:.2}", b.amount);
-                                let row_action = set_budget;
-                                let delete_action = set_budget;
-                                let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("name", &name)]);
-                                view! {
-                                    <div>
-                                        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                                            <div style="font-size:13px">
-                                                <span style="font-weight:500">{name}</span>
-                                            </div>
-                                            <div class="mono" style="font-size:12px">
-                                                {format!("¥{} / ¥{} · ", fmt_int(b.used), fmt_int(b.amount))}
-                                                <span class=pct_class>{format!("{}%", pct)}</span>
-                                            </div>
-                                        </div>
-                                        <div class="bar thick"><span style=format!("width:{}%;background:{}", bar_width, bar_color)></span></div>
-                                        <div class="hstack" style="gap:8px;margin-top:8px;justify-content:flex-end;flex-wrap:wrap">
-                                            <ActionForm action=row_action attr:class="hstack" attr:style="gap:6px;align-items:center">
-                                                <input type="hidden" name="period" value=edit_period/>
-                                                <input type="hidden" name="category_code" value=edit_category/>
-                                                <input name="amount" type="number" step="50" min="0.01"
-                                                       value=row_amount
-                                                       style=format!("width:110px;{}", INPUT_STYLE_MONO)/>
-                                                <button class="btn sm" type="submit">
-                                                    <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
-                                                </button>
-                                            </ActionForm>
-                                            {render_budget_delete(
-                                                delete_action,
-                                                delete_period,
-                                                delete_category,
-                                                delete_confirm,
-                                            )}
-                                        </div>
-                                    </div>
-                                }
-                            }).collect_view()}
+                            {budgets.into_iter()
+                                .map(|b| render_budget_row(b, &period, &cat_lookup, set_budget))
+                                .collect_view()}
                             {if unbudgeted.is_empty() {
                                 view! { <span></span> }.into_any()
                             } else {
@@ -1347,11 +1354,7 @@ fn render_budget(
                                 <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.save")}
                             </button>
                         </div>
-                        <span class="error-slot">
-                            {move || set_budget.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{server_fn_error_text(&e)}</span>
-                            })}
-                        </span>
+                        <ErrorSlot action=set_budget/>
                     </ActionForm>
                 </Card>
 
@@ -1485,11 +1488,7 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
                             </label>
                         </div>
                         <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                            <span class="error-slot" style="flex:1">
-                                {move || create_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
-                                })}
-                            </span>
+                            <ErrorSlot action=create_account style="flex:1"/>
                             <button class="btn ghost" type="button"
                                     on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
                             <button class="btn primary" type="submit">
@@ -1584,11 +1583,7 @@ fn render_account_card(
                             <button class="btn primary" type="submit">
                                 <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
                             </button>
-                            <span class="error-slot">
-                                {move || update_account.value().get().and_then(|r| r.err()).map(|e| view! {
-                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
-                                })}
-                            </span>
+                            <ErrorSlot action=update_account/>
                         </div>
                     </ActionForm>
                 </details>
@@ -1648,11 +1643,7 @@ fn render_categories(
                             </label>
                         </div>
                         <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                            <span class="error-slot" style="flex:1">
-                                {move || create_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                    <span class="tag rose">{server_fn_error_text(&e)}</span>
-                                })}
-                            </span>
+                            <ErrorSlot action=create_category style="flex:1"/>
                             <button class="btn ghost" type="button"
                                     on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
                             <button class="btn primary" type="submit">
@@ -1746,11 +1737,7 @@ fn render_category_row(
                                 <button class="btn primary" type="submit">
                                     <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
                                 </button>
-                                <span class="error-slot">
-                                    {move || update_category.value().get().and_then(|r| r.err()).map(|e| view! {
-                                        <span class="tag rose">{server_fn_error_text(&e)}</span>
-                                    })}
-                                </span>
+                                <ErrorSlot action=update_category/>
                             </div>
                         </ActionForm>
                     </details>
@@ -1857,6 +1844,30 @@ fn net_cell_parts(net: f64) -> (&'static str, &'static str, String) {
     }
 }
 
+/// The per-category bar list shared by both category-share cards: the ledger
+/// tab's side card and the reports tab's FIN-RPT-02 card render the identical
+/// row layout — only their surrounding `<Card>` chrome and empty state differ,
+/// so just this inner list is shared.
+fn render_category_share_rows(cats: Vec<crate::model::CategorySummary>) -> impl IntoView {
+    view! {
+        <div class="vstack" style="gap:10px">
+            {cats.into_iter().map(|c| {
+                let bar_color = Tone::parse(&c.tone).css_var();
+                let pct = (c.pct * 3.0).min(100.0);
+                view! {
+                    <div>
+                        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+                            <div style="font-size:12.5px"><span>{c.name.clone()}</span></div>
+                            <div class="mono" style="font-size:12px">{format!("¥{}", fmt_int(c.value))} <span class="dim">{format!("· {}%", c.pct)}</span></div>
+                        </div>
+                        <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
+                    </div>
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+
 fn render_category_share_card(d: &LedgerData) -> impl IntoView {
     let locale = use_locale();
     let cats = d.category_summary.clone();
@@ -1868,23 +1879,7 @@ fn render_category_share_card(d: &LedgerData) -> impl IntoView {
             {if cats.is_empty() {
                 view! { <p class="muted">{t(locale, "finance.reports.category_empty")}</p> }.into_any()
             } else {
-                view! {
-                    <div class="vstack" style="gap:10px">
-                        {cats.into_iter().map(|c| {
-                            let bar_color = Tone::parse(&c.tone).css_var();
-                            let pct = (c.pct * 3.0).min(100.0);
-                            view! {
-                                <div>
-                                    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                                        <div style="font-size:12.5px"><span>{c.name.clone()}</span></div>
-                                        <div class="mono" style="font-size:12px">{format!("¥{}", fmt_int(c.value))} <span class="dim">{format!("· {}%", c.pct)}</span></div>
-                                    </div>
-                                    <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
-                                </div>
-                            }
-                        }).collect_view()}
-                    </div>
-                }.into_any()
+                render_category_share_rows(cats).into_any()
             }}
         </Card>
     }

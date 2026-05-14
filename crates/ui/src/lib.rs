@@ -2,8 +2,8 @@
 
 mod card;
 mod chart_bars;
-mod confirm_dialog;
 mod empty_state;
+mod error_slot;
 mod heatmap;
 mod icon;
 mod kpi;
@@ -22,8 +22,8 @@ mod tweaks;
 
 pub use card::Card;
 pub use chart_bars::ChartBars;
-pub use confirm_dialog::ConfirmDialog;
 pub use empty_state::{EmptyState, SkeletonCard, SkeletonKpi};
+pub use error_slot::ErrorSlot;
 pub use heatmap::Heatmap;
 pub use icon::Icon;
 pub use kpi::{Direction, Kpi};

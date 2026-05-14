@@ -12,7 +12,9 @@ pub struct TodayActivity {
     pub rows: Vec<TodayActivityRow>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Mirrors the `activity` table column-for-column so `sqlx::FromRow` can
+/// decode a row straight into it — no hand-written tuple mapping.
+#[derive(Clone, Debug, PartialEq, sqlx::FromRow)]
 pub struct TodayActivityRow {
     pub occurred_at: i64,
     pub module: String,
@@ -22,46 +24,6 @@ pub struct TodayActivityRow {
     pub status: Option<String>,
     pub link_doc: Option<String>,
 }
-
-type ActivityRow = (
-    i64,
-    String,
-    String,
-    String,
-    Option<f64>,
-    Option<String>,
-    Option<String>,
-);
-
-const TODAY_ACTIVITY_ASC_SQL: &str = "
-    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
-      FROM activity
-     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
-     ORDER BY occurred_at ASC
-";
-
-const TODAY_ACTIVITY_ASC_LIMIT_SQL: &str = "
-    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
-      FROM activity
-     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
-     ORDER BY occurred_at ASC
-     LIMIT ?1
-";
-
-const TODAY_ACTIVITY_DESC_SQL: &str = "
-    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
-      FROM activity
-     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
-     ORDER BY occurred_at DESC
-";
-
-const TODAY_ACTIVITY_DESC_LIMIT_SQL: &str = "
-    SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
-      FROM activity
-     WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
-     ORDER BY occurred_at DESC
-     LIMIT ?1
-";
 
 pub async fn load_today_activity(
     pool: &SqlitePool,
@@ -75,50 +37,29 @@ pub async fn load_today_activity(
     // "Today" follows local wall-clock time. SQLite modifiers compose
     // left-to-right: shift to localtime, round to local midnight, then convert
     // back to UTC epoch seconds for comparison against stored unix timestamps.
-    let rows: Vec<ActivityRow> = match (order, limit) {
-        (TodayActivityOrder::Asc, None) => {
-            sqlx::query_as(TODAY_ACTIVITY_ASC_SQL)
-                .fetch_all(pool)
-                .await?
-        }
-        (TodayActivityOrder::Asc, Some(limit)) => {
-            sqlx::query_as(TODAY_ACTIVITY_ASC_LIMIT_SQL)
-                .bind(i64::from(limit.max(1)))
-                .fetch_all(pool)
-                .await?
-        }
-        (TodayActivityOrder::Desc, None) => {
-            sqlx::query_as(TODAY_ACTIVITY_DESC_SQL)
-                .fetch_all(pool)
-                .await?
-        }
-        (TodayActivityOrder::Desc, Some(limit)) => {
-            sqlx::query_as(TODAY_ACTIVITY_DESC_LIMIT_SQL)
-                .bind(i64::from(limit.max(1)))
-                .fetch_all(pool)
-                .await?
-        }
+    // `direction` is an enum-derived literal (never user input) and the
+    // optional `LIMIT` is bound, so this format! is injection-safe.
+    let direction = match order {
+        TodayActivityOrder::Asc => "ASC",
+        TodayActivityOrder::Desc => "DESC",
     };
+    let mut sql = format!(
+        "SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
+           FROM activity
+          WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
+          ORDER BY occurred_at {direction}"
+    );
+    if limit.is_some() {
+        sql.push_str(" LIMIT ?1");
+    }
 
-    Ok(TodayActivity {
-        date,
-        rows: rows
-            .into_iter()
-            .map(
-                |(occurred_at, module, doc_id, summary, amount, status, link_doc)| {
-                    TodayActivityRow {
-                        occurred_at,
-                        module,
-                        doc_id,
-                        summary,
-                        amount,
-                        status,
-                        link_doc,
-                    }
-                },
-            )
-            .collect(),
-    })
+    let mut query = sqlx::query_as::<_, TodayActivityRow>(&sql);
+    if let Some(limit) = limit {
+        query = query.bind(i64::from(limit.max(1)));
+    }
+    let rows = query.fetch_all(pool).await?;
+
+    Ok(TodayActivity { date, rows })
 }
 
 #[cfg(test)]

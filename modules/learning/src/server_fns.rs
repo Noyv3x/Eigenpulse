@@ -173,24 +173,9 @@ fn normalize_due_on(due_on: &str) -> Result<Option<String>, ServerFnError> {
     let Some(due_on) = ep_core::trim_to_option(due_on) else {
         return Ok(None);
     };
-    let mut parts = due_on.split('-');
-    let parsed = match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(y), Some(m), Some(d), None)
-            if y.len() == 4
-                && m.len() == 2
-                && d.len() == 2
-                && y.chars().all(|c| c.is_ascii_digit())
-                && m.chars().all(|c| c.is_ascii_digit())
-                && d.chars().all(|c| c.is_ascii_digit()) =>
-        {
-            match (y.parse::<i32>(), m.parse::<u8>(), d.parse::<u8>()) {
-                (Ok(year), Ok(month), Ok(day)) => Some((year, month, day)),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-    let valid = parsed.is_some_and(|(year, month, day)| {
+    // Stored as the raw `YYYY-MM-DD` string; only validate that it is a real
+    // calendar date before persisting.
+    let valid = ep_core::parse_ymd(&due_on).is_some_and(|(year, month, day)| {
         ep_core::ymd_to_unix_midnight(year, month, day).is_some()
     });
     if valid {
@@ -216,7 +201,7 @@ fn normalize_tone(tone: &str) -> Result<Option<String>, ServerFnError> {
 }
 
 #[cfg(feature = "ssr")]
-fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
+pub(crate) fn normalize_doc_id(doc_id: &str) -> Result<String, ServerFnError> {
     match ep_core::normalize_doc_id_input(doc_id) {
         Ok(doc_id) => Ok(doc_id),
         Err(ep_core::DocIdInputError::Required) => Err(err("learning.err.doc_id_required")),
@@ -311,16 +296,8 @@ pub async fn update_course_progress(
         let doc_id = normalize_doc_id(&doc_id)?;
         let progress = normalize_progress_pct(progress_pct)?;
         let st = ep_core::app_state_context()?;
-        type CourseRow = (
-            String,
-            String,
-            Option<String>,
-            f64,
-            Option<String>,
-            Option<String>,
-        );
         let mut tx = st.db.begin().await.map_err(server_err)?;
-        let row: Option<CourseRow> = sqlx::query_as(
+        let row: Option<Course> = sqlx::query_as(
             "UPDATE lrn_course
                 SET progress = ?1
               WHERE doc_id = ?2 AND archived = 0
@@ -331,7 +308,7 @@ pub async fn update_course_progress(
         .fetch_optional(&mut *tx)
         .await
         .map_err(server_err)?;
-        let row = match row {
+        let mut course = match row {
             Some(row) => row,
             None => return Err(err_with("learning.err.course_not_found", &doc_id)),
         };
@@ -342,14 +319,8 @@ pub async fn update_course_progress(
             .await
             .map_err(server_err)?;
         tx.commit().await.map_err(server_err)?;
-        Ok(Course {
-            doc_id: row.0,
-            name: row.1,
-            provider: row.2,
-            progress: normalize_progress(row.3),
-            due_on: row.4,
-            tone: row.5,
-        })
+        course.progress = normalize_progress(course.progress);
+        Ok(course)
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -386,16 +357,8 @@ pub(crate) async fn update_course_inner(
     doc_id: &str,
     input: CourseInput,
 ) -> Result<Course, ServerFnError> {
-    type CourseRow = (
-        String,
-        String,
-        Option<String>,
-        f64,
-        Option<String>,
-        Option<String>,
-    );
     let mut tx = pool.begin().await.map_err(server_err)?;
-    let row: Option<CourseRow> = sqlx::query_as(
+    let row: Option<Course> = sqlx::query_as(
         "UPDATE lrn_course
             SET name = ?1,
                 provider = ?2,
@@ -414,7 +377,7 @@ pub(crate) async fn update_course_inner(
     .fetch_optional(&mut *tx)
     .await
     .map_err(server_err)?;
-    let row = match row {
+    let mut course = match row {
         Some(row) => row,
         None => return Err(err_with("learning.err.course_not_found", doc_id)),
     };
@@ -424,21 +387,15 @@ pub(crate) async fn update_course_inner(
                 status = ?2
           WHERE module = 'LRN' AND doc_id = ?3",
     )
-    .bind(&row.1)
-    .bind(format!("{:.0}%", row.3 * 100.0))
+    .bind(&course.name)
+    .bind(format!("{:.0}%", course.progress * 100.0))
     .bind(doc_id)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;
-    Ok(Course {
-        doc_id: row.0,
-        name: row.1,
-        provider: row.2,
-        progress: normalize_progress(row.3),
-        due_on: row.4,
-        tone: row.5,
-    })
+    course.progress = normalize_progress(course.progress);
+    Ok(course)
 }
 
 #[cfg(feature = "ssr")]
@@ -457,25 +414,15 @@ pub async fn load_learning() -> Result<LearningData, ServerFnError> {
         ep_auth::require_user_for_server_fn().await?;
         let st = ep_core::app_state_context()?;
 
-        type BookRow = (String, String, Option<String>, String, f64);
-        type NoteRow = (String, String, Option<String>, i64);
-        type CourseRow = (
-            String,
-            String,
-            Option<String>,
-            f64,
-            Option<String>,
-            Option<String>,
-        );
-
-        let books_q = sqlx::query_as::<_, BookRow>(
+        // Full-row SELECTs decode into the model structs via `sqlx::FromRow`.
+        let books_q = sqlx::query_as::<_, Book>(
             "SELECT doc_id, name, author, status, progress FROM lrn_book ORDER BY status, doc_id",
         )
         .fetch_all(&st.db);
-        let notes_q = sqlx::query_as::<_, NoteRow>(
+        let notes_q = sqlx::query_as::<_, Note>(
             "SELECT doc_id, title, body, updated_at FROM lrn_note ORDER BY updated_at DESC LIMIT 30"
         ).fetch_all(&st.db);
-        let courses_q = sqlx::query_as::<_, CourseRow>(
+        let courses_q = sqlx::query_as::<_, Course>(
             "SELECT doc_id, name, provider, progress, due_on, tone FROM lrn_course WHERE archived = 0 ORDER BY due_on"
         ).fetch_all(&st.db);
 
@@ -547,37 +494,19 @@ pub async fn load_learning() -> Result<LearningData, ServerFnError> {
             }
         }
 
+        // Defensive clamp on stored course progress (bad/legacy data → 0..1).
+        let courses = courses
+            .into_iter()
+            .map(|mut c| {
+                c.progress = normalize_progress(c.progress);
+                c
+            })
+            .collect();
+
         Ok(LearningData {
-            books: books
-                .into_iter()
-                .map(|r| Book {
-                    doc_id: r.0,
-                    name: r.1,
-                    author: r.2,
-                    status: r.3,
-                    progress: r.4,
-                })
-                .collect(),
-            notes: notes
-                .into_iter()
-                .map(|r| Note {
-                    doc_id: r.0,
-                    title: r.1,
-                    body: r.2,
-                    updated_at: r.3,
-                })
-                .collect(),
-            courses: courses
-                .into_iter()
-                .map(|r| Course {
-                    doc_id: r.0,
-                    name: r.1,
-                    provider: r.2,
-                    progress: normalize_progress(r.3),
-                    due_on: r.4,
-                    tone: r.5,
-                })
-                .collect(),
+            books,
+            notes,
+            courses,
             summary: LearningSummary {
                 notes_30d: notes_30d as u32,
                 books_done,
@@ -682,7 +611,7 @@ pub(crate) async fn update_book_inner(
     input: BookInput,
 ) -> Result<Book, ServerFnError> {
     let mut tx = pool.begin().await.map_err(server_err)?;
-    let row: Option<(String, String, Option<String>, String, f64)> = sqlx::query_as(
+    let row: Option<Book> = sqlx::query_as(
         "UPDATE lrn_book
             SET name = ?1,
                 author = ?2,
@@ -699,7 +628,7 @@ pub(crate) async fn update_book_inner(
     .fetch_optional(&mut *tx)
     .await
     .map_err(server_err)?;
-    let row = match row {
+    let book = match row {
         Some(row) => row,
         None => return Err(err_with("learning.err.book_not_found", doc_id)),
     };
@@ -709,20 +638,14 @@ pub(crate) async fn update_book_inner(
                 status = ?2
           WHERE module = 'LRN' AND doc_id = ?3",
     )
-    .bind(&row.1)
-    .bind(&row.3)
+    .bind(&book.name)
+    .bind(&book.status)
     .bind(doc_id)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;
-    Ok(Book {
-        doc_id: row.0,
-        name: row.1,
-        author: row.2,
-        status: row.3,
-        progress: row.4,
-    })
+    Ok(book)
 }
 
 #[server(CycleBookStatus, "/api/_internal/lrn", "Url", "cycle_book_status")]
@@ -889,7 +812,7 @@ pub(crate) async fn update_note_inner(
 ) -> Result<Note, ServerFnError> {
     let updated_at = ep_core::unix_now();
     let mut tx = pool.begin().await.map_err(server_err)?;
-    let row: Option<(String, String, Option<String>, i64)> = sqlx::query_as(
+    let row: Option<Note> = sqlx::query_as(
         "UPDATE lrn_note
             SET title = ?1,
                 body = ?2,
@@ -904,7 +827,7 @@ pub(crate) async fn update_note_inner(
     .fetch_optional(&mut *tx)
     .await
     .map_err(server_err)?;
-    let row = match row {
+    let note = match row {
         Some(row) => row,
         None => return Err(err_with("learning.err.note_not_found", doc_id)),
     };
@@ -914,19 +837,14 @@ pub(crate) async fn update_note_inner(
                 summary = ?2
           WHERE module = 'LRN' AND doc_id = ?3",
     )
-    .bind(row.3)
-    .bind(&row.1)
+    .bind(note.updated_at)
+    .bind(&note.title)
     .bind(doc_id)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;
-    Ok(Note {
-        doc_id: row.0,
-        title: row.1,
-        body: row.2,
-        updated_at: row.3,
-    })
+    Ok(note)
 }
 
 #[cfg(all(test, feature = "ssr"))]

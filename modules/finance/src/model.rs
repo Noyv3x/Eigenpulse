@@ -53,10 +53,18 @@ pub const ACCOUNT_TYPES: &[&str] = &[
 /// `Tone` enum in `ep_core`, which already has `from_str`/`class` helpers.
 pub const TONES: &[&str] = &["green", "amber", "rose", "blue", "violet"];
 
+/// Column order in `fin_account` / `fin_category` / `fin_txn` matches these
+/// structs field-for-field, so `sqlx::FromRow` (server-only) lets every
+/// full-row `SELECT` decode straight into the model with no hand-written
+/// tuple mapping. `FromRow` matches by column name, so query column order
+/// is irrelevant — only the names have to line up.
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub code: String,
     pub name: String,
+    // DB column is `type`; the field is the raw identifier `r#type`.
+    #[cfg_attr(feature = "ssr", sqlx(rename = "type"))]
     pub r#type: String,
     pub tone: String,
     pub balance: f64,
@@ -64,6 +72,7 @@ pub struct Account {
     pub created_at: i64,
 }
 
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Category {
     pub code: String,
@@ -74,6 +83,7 @@ pub struct Category {
     pub created_at: i64,
 }
 
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Txn {
     pub doc_id: String,

@@ -16,7 +16,9 @@ pub struct AuthPat {
     pub scopes: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+/// `pat` table row minus the secret `hash` column. Columns line up so
+/// `sqlx::FromRow` decodes `list_pats` rows directly.
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PatRow {
     pub id: i64,
     pub name: String,
@@ -28,16 +30,8 @@ pub struct PatRow {
     pub revoked_at: Option<i64>,
 }
 
-type PatListRow = (
-    i64,
-    String,
-    String,
-    String,
-    i64,
-    Option<i64>,
-    Option<i64>,
-    Option<i64>,
-);
+/// Auth-path projection: just the columns `require_pat` needs to validate a
+/// bearer token. Stays a tuple — it is destructured immediately, never stored.
 type PatAuthRow = (i64, String, String, Option<i64>, Option<i64>);
 
 pub const MAX_PAT_NAME_CHARS: usize = 64;
@@ -134,25 +128,13 @@ fn normalize_pat_scopes(scopes: &[&str]) -> anyhow::Result<String> {
 }
 
 pub async fn list_pats(pool: &SqlitePool) -> anyhow::Result<Vec<PatRow>> {
-    let rows: Vec<PatListRow> = sqlx::query_as(
+    let rows = sqlx::query_as::<_, PatRow>(
         "SELECT id, name, prefix, scopes, created_at, expires_at, last_used_at, revoked_at
                FROM pat ORDER BY revoked_at IS NOT NULL, created_at DESC",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| PatRow {
-            id: r.0,
-            name: r.1,
-            prefix: r.2,
-            scopes: r.3,
-            created_at: r.4,
-            expires_at: r.5,
-            last_used_at: r.6,
-            revoked_at: r.7,
-        })
-        .collect())
+    Ok(rows)
 }
 
 pub async fn revoke_pat(pool: &SqlitePool, id: i64) -> anyhow::Result<bool> {

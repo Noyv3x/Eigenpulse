@@ -3,10 +3,17 @@ use crate::server_fns::*;
 use ep_core::{IconKind, Tone};
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    Card, ChartBars, Direction, Icon, Kpi, PageHead, Ring, RowDeleteAction, SkeletonCard,
-    SkeletonKpi, Tag,
+    Card, ChartBars, Direction, ErrorSlot, Icon, Kpi, PageHead, Ring, RowDeleteAction,
+    SkeletonCard, SkeletonKpi, Tag,
 };
 use leptos::prelude::*;
+
+// Shared inline-style tokens for the form controls on this page — mirrors the
+// same constants in `finance::view` so a styling tweak is a single edit.
+const INPUT_STYLE: &str =
+    "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
+const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
+const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
 
 #[component]
 pub fn FitnessView() -> impl IntoView {
@@ -139,7 +146,7 @@ fn render_fitness(
             <div class="module-glyph fit mono">"FIT"</div>
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
-                    <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.banner.status")}</span>
+                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.banner.status")}</span>
                     <Tag tone=Tone::Green dot=true>{tf(locale, "fitness.banner.tag", &[("done", &s.this_week_count.to_string()), ("target", &s.this_week_target.to_string())])}</Tag>
                 </div>
                 <div style="font-size:22px;font-weight:600;letter-spacing:-0.01em">
@@ -188,39 +195,39 @@ fn render_fitness(
                 <ActionForm action=add attr:class="vstack" attr:style="gap:10px">
                     <div style="display:grid;grid-template-columns:140px 2fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.date")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.date")}</span>
                             <input name="occurred_on" type="date"
                                    title=t(locale, "fitness.placeholder.date_now")
-                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
+                                   style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.kind")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.kind")}</span>
                             <input name="kind" required maxlength=MAX_WORKOUT_KIND_CHARS.to_string()
                                    placeholder=t(locale, "fitness.placeholder.kind")
-                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)"/>
+                                   style=INPUT_STYLE/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.plan")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.plan")}</span>
                             <input name="program" maxlength=MAX_WORKOUT_PROGRAM_CHARS.to_string()
                                    placeholder="PPL-5D"
-                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
+                                   style=INPUT_STYLE_MONO/>
                         </label>
                     </div>
                     <div style="display:grid;grid-template-columns:1fr 2fr 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.duration")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.duration")}</span>
                             <input name="duration_m" type="number" min="1" max=MAX_WORKOUT_DURATION_MINUTES.to_string() required placeholder="60"
-                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
+                                   style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.load")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.load")}</span>
                             <input name="load_text" maxlength=MAX_WORKOUT_LOAD_TEXT_CHARS.to_string()
                                    placeholder=t(locale, "fitness.placeholder.load")
-                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
+                                   style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.strain")}</span>
-                            <select name="strain" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)">
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.strain")}</span>
+                            <select name="strain" style=INPUT_STYLE>
                                 <option value=crate::model::Strain::L.as_str()>{format!("{} · {}", crate::model::Strain::L.as_str(), t(locale, "fitness.strain.l"))}</option>
                                 <option value=crate::model::Strain::M.as_str() selected="selected">{format!("{} · {}", crate::model::Strain::M.as_str(), t(locale, "fitness.strain.m"))}</option>
                                 <option value=crate::model::Strain::H.as_str()>{format!("{} · {}", crate::model::Strain::H.as_str(), t(locale, "fitness.strain.h"))}</option>
@@ -229,12 +236,12 @@ fn render_fitness(
                     </div>
                     <div style="display:grid;grid-template-columns:120px 1fr;gap:10px">
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.rpe")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.rpe")}</span>
                             <input name="rpe" type="number" min="1" max="10" placeholder="7"
-                                   style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)"/>
+                                   style=INPUT_STYLE_MONO/>
                         </label>
                         <label class="vstack" style="gap:4px">
-                            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">{t(locale, "fitness.field.notes")}</span>
+                            <span class="mono dim" style=FIELD_LABEL>{t(locale, "fitness.field.notes")}</span>
                             <textarea name="notes" rows="2" maxlength=MAX_WORKOUT_NOTES_CHARS.to_string()
                                       placeholder=t(locale, "fitness.placeholder.notes")
                                       style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono);font-size:12px"></textarea>
@@ -242,11 +249,7 @@ fn render_fitness(
                     </div>
                     <div class="hstack" style="gap:8px">
                         <button class="btn primary" type="submit"><Icon kind=IconKind::Plus size=14/>{t(locale, "fitness.submit.record")}</button>
-                        <span class="error-slot">
-                            {move || add.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{server_fn_error_text(&e)}</span>
-                            })}
-                        </span>
+                        <ErrorSlot action=add/>
                     </div>
                 </ActionForm>
             </Card>
@@ -260,11 +263,7 @@ fn render_fitness(
             } else {
                 view! { {render_workouts(workouts_for_table, update, delete)} }.into_any()
             }}
-            <span class="error-slot">
-                {move || update.value().get().and_then(|r| r.err()).map(|e| view! {
-                    <span class="tag rose">{server_fn_error_text(&e)}</span>
-                })}
-            </span>
+            <ErrorSlot action=update/>
         </Card>
     }
 }

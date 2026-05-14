@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+// `lrn_book` / `lrn_note` / `lrn_course` columns match these structs
+// field-for-field, so the server-only `sqlx::FromRow` derive lets full-row
+// `SELECT`s decode straight into the model without hand-written tuple mapping.
+
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Book {
     pub doc_id: String,
@@ -9,6 +14,7 @@ pub struct Book {
     pub progress: f64,
 }
 
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
     pub doc_id: String,
@@ -17,6 +23,7 @@ pub struct Note {
     pub updated_at: i64,
 }
 
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Course {
     pub doc_id: String,

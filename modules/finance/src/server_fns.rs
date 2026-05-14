@@ -372,32 +372,22 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         let state = ep_core::app_state_context()?;
         let pool = &state.db;
 
-        type AccRow = (String, String, String, String, f64, bool, i64);
-        type CatRow = (String, String, String, i64, bool, i64);
-        type TxnRow = (
-            String,
-            i64,
-            String,
-            String,
-            String,
-            f64,
-            String,
-            Option<String>,
-            Option<String>,
-        );
+        // Full-row SELECTs decode straight into the model structs via
+        // `sqlx::FromRow`; only the derived/aggregate queries below still need
+        // ad-hoc tuple rows.
         type SumRow = (String, f64);
 
-        let accounts_q = sqlx::query_as::<_, AccRow>(
+        let accounts_q = sqlx::query_as::<_, Account>(
             "SELECT code, name, type, tone, balance, archived, created_at
                FROM fin_account ORDER BY code",
         )
         .fetch_all(pool);
-        let categories_q = sqlx::query_as::<_, CatRow>(
+        let categories_q = sqlx::query_as::<_, Category>(
             "SELECT code, name, tone, sort_order, archived, created_at
                FROM fin_category ORDER BY sort_order",
         )
         .fetch_all(pool);
-        let txns_q = sqlx::query_as::<_, TxnRow>(
+        let txns_q = sqlx::query_as::<_, Txn>(
             "SELECT doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id
                FROM fin_txn ORDER BY occurred_at DESC LIMIT 50"
         ).fetch_all(pool);
@@ -534,7 +524,7 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         let (
             accounts,
             categories,
-            txns_rows,
+            txns,
             cat_rows,
             income,
             expense,
@@ -569,44 +559,6 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             cat_usage_q,
         )
         .map_err(server_err)?;
-
-        let accounts = accounts
-            .into_iter()
-            .map(|r| Account {
-                code: r.0,
-                name: r.1,
-                r#type: r.2,
-                tone: r.3,
-                balance: r.4,
-                archived: r.5,
-                created_at: r.6,
-            })
-            .collect::<Vec<_>>();
-        let categories = categories
-            .into_iter()
-            .map(|r| Category {
-                code: r.0,
-                name: r.1,
-                tone: r.2,
-                sort_order: r.3,
-                archived: r.4,
-                created_at: r.5,
-            })
-            .collect::<Vec<_>>();
-        let txns = txns_rows
-            .into_iter()
-            .map(|r| Txn {
-                doc_id: r.0,
-                occurred_at: r.1,
-                merchant: r.2,
-                category_code: r.3,
-                account_code: r.4,
-                amount: r.5,
-                tag: r.6,
-                note: r.7,
-                linked_doc_id: r.8,
-            })
-            .collect::<Vec<_>>();
 
         let total_spent: f64 = cat_rows.iter().map(|(_, v)| *v).sum();
         let category_summary = cat_rows
@@ -1866,23 +1818,14 @@ pub async fn create_account_inner(
         }
         return Err(server_err(e));
     }
-    let row: (String, String, String, String, f64, bool, i64) = sqlx::query_as(
+    sqlx::query_as::<_, Account>(
         "SELECT code, name, type, tone, balance, archived, created_at
            FROM fin_account WHERE code = ?1",
     )
     .bind(&code)
     .fetch_one(pool)
     .await
-    .map_err(server_err)?;
-    Ok(Account {
-        code: row.0,
-        name: row.1,
-        r#type: row.2,
-        tone: row.3,
-        balance: row.4,
-        archived: row.5,
-        created_at: row.6,
-    })
+    .map_err(server_err)
 }
 
 #[cfg(feature = "ssr")]
@@ -1983,23 +1926,14 @@ pub async fn update_account_inner_with(
         return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
     }
     tx.commit().await.map_err(server_err)?;
-    let row: (String, String, String, String, f64, bool, i64) = sqlx::query_as(
+    sqlx::query_as::<_, Account>(
         "SELECT code, name, type, tone, balance, archived, created_at
            FROM fin_account WHERE code = ?1",
     )
     .bind(&new_code)
     .fetch_one(pool)
     .await
-    .map_err(server_err)?;
-    Ok(Account {
-        code: row.0,
-        name: row.1,
-        r#type: row.2,
-        tone: row.3,
-        balance: row.4,
-        archived: row.5,
-        created_at: row.6,
-    })
+    .map_err(server_err)
 }
 
 #[cfg(feature = "ssr")]
@@ -2071,26 +2005,13 @@ pub async fn update_account(
 
 #[cfg(feature = "ssr")]
 pub async fn list_accounts_inner(pool: &SqlitePool) -> sqlx::Result<Vec<Account>> {
-    type Row = (String, String, String, String, f64, bool, i64);
-    let rows: Vec<Row> = sqlx::query_as(
+    sqlx::query_as::<_, Account>(
         "SELECT code, name, type, tone, balance, archived, created_at
            FROM fin_account
           ORDER BY code ASC",
     )
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| Account {
-            code: r.0,
-            name: r.1,
-            r#type: r.2,
-            tone: r.3,
-            balance: r.4,
-            archived: r.5,
-            created_at: r.6,
-        })
-        .collect())
+    .await
 }
 
 #[server(ListAccounts, "/api/_internal/fin", "Url", "list_accounts")]
@@ -2200,22 +2121,14 @@ pub async fn create_category_inner(
         }
         return Err(server_err(e));
     }
-    let row: (String, String, String, i64, bool, i64) = sqlx::query_as(
+    sqlx::query_as::<_, Category>(
         "SELECT code, name, tone, sort_order, archived, created_at
            FROM fin_category WHERE code = ?1",
     )
     .bind(&code)
     .fetch_one(pool)
     .await
-    .map_err(server_err)?;
-    Ok(Category {
-        code: row.0,
-        name: row.1,
-        tone: row.2,
-        sort_order: row.3,
-        archived: row.4,
-        created_at: row.5,
-    })
+    .map_err(server_err)
 }
 
 #[cfg(feature = "ssr")]
@@ -2318,22 +2231,14 @@ pub async fn update_category_inner_with(
         return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
     }
     tx.commit().await.map_err(server_err)?;
-    let row: (String, String, String, i64, bool, i64) = sqlx::query_as(
+    sqlx::query_as::<_, Category>(
         "SELECT code, name, tone, sort_order, archived, created_at
            FROM fin_category WHERE code = ?1",
     )
     .bind(&new_code)
     .fetch_one(pool)
     .await
-    .map_err(server_err)?;
-    Ok(Category {
-        code: row.0,
-        name: row.1,
-        tone: row.2,
-        sort_order: row.3,
-        archived: row.4,
-        created_at: row.5,
-    })
+    .map_err(server_err)
 }
 
 #[cfg(feature = "ssr")]

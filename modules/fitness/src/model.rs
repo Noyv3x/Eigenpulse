@@ -38,6 +38,10 @@ impl Strain {
     }
 }
 
+/// `fit_workout` columns match this struct field-for-field, so the
+/// server-only `sqlx::FromRow` derive lets full-row `SELECT`s decode
+/// straight into `Workout` without hand-written tuple mapping.
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workout {
     pub doc_id: String,

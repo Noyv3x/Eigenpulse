@@ -1,6 +1,6 @@
 use ep_core::IconKind;
 use ep_i18n::{server_fn_error_text, t, use_locale};
-use ep_ui::{Card, Icon, PageHead, RowDeleteAction, Tag};
+use ep_ui::{Card, ErrorSlot, Icon, PageHead, RowDeleteAction, Tag};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
@@ -399,15 +399,11 @@ pub fn NotificationChannelsView() -> impl IntoView {
                         <button class="btn primary" type="submit">
                             <Icon kind=IconKind::Plus size=14/>{t(locale, "app.settings.notifications.add")}
                         </button>
-                        // Wrapper element keeps a stable DOM neighbour for the
-                        // text-node hydrate walker; without it, tachys 0.1.9
-                        // panics with `failed_to_cast_text_node` when a sibling
-                        // <ActionForm> rewrites the slot. See docs/follow-ups.md #26.
-                        <span class="error-slot">
-                            {move || create.value().get().and_then(|r| r.err()).map(|e| view! {
-                                <span class="tag rose">{server_fn_error_text(&e)}</span>
-                            })}
-                        </span>
+                        // ErrorSlot renders the stable `error-slot` wrapper the
+                        // text-node hydrate walker needs next to the sibling
+                        // <ActionForm>; without that anchor tachys 0.1.9 panics
+                        // with `failed_to_cast_text_node`. See docs/follow-ups.md #26.
+                        <ErrorSlot action=create/>
                     </div>
                 </ActionForm>
             </Card>

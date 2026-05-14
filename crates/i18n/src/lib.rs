@@ -13,6 +13,8 @@ mod server_fns;
 mod client;
 
 #[cfg(feature = "ssr")]
+mod api_error;
+#[cfg(feature = "ssr")]
 mod middleware;
 
 pub use crate::cookie::build_set_cookie;
@@ -23,6 +25,8 @@ pub use crate::server_fns::{set_user_locale, SetUserLocale};
 #[cfg(feature = "hydrate")]
 pub use crate::client::switch_locale_via_reload;
 
+#[cfg(feature = "ssr")]
+pub use crate::api_error::{db_error_response, i18n_error_response};
 #[cfg(feature = "ssr")]
 pub use crate::middleware::locale_layer;
 
