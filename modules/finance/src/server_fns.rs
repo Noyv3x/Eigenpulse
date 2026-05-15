@@ -18,6 +18,18 @@ pub(crate) const MAX_ACCOUNT_NAME_CHARS: usize = 64;
 #[allow(dead_code)]
 pub(crate) const MAX_CATEGORY_CODE_CHARS: usize = 8;
 pub(crate) const MAX_CATEGORY_NAME_CHARS: usize = 32;
+#[allow(dead_code)]
+pub(crate) const MIN_CURRENCY_CODE_CHARS: usize = 2;
+#[allow(dead_code)]
+pub(crate) const MAX_CURRENCY_CODE_CHARS: usize = 8;
+#[allow(dead_code)]
+pub(crate) const MAX_CURRENCY_SYMBOL_CHARS: usize = 8;
+#[allow(dead_code)]
+pub(crate) const MAX_CURRENCY_NAME_CHARS: usize = 32;
+/// Upper bound on a currency's minor-unit precision. 8 covers satoshi-style
+/// assets; `10^8` stays comfortably inside `i64` for any realistic balance.
+#[allow(dead_code)]
+pub(crate) const MAX_CURRENCY_DECIMALS: u8 = 8;
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
@@ -28,12 +40,16 @@ struct NormalizedTxnFields {
     note: Option<String>,
 }
 
+/// Fully-resolved fields for `add_txn_inner`. `amount` is already signed
+/// minor units in `currency_code`'s precision; `currency_code` is the
+/// currency the account and category both belong to.
 #[cfg(feature = "ssr")]
 pub struct AddTxnFields {
+    pub currency_code: String,
     pub merchant: String,
     pub category_code: String,
     pub account_code: String,
-    pub amount: f64,
+    pub amount: i64,
     pub tag: String,
     pub note: Option<String>,
     pub linked_doc_id: Option<String>,
@@ -122,6 +138,418 @@ pub(crate) fn normalize_budget_period(period: &str) -> Result<String, ServerFnEr
         return Err(ep_i18n::err_with("finance.err.period_format", period));
     }
     Ok(period.to_string())
+}
+
+/// Parse an amount string (e.g. `"42.50"`) into signed-free minor units at
+/// `decimals` precision. Rejects blank / malformed input but keeps the sign —
+/// API callers (PAT path) pass pre-signed exp/inc amounts. Pairs with
+/// [`parse_positive_minor`] for the form path.
+#[cfg(feature = "ssr")]
+pub(crate) fn parse_signed_minor(input: &str, decimals: u8) -> Result<i64, ServerFnError> {
+    ep_core::parse_minor(input, decimals)
+        .ok_or_else(|| ep_i18n::err_with("finance.err.amount_invalid", input.trim()))
+}
+
+/// As [`parse_signed_minor`] but additionally rejects non-positive values —
+/// every amount the UI's `<ActionForm>` submits is a positive magnitude.
+#[cfg(feature = "ssr")]
+fn parse_positive_minor(input: &str, decimals: u8) -> Result<i64, ServerFnError> {
+    let amount = parse_signed_minor(input, decimals)?;
+    if amount <= 0 {
+        return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
+    }
+    Ok(amount)
+}
+
+/// Split a `"{currency_code}/{account_code}"` form value (the option value the
+/// transfer picker emits) into its parts. Account codes never contain `/`.
+#[cfg(feature = "ssr")]
+fn split_currency_ref(value: &str) -> Result<(String, String), ServerFnError> {
+    let (currency, code) = value
+        .split_once('/')
+        .ok_or_else(|| ep_i18n::err_with("finance.err.account_ref_invalid", value))?;
+    let currency = currency.trim();
+    let code = code.trim();
+    if currency.is_empty() || code.is_empty() {
+        return Err(ep_i18n::err_with("finance.err.account_ref_invalid", value));
+    }
+    Ok((currency.to_string(), code.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Currency resolution + validation
+// ---------------------------------------------------------------------------
+
+/// Resolve a currency by code. An empty or unknown code falls back to the
+/// primary currency, so a stale / deleted selection degrades gracefully
+/// instead of erroring. Errors only when the registry is somehow empty
+/// (the 002 migration always seeds one).
+#[cfg(feature = "ssr")]
+pub async fn resolve_currency(pool: &SqlitePool, code: &str) -> Result<Currency, ServerFnError> {
+    let code = code.trim();
+    if !code.is_empty() {
+        if let Some(c) = sqlx::query_as::<_, Currency>(
+            "SELECT code, symbol, name, decimals, is_primary, sort_order
+               FROM fin_currency WHERE code = ?1",
+        )
+        .bind(code)
+        .fetch_optional(pool)
+        .await
+        .map_err(server_err)?
+        {
+            return Ok(c);
+        }
+    }
+    sqlx::query_as::<_, Currency>(
+        "SELECT code, symbol, name, decimals, is_primary, sort_order
+           FROM fin_currency ORDER BY is_primary DESC, sort_order, code LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(server_err)?
+    .ok_or_else(|| ep_i18n::err("finance.err.no_currency"))
+}
+
+/// Pure validator for currency input. Returns the trimmed, upper-cased code
+/// plus the validated symbol / name / decimals / sort_order.
+#[cfg(feature = "ssr")]
+fn validate_currency_input(
+    code: &str,
+    symbol: &str,
+    name: &str,
+    decimals: i64,
+    sort_order: i64,
+) -> Result<(String, String, String, u8, i64), ServerFnError> {
+    let code = code.trim().to_uppercase();
+    let symbol = symbol.trim().to_string();
+    let name = name.trim().to_string();
+    if code.len() < MIN_CURRENCY_CODE_CHARS || code.len() > MAX_CURRENCY_CODE_CHARS {
+        return Err(ep_i18n::err("finance.err.currency_code_format"));
+    }
+    if !code
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return Err(ep_i18n::err("finance.err.currency_code_charset"));
+    }
+    if symbol.is_empty() || symbol.chars().count() > MAX_CURRENCY_SYMBOL_CHARS {
+        return Err(ep_i18n::err("finance.err.currency_symbol_format"));
+    }
+    if name.is_empty() || name.chars().count() > MAX_CURRENCY_NAME_CHARS {
+        return Err(ep_i18n::err("finance.err.currency_name_format"));
+    }
+    if !(0..=i64::from(MAX_CURRENCY_DECIMALS)).contains(&decimals) {
+        return Err(ep_i18n::err_with(
+            "finance.err.currency_decimals_range",
+            MAX_CURRENCY_DECIMALS,
+        ));
+    }
+    if sort_order < 0 {
+        return Err(ep_i18n::err("finance.err.currency_sort_order_invalid"));
+    }
+    Ok((code, symbol, name, decimals as u8, sort_order))
+}
+
+#[cfg(feature = "ssr")]
+pub async fn list_currencies_inner(pool: &SqlitePool) -> sqlx::Result<Vec<Currency>> {
+    sqlx::query_as::<_, Currency>(
+        "SELECT code, symbol, name, decimals, is_primary, sort_order
+           FROM fin_currency ORDER BY sort_order, code",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+#[cfg(feature = "ssr")]
+pub async fn create_currency_inner(
+    pool: &SqlitePool,
+    code: String,
+    symbol: String,
+    name: String,
+    decimals: i64,
+    sort_order: i64,
+) -> Result<Currency, ServerFnError> {
+    let (code, symbol, name, decimals, sort_order) =
+        validate_currency_input(&code, &symbol, &name, decimals, sort_order)?;
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    // The very first currency is primary by default; later ones are not.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_currency")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    let is_primary = i64::from(count == 0);
+    let res = sqlx::query(
+        "INSERT INTO fin_currency (code, symbol, name, decimals, is_primary, sort_order)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&code)
+    .bind(&symbol)
+    .bind(&name)
+    .bind(decimals)
+    .bind(is_primary)
+    .bind(sort_order)
+    .execute(&mut *tx)
+    .await;
+    if let Err(e) = res {
+        if is_unique_violation(&e) {
+            return Err(ep_i18n::err_with("finance.err.currency_code_taken", &code));
+        }
+        return Err(server_err(e));
+    }
+    // Every currency owns a transfer category — `add_transfer_inner` files
+    // both legs of a transfer under it.
+    sqlx::query(
+        "INSERT INTO fin_category (currency_code, code, name, tone, sort_order, archived, created_at)
+         VALUES (?1, ?2, 'Transfer', '', 999, 0, unixepoch())",
+    )
+    .bind(&code)
+    .bind(TRANSFER_CATEGORY_CODE)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(Currency {
+        code,
+        symbol,
+        name,
+        decimals,
+        is_primary: is_primary == 1,
+        sort_order,
+    })
+}
+
+#[cfg(feature = "ssr")]
+pub async fn update_currency_inner(
+    pool: &SqlitePool,
+    code: String,
+    symbol: String,
+    name: String,
+    decimals: i64,
+    sort_order: i64,
+) -> Result<Currency, ServerFnError> {
+    let (code, symbol, name, decimals, sort_order) =
+        validate_currency_input(&code, &symbol, &name, decimals, sort_order)?;
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let current: Option<i64> =
+        sqlx::query_scalar("SELECT decimals FROM fin_currency WHERE code = ?1")
+            .bind(&code)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    let Some(current_decimals) = current else {
+        return Err(ep_i18n::err_with("finance.err.currency_not_found", &code));
+    };
+    // Changing the precision would silently rescale every stored minor-unit
+    // amount, so it is only allowed while the currency has no accounts yet
+    // (and therefore no balances, transactions, or budgets).
+    if current_decimals != i64::from(decimals) {
+        let has_accounts: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1)")
+                .bind(&code)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(server_err)?;
+        if has_accounts != 0 {
+            return Err(ep_i18n::err("finance.err.currency_decimals_locked"));
+        }
+    }
+    sqlx::query(
+        "UPDATE fin_currency SET symbol = ?1, name = ?2, decimals = ?3, sort_order = ?4
+          WHERE code = ?5",
+    )
+    .bind(&symbol)
+    .bind(&name)
+    .bind(decimals)
+    .bind(sort_order)
+    .bind(&code)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    sqlx::query_as::<_, Currency>(
+        "SELECT code, symbol, name, decimals, is_primary, sort_order
+           FROM fin_currency WHERE code = ?1",
+    )
+    .bind(&code)
+    .fetch_one(pool)
+    .await
+    .map_err(server_err)
+}
+
+/// Make `code` the single primary currency. `is_primary = (code = ?1)` flips
+/// exactly one row to `1` and every other row to `0` in one statement.
+#[cfg(feature = "ssr")]
+pub async fn set_primary_currency_inner(
+    pool: &SqlitePool,
+    code: String,
+) -> Result<(), ServerFnError> {
+    let code = code.trim().to_string();
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_currency WHERE code = ?1)")
+            .bind(&code)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    if exists == 0 {
+        return Err(ep_i18n::err_with("finance.err.currency_not_found", &code));
+    }
+    sqlx::query("UPDATE fin_currency SET is_primary = (code = ?1)")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(())
+}
+
+/// Delete a currency. Refused while it still owns user data (accounts,
+/// transactions, budgets, or non-`TFR` categories), while it is the primary
+/// currency, or while it is the last currency standing. The auto-provisioned
+/// `TFR` category is removed alongside it.
+#[cfg(feature = "ssr")]
+pub async fn delete_currency_inner(pool: &SqlitePool, code: String) -> Result<(), ServerFnError> {
+    let code = code.trim().to_string();
+    if code.is_empty() {
+        return Err(ep_i18n::err("finance.err.currency_code_format"));
+    }
+    let mut tx = pool.begin().await.map_err(server_err)?;
+    let is_primary: Option<bool> =
+        sqlx::query_scalar("SELECT is_primary FROM fin_currency WHERE code = ?1")
+            .bind(&code)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    let Some(is_primary) = is_primary else {
+        return Err(ep_i18n::err_with("finance.err.currency_not_found", &code));
+    };
+    if is_primary {
+        return Err(ep_i18n::err("finance.err.currency_primary_undeletable"));
+    }
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_currency")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    if total <= 1 {
+        return Err(ep_i18n::err("finance.err.currency_last_undeletable"));
+    }
+    // One short-circuit `EXISTS … OR EXISTS …` chain instead of four COUNT
+    // round-trips. The auto-provisioned TFR category doesn't count as user
+    // data, so the category branch excludes it.
+    let in_use: i64 = sqlx::query_scalar(
+        "SELECT
+            EXISTS(SELECT 1 FROM fin_txn      WHERE currency_code = ?1) OR
+            EXISTS(SELECT 1 FROM fin_account  WHERE currency_code = ?1) OR
+            EXISTS(SELECT 1 FROM fin_budget   WHERE currency_code = ?1) OR
+            EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code <> ?2)",
+    )
+    .bind(&code)
+    .bind(TRANSFER_CATEGORY_CODE)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    if in_use != 0 {
+        return Err(ep_i18n::err("finance.err.currency_in_use"));
+    }
+    sqlx::query("DELETE FROM fin_category WHERE currency_code = ?1")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    sqlx::query("DELETE FROM fin_currency WHERE code = ?1")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+    tx.commit().await.map_err(server_err)?;
+    Ok(())
+}
+
+#[server(ListCurrencies, "/api/_internal/fin", "Url", "list_currencies")]
+pub async fn list_currencies() -> Result<Vec<Currency>, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        list_currencies_inner(&state.db).await.map_err(server_err)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ep_core::server_err("ssr-only"))
+    }
+}
+
+#[server(CreateCurrency, "/api/_internal/fin", "Url", "create_currency")]
+pub async fn create_currency(
+    code: String,
+    symbol: String,
+    name: String,
+    decimals: i64,
+    sort_order: i64,
+) -> Result<Currency, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        create_currency_inner(&state.db, code, symbol, name, decimals, sort_order).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ep_core::server_err("ssr-only"))
+    }
+}
+
+#[server(UpdateCurrency, "/api/_internal/fin", "Url", "update_currency")]
+pub async fn update_currency(
+    code: String,
+    symbol: String,
+    name: String,
+    decimals: i64,
+    sort_order: i64,
+) -> Result<Currency, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        update_currency_inner(&state.db, code, symbol, name, decimals, sort_order).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ep_core::server_err("ssr-only"))
+    }
+}
+
+#[server(
+    SetPrimaryCurrency,
+    "/api/_internal/fin",
+    "Url",
+    "set_primary_currency"
+)]
+pub async fn set_primary_currency(code: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        set_primary_currency_inner(&state.db, code).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ep_core::server_err("ssr-only"))
+    }
+}
+
+#[server(DeleteCurrency, "/api/_internal/fin", "Url", "delete_currency")]
+pub async fn delete_currency(code: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        delete_currency_inner(&state.db, code).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        Err(ep_core::server_err("ssr-only"))
+    }
 }
 
 #[cfg(all(test, feature = "ssr"))]
@@ -233,6 +661,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_currency_input_enforces_shape_and_ranges() {
+        // Code is upper-cased and constrained to [A-Z0-9], 2..=8 chars.
+        assert_eq!(
+            validate_currency_input(" usd ", "$", "US Dollar", 2, 0).unwrap(),
+            (
+                "USD".to_string(),
+                "$".to_string(),
+                "US Dollar".to_string(),
+                2,
+                0
+            )
+        );
+        assert!(validate_currency_input("U", "$", "x", 2, 0).is_err()); // too short
+        assert!(validate_currency_input("US-D", "$", "x", 2, 0).is_err()); // bad charset
+        assert!(validate_currency_input("USD", "", "x", 2, 0).is_err()); // empty symbol
+        assert!(validate_currency_input("USD", "$", "", 2, 0).is_err()); // empty name
+        assert!(validate_currency_input("USD", "$", "x", -1, 0).is_err()); // decimals < 0
+        assert!(validate_currency_input("USD", "$", "x", 9, 0).is_err()); // decimals > max
+        assert!(validate_currency_input("USD", "$", "x", 2, -1).is_err()); // sort < 0
+    }
+
+    #[test]
     fn slugify_to_code_handles_ascii_and_chinese() {
         assert_eq!(
             slugify_to_code("Cash Wallet", MAX_ACCOUNT_CODE_CHARS),
@@ -253,6 +703,17 @@ mod tests {
         assert!(validate_category_sort_order(-1).is_err());
         assert_eq!(validate_category_sort_order(0).unwrap(), 0);
         assert_eq!(validate_category_sort_order(42).unwrap(), 42);
+    }
+
+    #[test]
+    fn split_currency_ref_splits_on_first_slash() {
+        assert_eq!(
+            split_currency_ref("CNY/ACC-1").unwrap(),
+            ("CNY".to_string(), "ACC-1".to_string())
+        );
+        assert!(split_currency_ref("ACC-1").is_err());
+        assert!(split_currency_ref("/ACC-1").is_err());
+        assert!(split_currency_ref("CNY/").is_err());
     }
 }
 
@@ -279,15 +740,26 @@ pub async fn parse_occurred_at(
     Ok(Some(ts))
 }
 
-/// One transactional payload for the entire `/finance` page. Bundles every
-/// aggregate the view needs so the SSR pass fires a single `tokio::try_join!`
-/// instead of N round-trips, and the hydrate side pays one network request
-/// for the whole page rather than one per tab.
+/// One transactional payload for the entire `/finance` page, scoped to a
+/// single currency. Bundles every aggregate the view needs so the SSR pass
+/// fires a single `tokio::try_join!` instead of N round-trips, and the
+/// hydrate side pays one network request per currency switch rather than one
+/// per tab.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerData {
+    /// The currency this ledger payload is scoped to (resolved server-side;
+    /// an empty / unknown request code resolves to the primary currency).
+    pub currency: Currency,
+    /// Every currency, for the page's currency switcher.
+    pub currencies: Vec<Currency>,
     pub accounts: Vec<Account>,
     /// Index-aligned with `accounts`: account_stats[i] describes accounts[i].
     pub account_stats: Vec<AccountStats>,
+    /// Every account across *all* currencies, slim-projected for the
+    /// cross-currency transfer picker (only `currency_code`, `code`, and
+    /// `name` — the form ignores balance / tone / etc.).
+    pub transfer_accounts: Vec<TransferAccountRef>,
+    /// User categories in this currency — the auto `TFR` category is excluded.
     pub categories: Vec<Category>,
     /// Most recent 50 txns (descending). The full month count is in
     /// `month.total_txn_count`.
@@ -303,28 +775,32 @@ pub struct LedgerData {
     /// vanishing).
     pub months_12: Vec<MonthBucket>,
     /// All-time txn count per category code, used by the usage column on
-    /// the categories management table. `serde(default)` for backward-compat
-    /// with any cached client/server versions that pre-date this field.
+    /// the categories management table.
     #[serde(default)]
     pub category_usage: std::collections::HashMap<String, i64>,
 }
 
-/// Dense 12-month income/expense bucket, oldest -> newest.
+/// Dense 12-month income/expense bucket for one currency, oldest -> newest.
 ///
 /// Expense totals deliberately include only `tag = 'exp'`; transfer from-legs
 /// are negative too, but they are internal money movement rather than spend.
 #[cfg(feature = "ssr")]
-pub async fn load_month_buckets_12(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<MonthBucket>> {
-    type MonthRow = (String, f64, f64);
+pub async fn load_month_buckets_12(
+    pool: &sqlx::SqlitePool,
+    currency_code: &str,
+) -> sqlx::Result<Vec<MonthBucket>> {
+    type MonthRow = (String, i64, i64);
     let months_q = sqlx::query_as::<_, MonthRow>(
         "SELECT strftime('%Y-%m', occurred_at, 'unixepoch', 'localtime') AS period,
-                COALESCE(SUM(CASE WHEN tag='inc' AND amount > 0 THEN amount ELSE 0.0 END), 0.0) AS income,
-                COALESCE(SUM(CASE WHEN tag='exp' AND amount < 0 THEN -amount ELSE 0.0 END), 0.0) AS expense
+                COALESCE(SUM(CASE WHEN tag='inc' AND amount > 0 THEN amount ELSE 0 END), 0) AS income,
+                COALESCE(SUM(CASE WHEN tag='exp' AND amount < 0 THEN -amount ELSE 0 END), 0) AS expense
            FROM fin_txn
-          WHERE occurred_at >= unixepoch('now','localtime','start of month','-11 months','utc')
+          WHERE currency_code = ?1
+            AND occurred_at >= unixepoch('now','localtime','start of month','-11 months','utc')
           GROUP BY period
           ORDER BY period ASC",
     )
+    .bind(currency_code)
     .fetch_all(pool);
     let frame_q = sqlx::query_scalar::<_, String>(
         "WITH RECURSIVE months(p, n) AS (
@@ -344,8 +820,8 @@ pub async fn load_month_buckets_12(pool: &sqlx::SqlitePool) -> sqlx::Result<Vec<
 }
 
 #[cfg(feature = "ssr")]
-fn month_buckets_from_rows(frame: Vec<String>, rows: Vec<(String, f64, f64)>) -> Vec<MonthBucket> {
-    let mut by_period: std::collections::HashMap<String, (f64, f64)> =
+fn month_buckets_from_rows(frame: Vec<String>, rows: Vec<(String, i64, i64)>) -> Vec<MonthBucket> {
+    let mut by_period: std::collections::HashMap<String, (i64, i64)> =
         std::collections::HashMap::new();
     for (period, income, expense) in rows {
         by_period.insert(period, (income, expense));
@@ -353,7 +829,7 @@ fn month_buckets_from_rows(frame: Vec<String>, rows: Vec<(String, f64, f64)>) ->
     frame
         .into_iter()
         .map(|period| {
-            let (income, expense) = by_period.get(&period).copied().unwrap_or((0.0, 0.0));
+            let (income, expense) = by_period.get(&period).copied().unwrap_or((0, 0));
             MonthBucket {
                 period,
                 income,
@@ -365,32 +841,42 @@ fn month_buckets_from_rows(frame: Vec<String>, rows: Vec<(String, f64, f64)>) ->
 }
 
 #[server(LoadLedger, "/api/_internal/fin", "Url", "load_ledger")]
-pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
+pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
         let pool = &state.db;
 
+        // Resolve the requested currency first; everything below is scoped to
+        // it. An empty / stale code resolves to the primary currency.
+        let currency = resolve_currency(pool, &currency_code).await?;
+        let cc = currency.code.clone();
+
         // Full-row SELECTs decode straight into the model structs via
         // `sqlx::FromRow`; only the derived/aggregate queries below still need
-        // ad-hoc tuple rows.
-        type SumRow = (String, f64);
+        // ad-hoc tuple rows. Every query filters `currency_code = ?1`.
+        type SumRow = (String, i64);
 
         let accounts_q = sqlx::query_as::<_, Account>(
-            "SELECT code, name, type, tone, balance, archived, created_at
-               FROM fin_account ORDER BY code",
+            "SELECT currency_code, code, name, type, tone, balance, archived, created_at
+               FROM fin_account WHERE currency_code = ?1 ORDER BY code",
         )
+        .bind(&cc)
         .fetch_all(pool);
+        // The auto `TFR` category is internal plumbing — never offered as a
+        // ledger category, so it stays out of this list.
         let categories_q = sqlx::query_as::<_, Category>(
-            "SELECT code, name, tone, sort_order, archived, created_at
-               FROM fin_category ORDER BY sort_order",
+            "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+               FROM fin_category WHERE currency_code = ?1 AND code <> ?2 ORDER BY sort_order",
         )
+        .bind(&cc)
+        .bind(TRANSFER_CATEGORY_CODE)
         .fetch_all(pool);
         let txns_q = sqlx::query_as::<_, Txn>(
-            "SELECT doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id
-               FROM fin_txn ORDER BY occurred_at DESC LIMIT 50"
-        ).fetch_all(pool);
+            "SELECT doc_id, currency_code, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id
+               FROM fin_txn WHERE currency_code = ?1 ORDER BY occurred_at DESC LIMIT 50"
+        ).bind(&cc).fetch_all(pool);
         // Every "expense" aggregation filters `tag = 'exp'` (not just
         // `amount < 0`): transfer rows have `tag='tfr'` and the from-leg
         // is amount<0, which would otherwise pollute expense / category /
@@ -399,87 +885,96 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         let cat_sum_q = sqlx::query_as::<_, SumRow>(
             "SELECT category_code, SUM(-amount)
                FROM fin_txn
-              WHERE tag = 'exp'
+              WHERE currency_code = ?1 AND tag = 'exp'
                 AND occurred_at >= unixepoch('now','localtime','start of month','utc')
               GROUP BY category_code",
         )
+        .bind(&cc)
         .fetch_all(pool);
-        // COALESCE / CASE-ELSE defaults are `0.0` (not `0`): sqlite types
-        // the fallback by literal, and an INTEGER `0` would trip sqlx's
-        // f64 decoder when SUM is NULL on an empty table.
-        let income_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn
-              WHERE amount > 0 AND tag = 'inc'
+        // COALESCE / CASE-ELSE defaults are integer `0` — amounts are i64
+        // minor units now, and an f64 `0.0` fallback would trip sqlx's
+        // integer decoder when SUM is NULL on an empty table.
+        let income_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM fin_txn
+              WHERE currency_code = ?1 AND amount > 0 AND tag = 'inc'
                 AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
         )
+        .bind(&cc)
         .fetch_one(pool);
-        let expense_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
-              WHERE tag = 'exp'
-                AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
+        // MTD expense is just `sum(cat_sum_q.values())` — no need for a
+        // second aggregate. Derived after the try_join.
+        let budget_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM fin_budget
+              WHERE currency_code = ?1 AND period = strftime('%Y-%m','now','localtime')",
         )
-        .fetch_one(pool);
-        let budget_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_budget
-              WHERE period = strftime('%Y-%m','now','localtime')",
-        )
+        .bind(&cc)
         .fetch_one(pool);
         // Per-category budget vs MTD usage, used by the budget tab and
-        // `suggestions::compute_suggestions`.
-        type BudgetRow = (String, f64, f64);
+        // `suggestions::compute_suggestions`. `?1` is the currency in both
+        // the outer query and the correlated subquery.
+        type BudgetRow = (String, i64, i64);
         let budgets_q = sqlx::query_as::<_, BudgetRow>(
             "SELECT b.category_code, b.amount,
                     COALESCE((SELECT SUM(-t.amount) FROM fin_txn t
-                               WHERE t.category_code = b.category_code
+                               WHERE t.currency_code = ?1
+                                 AND t.category_code = b.category_code
                                  AND t.tag = 'exp'
-                                 AND t.occurred_at >= unixepoch('now','localtime','start of month','utc')), 0.0) AS used
+                                 AND t.occurred_at >= unixepoch('now','localtime','start of month','utc')), 0) AS used
                FROM fin_budget b
-              WHERE b.period = strftime('%Y-%m','now','localtime')
+              WHERE b.currency_code = ?1
+                AND b.period = strftime('%Y-%m','now','localtime')
               ORDER BY b.category_code"
-        ).fetch_all(pool);
+        ).bind(&cc).fetch_all(pool);
 
         // Last-7-day net (income - expense). Used by the banner's weekly badge
         // and the suggestions card. Single round-trip via `CASE` so we don't
         // need two scalar queries.
-        let week_net_q = sqlx::query_scalar::<_, f64>(
+        let week_net_q = sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(
                 SUM(CASE WHEN tag = 'inc' AND amount > 0 THEN amount
                          WHEN tag = 'exp' AND amount < 0 THEN amount
-                         ELSE 0.0 END), 0.0)
+                         ELSE 0 END), 0)
                FROM fin_txn
-              WHERE occurred_at >= unixepoch('now','localtime','-7 days','utc')",
+              WHERE currency_code = ?1
+                AND occurred_at >= unixepoch('now','localtime','-7 days','utc')",
         )
+        .bind(&cc)
         .fetch_one(pool);
 
         // 3-month rolling expense total, used for emergency-fund coverage and
         // the next-month-budget planner. 90-day window approximates 3 calendar
         // months without the awkward "what's my -3 month boundary" arithmetic.
-        let expense_90d_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
-              WHERE tag = 'exp'
+        let expense_90d_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(-amount), 0) FROM fin_txn
+              WHERE currency_code = ?1 AND tag = 'exp'
                 AND occurred_at >= unixepoch('now','localtime','-90 days','utc')",
         )
+        .bind(&cc)
         .fetch_one(pool);
 
         // Liquid balance — the denominator for `emergency_months`.
-        let liquid_balance_q = sqlx::query_scalar::<_, f64>(
-            "SELECT COALESCE(SUM(CASE WHEN type IN ('Checking','Savings','Cash') THEN balance ELSE 0.0 END), 0.0)
-               FROM fin_account"
-        ).fetch_one(pool);
+        let liquid_balance_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(CASE WHEN type IN ('Checking','Savings','Cash') THEN balance ELSE 0 END), 0)
+               FROM fin_account WHERE currency_code = ?1"
+        ).bind(&cc).fetch_one(pool);
 
         // Total fin_txn count for the current month (independent of the
         // 50-row LIMIT on `txns_q`).
         let total_count_q = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM fin_txn
-              WHERE occurred_at >= unixepoch('now','localtime','start of month','utc')",
+              WHERE currency_code = ?1
+                AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
         )
+        .bind(&cc)
         .fetch_one(pool);
 
         // Per-account most-recent occurred_at, used by the last-activity line.
         type LastSeenRow = (String, i64);
         let last_seen_q = sqlx::query_as::<_, LastSeenRow>(
-            "SELECT account_code, MAX(occurred_at) FROM fin_txn GROUP BY account_code",
+            "SELECT account_code, MAX(occurred_at) FROM fin_txn
+              WHERE currency_code = ?1 GROUP BY account_code",
         )
+        .bind(&cc)
         .fetch_all(pool);
 
         // Per-account, per-day expense magnitude over the last 14 days.
@@ -487,19 +982,19 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         // local calendar days (same load-bearing trick the lrn heatmap uses
         // — without it sub-day fractions push 02:00-vs-22:00 same-day rows
         // into different buckets).
-        type DailyHistoryRow = (String, i64, f64);
+        type DailyHistoryRow = (String, i64, i64);
         let history_14d_q = sqlx::query_as::<_, DailyHistoryRow>(
             "SELECT account_code,
                     CAST(julianday('now','localtime','start of day')
                          - julianday(occurred_at,'unixepoch','localtime','start of day') AS INTEGER) AS days_ago,
                     SUM(-amount)
                FROM fin_txn
-              WHERE tag = 'exp'
+              WHERE currency_code = ?1 AND tag = 'exp'
                 AND occurred_at >= unixepoch('now','localtime','-13 days','start of day','utc')
               GROUP BY account_code, days_ago"
-        ).fetch_all(pool);
+        ).bind(&cc).fetch_all(pool);
 
-        let months_12_q = load_month_buckets_12(pool);
+        let months_12_q = load_month_buckets_12(pool, &cc);
 
         // The page's wall-clock context: current period label and elapsed
         // days. Sent in the same join so rendering uses a single self-
@@ -513,11 +1008,22 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         .fetch_one(pool);
 
         // All-time per-category txn count, used by the usage column on the
-        // categories management table. Aggregating in SQL avoids shipping
-        // every txn's category code over the wire just to count them.
+        // categories management table.
         type CatUsageRow = (String, i64);
         let cat_usage_q = sqlx::query_as::<_, CatUsageRow>(
-            "SELECT category_code, COUNT(*) FROM fin_txn GROUP BY category_code",
+            "SELECT category_code, COUNT(*) FROM fin_txn
+              WHERE currency_code = ?1 GROUP BY category_code",
+        )
+        .bind(&cc)
+        .fetch_all(pool);
+
+        let currencies_q = list_currencies_inner(pool);
+
+        // Every account, every currency — the transfer picker spans currencies.
+        // Only the three columns the form actually renders.
+        let transfer_accounts_q = sqlx::query_as::<_, TransferAccountRef>(
+            "SELECT currency_code, code, name
+               FROM fin_account ORDER BY currency_code, code",
         )
         .fetch_all(pool);
 
@@ -527,7 +1033,6 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             txns,
             cat_rows,
             income,
-            expense,
             budget_total,
             budget_rows,
             week_net,
@@ -539,13 +1044,14 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             months_12,
             ctx,
             cat_usage_rows,
+            currencies,
+            transfer_accounts,
         ) = tokio::try_join!(
             accounts_q,
             categories_q,
             txns_q,
             cat_sum_q,
             income_q,
-            expense_q,
             budget_q,
             budgets_q,
             week_net_q,
@@ -557,10 +1063,15 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             months_12_q,
             context_q,
             cat_usage_q,
+            currencies_q,
+            transfer_accounts_q,
         )
         .map_err(server_err)?;
 
-        let total_spent: f64 = cat_rows.iter().map(|(_, v)| *v).sum();
+        // MTD expense magnitude is the sum of every category's MTD spend —
+        // same data as a dedicated `SUM(-amount)` aggregate without the
+        // round-trip.
+        let expense: i64 = cat_rows.iter().map(|(_, v)| *v).sum();
         let category_summary = cat_rows
             .into_iter()
             .map(|(code, value)| {
@@ -570,8 +1081,8 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
                     name: cat.map(|c| c.name.clone()).unwrap_or_default(),
                     tone: cat.map(|c| c.tone.clone()).unwrap_or_default(),
                     value,
-                    pct: if total_spent > 0.0 {
-                        (value / total_spent * 1000.0).round() / 10.0
+                    pct: if expense > 0 {
+                        (value as f64 / expense as f64 * 1000.0).round() / 10.0
                     } else {
                         0.0
                     },
@@ -579,7 +1090,7 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             })
             .collect::<Vec<_>>();
 
-        let balance: f64 = accounts.iter().map(|a| a.balance).sum();
+        let balance: i64 = accounts.iter().map(|a| a.balance).sum();
 
         let budgets: Vec<BudgetEntry> = budget_rows
             .into_iter()
@@ -595,12 +1106,12 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
         // `'start of day'` on both sides of the SQL diff anchors days_ago
         // to 0..=13; index 0 is the oldest day, 13 is today. The clamp
         // is paranoia against a future SQL edit.
-        let mut history_map: std::collections::HashMap<String, Vec<f64>> =
+        let mut history_map: std::collections::HashMap<String, Vec<i64>> =
             std::collections::HashMap::new();
         for (account_code, days_ago, magnitude) in history_14d_rows {
             let slot = history_map
                 .entry(account_code)
-                .or_insert_with(|| vec![0.0_f64; 14]);
+                .or_insert_with(|| vec![0_i64; 14]);
             let idx = (13 - days_ago.clamp(0, 13)) as usize;
             if let Some(cell) = slot.get_mut(idx) {
                 *cell += magnitude;
@@ -612,21 +1123,21 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
                 last_seen_at: last_seen_map.remove(&a.code),
                 history_14d: history_map
                     .remove(&a.code)
-                    .unwrap_or_else(|| vec![0.0_f64; 14]),
+                    .unwrap_or_else(|| vec![0_i64; 14]),
             })
             .collect();
 
         let (period, day_of_month) = ctx;
         let days_elapsed = (day_of_month as u32).max(1);
-        let avg_expense_3m = expense_90d / 3.0;
-        let savings_rate = if income > 0.0 {
-            (((income - expense) / income).clamp(0.0, 1.0)) as f32
+        let avg_expense_3m = expense_90d / 3;
+        let savings_rate = if income > 0 {
+            (((income - expense) as f64 / income as f64).clamp(0.0, 1.0)) as f32
         } else {
             0.0
         };
-        // Floor avg at 1.0 so emergency_months doesn't explode on a fresh DB.
-        let emergency_months = if avg_expense_3m > 1.0 {
-            (liquid_balance / avg_expense_3m).clamp(0.0, 99.0) as f32
+        // Guard the divide-by-zero on a fresh DB; clamp keeps KPI sane.
+        let emergency_months = if avg_expense_3m > 0 {
+            (liquid_balance as f64 / avg_expense_3m as f64).clamp(0.0, 99.0) as f32
         } else {
             0.0
         };
@@ -635,8 +1146,11 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
             cat_usage_rows.into_iter().collect();
 
         Ok(LedgerData {
+            currency,
+            currencies,
             accounts,
             account_stats,
+            transfer_accounts,
             categories,
             txns,
             category_summary,
@@ -662,6 +1176,7 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = currency_code;
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -672,10 +1187,11 @@ pub async fn load_ledger() -> Result<LedgerData, ServerFnError> {
 )]
 #[server(AddTxn, "/api/_internal/fin", "Url", "add_txn")]
 pub async fn add_txn(
+    currency_code: String,
     merchant: String,
     category_code: String,
     account_code: String,
-    amount: f64,
+    amount: String,
     tag: String,
     note: String,
     occurred_at: String,
@@ -683,6 +1199,10 @@ pub async fn add_txn(
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        let pool = &state.db;
+
+        let currency = resolve_currency(pool, &currency_code).await?;
 
         let tag = tag.trim();
         let tag_kind = match crate::model::Tag::parse(tag) {
@@ -693,19 +1213,15 @@ pub async fn add_txn(
             return Err(ep_i18n::err("finance.err.tfr_requires_transfer"));
         }
         // Form contract: positive amount, `tag` carries the sign (matches the
-        // UI convention). `/api/v1/fin/txn` is a separate code path that accepts
-        // pre-signed exp/inc amounts; paired transfers go through add_transfer.
-        if !amount.is_finite() || amount < 0.005 {
-            return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
-        }
+        // UI convention). `/api/v1/fin/txn` is a separate code path that
+        // accepts pre-signed exp/inc amounts; paired transfers go through
+        // add_transfer.
+        let magnitude = parse_positive_minor(&amount, currency.decimals)?;
         let amount = if tag_kind == crate::model::Tag::Exp {
-            -amount
+            -magnitude
         } else {
-            amount
+            magnitude
         };
-
-        let state = ep_core::app_state_context()?;
-        let pool = &state.db;
 
         let occurred = parse_occurred_at(pool, &occurred_at)
             .await?
@@ -714,6 +1230,7 @@ pub async fn add_txn(
         let txn = add_txn_inner(
             pool,
             AddTxnFields {
+                currency_code: currency.code.clone(),
                 merchant,
                 category_code,
                 account_code,
@@ -725,11 +1242,21 @@ pub async fn add_txn(
             },
         )
         .await?;
-        dispatch_large_expense_notification(&state.notify, &txn).await;
+        dispatch_large_expense_notification(&state.notify, &currency, &txn).await;
         Ok(txn)
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (
+            currency_code,
+            merchant,
+            category_code,
+            account_code,
+            amount,
+            tag,
+            note,
+            occurred_at,
+        );
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -742,6 +1269,10 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
         &fields.account_code,
         fields.note.as_deref(),
     )?;
+    let currency_code = fields.currency_code.trim().to_string();
+    if currency_code.is_empty() {
+        return Err(ep_i18n::err("finance.err.no_currency"));
+    }
     let tag_raw = fields.tag.trim();
     let tag_kind = match crate::model::Tag::parse(tag_raw) {
         Some(k) => k,
@@ -750,12 +1281,9 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
     if !tag_kind.is_single_entry() {
         return Err(ep_i18n::err("finance.err.tfr_requires_transfer"));
     }
-    if !fields.amount.is_finite() {
-        return Err(ep_i18n::err("finance.err.amount_must_be_finite"));
-    }
     match tag_kind {
-        crate::model::Tag::Exp if fields.amount < -0.005 => {}
-        crate::model::Tag::Inc if fields.amount > 0.005 => {}
+        crate::model::Tag::Exp if fields.amount < 0 => {}
+        crate::model::Tag::Inc if fields.amount > 0 => {}
         _ => return Err(ep_i18n::err("finance.err.amount_sign_invalid")),
     }
 
@@ -775,14 +1303,21 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
     };
 
     // Pre-validate FKs concurrently so callers get clear domain errors rather
-    // than opaque sqlite FK violations.
+    // than opaque sqlite FK violations. Both the category and the account
+    // must live in the transaction's currency.
     let (cat_exists, acc_exists): (i64, i64) = tokio::try_join!(
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
-            .bind(&normalized.category_code)
-            .fetch_one(pool),
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
-            .bind(&normalized.account_code)
-            .fetch_one(pool),
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)"
+        )
+        .bind(&currency_code)
+        .bind(&normalized.category_code)
+        .fetch_one(pool),
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2)"
+        )
+        .bind(&currency_code)
+        .bind(&normalized.account_code)
+        .fetch_one(pool),
     )
     .map_err(server_err)?;
     if cat_exists == 0 {
@@ -803,10 +1338,11 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
         .await
         .map_err(server_err)?;
     sqlx::query(
-        "INSERT INTO fin_txn (doc_id, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+        "INSERT INTO fin_txn (doc_id, currency_code, occurred_at, merchant, category_code, account_code, amount, tag, note, linked_doc_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
     )
     .bind(&doc_id)
+    .bind(&currency_code)
     .bind(fields.occurred_at)
     .bind(&normalized.merchant)
     .bind(&normalized.category_code)
@@ -819,21 +1355,25 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
     .await
     .map_err(server_err)?;
 
-    sqlx::query("UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2")
-        .bind(fields.amount)
-        .bind(&normalized.account_code)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
+    sqlx::query(
+        "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
+    )
+    .bind(fields.amount)
+    .bind(&currency_code)
+    .bind(&normalized.account_code)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
 
     sqlx::query(
-        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc)
-         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5)",
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, link_doc)
+         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(fields.occurred_at)
     .bind(&doc_id)
     .bind(&normalized.merchant)
     .bind(fields.amount)
+    .bind(&currency_code)
     .bind(&linked_doc_id)
     .execute(&mut *tx)
     .await
@@ -855,6 +1395,7 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
 
     Ok(Txn {
         doc_id,
+        currency_code,
         occurred_at: fields.occurred_at,
         merchant: normalized.merchant,
         category_code: normalized.category_code,
@@ -866,14 +1407,27 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
     })
 }
 
+/// Fire a notification for an unusually large expense. The threshold is "500
+/// major units" scaled into the currency's own minor units, so it adapts to
+/// each currency's precision.
 #[cfg(feature = "ssr")]
-pub async fn dispatch_large_expense_notification(notify: &ep_core::NotifyBusHandle, txn: &Txn) {
-    if txn.amount >= -500.0 {
+pub async fn dispatch_large_expense_notification(
+    notify: &ep_core::NotifyBusHandle,
+    currency: &Currency,
+    txn: &Txn,
+) {
+    let threshold = ep_core::major_to_minor(500, currency.decimals);
+    if txn.amount >= -threshold {
         return;
     }
     let n = ep_core::NotifyMessage::warn(format!("Large expense · {}", txn.merchant))
         .module("FIN")
-        .body(format!("¥{:.2} ({})", txn.amount.abs(), txn.category_code))
+        .body(format!(
+            "{}{} ({})",
+            currency.symbol,
+            ep_core::fmt_minor(txn.amount.abs(), currency.decimals),
+            txn.category_code
+        ))
         .doc_ref(txn.doc_id.clone())
         .link("/finance");
     if let Err(e) = notify.dispatch(n).await {
@@ -889,24 +1443,27 @@ async fn delete_one_leg(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     doc_id: &str,
 ) -> Result<Option<(String, Option<String>)>, ServerFnError> {
-    let row: Option<(f64, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT amount, account_code, tag, linked_doc_id
+    let row: Option<(i64, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT amount, currency_code, account_code, tag, linked_doc_id
            FROM fin_txn WHERE doc_id = ?1",
     )
     .bind(doc_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(server_err)?;
-    let (amount, account_code, tag, linked_doc_id) = match row {
+    let (amount, currency_code, account_code, tag, linked_doc_id) = match row {
         Some(r) => r,
         None => return Ok(None),
     };
-    sqlx::query("UPDATE fin_account SET balance = balance - ?1 WHERE code = ?2")
-        .bind(amount)
-        .bind(&account_code)
-        .execute(&mut **tx)
-        .await
-        .map_err(server_err)?;
+    sqlx::query(
+        "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
+    )
+    .bind(amount)
+    .bind(&currency_code)
+    .bind(&account_code)
+    .execute(&mut **tx)
+    .await
+    .map_err(server_err)?;
     sqlx::query("DELETE FROM fin_txn WHERE doc_id = ?1")
         .bind(doc_id)
         .execute(&mut **tx)
@@ -1003,6 +1560,7 @@ pub async fn delete_txn(doc_id: String) -> Result<(), ServerFnError> {
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = doc_id;
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -1011,25 +1569,29 @@ pub async fn delete_txn(doc_id: String) -> Result<(), ServerFnError> {
 #[cfg(feature = "ssr")]
 pub async fn set_budget_inner(
     pool: &SqlitePool,
+    currency_code: &str,
     period: &str,
     category_code: &str,
-    amount: f64,
+    amount: i64,
 ) -> Result<(), ServerFnError> {
+    let currency_code = currency_code.trim();
+    if currency_code.is_empty() {
+        return Err(ep_i18n::err("finance.err.no_currency"));
+    }
     let period = normalize_budget_period(period)?;
     let category_code = category_code.trim();
     if category_code.is_empty() {
         return Err(ep_i18n::err("finance.err.category_code_required"));
     }
-    if !amount.is_finite() {
-        return Err(ep_i18n::err("finance.err.amount_must_be_finite"));
-    }
-    if amount > 0.0 {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
-                .bind(category_code)
-                .fetch_one(pool)
-                .await
-                .map_err(server_err)?;
+    if amount > 0 {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)",
+        )
+        .bind(currency_code)
+        .bind(category_code)
+        .fetch_one(pool)
+        .await
+        .map_err(server_err)?;
         if exists == 0 {
             return Err(ep_i18n::err_with(
                 "finance.err.category_not_found",
@@ -1037,20 +1599,26 @@ pub async fn set_budget_inner(
             ));
         }
     }
-    if amount <= 0.0 {
-        sqlx::query("DELETE FROM fin_budget WHERE period = ?1 AND category_code = ?2")
-            .bind(&period)
-            .bind(category_code)
-            .execute(pool)
-            .await
-            .map_err(server_err)?;
+    if amount <= 0 {
+        sqlx::query(
+            "DELETE FROM fin_budget WHERE currency_code = ?1 AND period = ?2 AND category_code = ?3",
+        )
+        .bind(currency_code)
+        .bind(&period)
+        .bind(category_code)
+        .execute(pool)
+        .await
+        .map_err(server_err)?;
     } else {
         // ON CONFLICT updates the amount in place. Composite PK is
-        // (period, category_code) per migrations/001_finance.sql.
+        // (currency_code, period, category_code) per 002_multi_currency.sql.
         sqlx::query(
-            "INSERT INTO fin_budget (period, category_code, amount) VALUES (?1, ?2, ?3)
-             ON CONFLICT(period, category_code) DO UPDATE SET amount = excluded.amount",
+            "INSERT INTO fin_budget (currency_code, period, category_code, amount)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(currency_code, period, category_code)
+             DO UPDATE SET amount = excluded.amount",
         )
+        .bind(currency_code)
         .bind(period)
         .bind(category_code)
         .bind(amount)
@@ -1061,32 +1629,45 @@ pub async fn set_budget_inner(
     Ok(())
 }
 
-/// Upsert a per-period, per-category budget. `amount <= 0` deletes the row
-/// (treats "set budget to zero" as "remove budget"). `period` must be a real
-/// `YYYY-MM` month.
+/// Upsert a per-currency, per-period, per-category budget. `amount <= 0`
+/// deletes the row (treats "set budget to zero" as "remove budget").
+/// `period` must be a real `YYYY-MM` month.
 #[server(SetBudget, "/api/_internal/fin", "Url", "set_budget")]
 pub async fn set_budget(
+    currency_code: String,
     period: String,
     category_code: String,
-    amount: f64,
+    amount: String,
 ) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        set_budget_inner(&state.db, &period, &category_code, amount).await
+        let pool = &state.db;
+        let currency = resolve_currency(pool, &currency_code).await?;
+        // A blank amount means "remove" — treat it as 0 rather than erroring.
+        let amount = if amount.trim().is_empty() {
+            0
+        } else {
+            ep_core::parse_minor(&amount, currency.decimals)
+                .ok_or_else(|| ep_i18n::err_with("finance.err.amount_invalid", amount.trim()))?
+        };
+        set_budget_inner(pool, &currency.code, &period, &category_code, amount).await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (currency_code, period, category_code, amount);
         Err(ep_core::server_err("ssr-only"))
     }
 }
 
-/// Copy every row of `fin_budget` from `source_period` into `target_period`,
-/// overwriting any existing target rows. Drives the prior-budget import affordance
-/// shown when the current period has no budgets yet.
+/// Copy every row of `fin_budget` from `source_period` into `target_period`
+/// within one currency, overwriting any existing target rows. Drives the
+/// prior-budget import affordance shown when the current period has no
+/// budgets yet.
 #[server(ImportBudgetsFrom, "/api/_internal/fin", "Url", "import_budgets_from")]
 pub async fn import_budgets_from(
+    currency_code: String,
     source_period: String,
     target_period: String,
 ) -> Result<i64, ServerFnError> {
@@ -1100,11 +1681,15 @@ pub async fn import_budgets_from(
         }
         let state = ep_core::app_state_context()?;
         let pool = &state.db;
+        let currency = resolve_currency(pool, &currency_code).await?;
         let res = sqlx::query(
-            "INSERT INTO fin_budget (period, category_code, amount)
-             SELECT ?1, category_code, amount FROM fin_budget WHERE period = ?2
-             ON CONFLICT(period, category_code) DO UPDATE SET amount = excluded.amount",
+            "INSERT INTO fin_budget (currency_code, period, category_code, amount)
+             SELECT ?1, ?2, category_code, amount
+               FROM fin_budget WHERE currency_code = ?1 AND period = ?3
+             ON CONFLICT(currency_code, period, category_code)
+             DO UPDATE SET amount = excluded.amount",
         )
+        .bind(&currency.code)
         .bind(&target_period)
         .bind(&source_period)
         .execute(pool)
@@ -1114,6 +1699,7 @@ pub async fn import_budgets_from(
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (currency_code, source_period, target_period);
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -1122,23 +1708,26 @@ pub async fn import_budgets_from(
 // Txn update
 // ---------------------------------------------------------------------------
 
-/// Mutable fields for `update_txn_inner`. Bundle so the function signature
-/// stays sane and the PAT axum handler can build a single value from JSON.
+/// Mutable fields for `update_txn_inner`. `amount` is a positive magnitude in
+/// the transaction's own currency's minor units — the sign is re-derived from
+/// the (immutable) `tag`. Bundled so the function signature stays sane and
+/// the PAT axum handler can build a single value from JSON.
 #[cfg(feature = "ssr")]
 pub struct UpdateTxnFields {
     pub merchant: String,
     pub category_code: String,
     pub account_code: String,
-    pub amount: f64,
+    pub amount: i64,
     pub note: Option<String>,
     /// Wire form: empty → "keep existing", `"YYYY-MM-DD"` → that day 12:00
     /// local. Bad format → Args error.
     pub occurred_at_input: String,
 }
 
-/// `tag` and `doc_id` are immutable. To change `tag`, delete and re-create
-/// the txn. Transfer rows (`tag='tfr'`) reject any update — delete the
-/// pair via `delete_txn` and re-create via `add_transfer`.
+/// `tag`, `doc_id` and `currency_code` are immutable. To change `tag` or move
+/// a transaction between currencies, delete and re-create it. Transfer rows
+/// (`tag='tfr'`) reject any update — delete the pair via `delete_txn` and
+/// re-create via `add_transfer`.
 #[cfg(feature = "ssr")]
 pub async fn update_txn_inner(
     pool: &SqlitePool,
@@ -1151,25 +1740,25 @@ pub async fn update_txn_inner(
         &fields.account_code,
         fields.note.as_deref(),
     )?;
-    if !fields.amount.is_finite() {
-        return Err(ep_i18n::err("finance.err.amount_must_be_finite"));
+    if fields.amount <= 0 {
+        return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
     }
 
     let mut tx = pool.begin().await.map_err(server_err)?;
 
     // Read the existing row (and lock it implicitly under SQLite's deferred
-    // tx). Capture old amount/account/tag/occurred so we can both refuse
-    // tfr edits and compute balance deltas.
-    type OldRow = (f64, String, String, i64);
+    // tx). Capture old amount/currency/account/tag/occurred so we can both
+    // refuse tfr edits and compute balance deltas.
+    type OldRow = (i64, String, String, String, i64);
     let old: Option<OldRow> = sqlx::query_as(
-        "SELECT amount, account_code, tag, occurred_at
+        "SELECT amount, currency_code, account_code, tag, occurred_at
            FROM fin_txn WHERE doc_id = ?1",
     )
     .bind(doc_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(server_err)?;
-    let (old_amount, old_account, old_tag, old_occurred) = match old {
+    let (old_amount, currency_code, old_account, old_tag, old_occurred) = match old {
         Some(r) => r,
         None => return Err(ep_i18n::err_with("finance.err.txn_not_found", doc_id)),
     };
@@ -1178,27 +1767,32 @@ pub async fn update_txn_inner(
     }
 
     // tag is immutable, so amount sign is fully determined by old_tag.
-    // UI sends abs (input min=0.01); coercing here keeps the invariant.
+    // The UI sends a positive magnitude; coercing here keeps the invariant.
     let signed_amount = if old_tag == "exp" {
-        -fields.amount.abs()
+        -fields.amount
     } else {
-        fields.amount.abs()
+        fields.amount
     };
 
-    // Validate FK constraints. Sequential because we share one tx — try_join
-    // would alias-borrow the connection.
-    let cat_exists: i64 =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = ?1)")
-            .bind(&normalized.category_code)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(server_err)?;
-    let acc_ok: i64 =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
-            .bind(&normalized.account_code)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(server_err)?;
+    // Validate FK constraints — the new category and account must live in the
+    // transaction's (immutable) currency. Sequential because we share one tx —
+    // try_join would alias-borrow the connection.
+    let cat_exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)",
+    )
+    .bind(&currency_code)
+    .bind(&normalized.category_code)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    let acc_ok: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2)",
+    )
+    .bind(&currency_code)
+    .bind(&normalized.account_code)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(server_err)?;
     if cat_exists == 0 {
         return Err(ep_i18n::err_with(
             "finance.err.category_not_found",
@@ -1222,26 +1816,36 @@ pub async fn update_txn_inner(
     // running queries on the pool concurrently while a tx is open on it,
     // so do these sequentially.
     if old_account == normalized.account_code {
-        sqlx::query("UPDATE fin_account SET balance = balance + (?1 - ?2) WHERE code = ?3")
-            .bind(signed_amount)
-            .bind(old_amount)
-            .bind(&normalized.account_code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
+        sqlx::query(
+            "UPDATE fin_account SET balance = balance + (?1 - ?2)
+              WHERE currency_code = ?3 AND code = ?4",
+        )
+        .bind(signed_amount)
+        .bind(old_amount)
+        .bind(&currency_code)
+        .bind(&normalized.account_code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
     } else {
-        sqlx::query("UPDATE fin_account SET balance = balance - ?1 WHERE code = ?2")
-            .bind(old_amount)
-            .bind(&old_account)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-        sqlx::query("UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2")
-            .bind(signed_amount)
-            .bind(&normalized.account_code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
+        sqlx::query(
+            "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
+        )
+        .bind(old_amount)
+        .bind(&currency_code)
+        .bind(&old_account)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+        sqlx::query(
+            "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
+        )
+        .bind(signed_amount)
+        .bind(&currency_code)
+        .bind(&normalized.account_code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
     }
 
     sqlx::query(
@@ -1283,6 +1887,7 @@ pub async fn update_txn_inner(
 
     Ok(Txn {
         doc_id: doc_id.to_string(),
+        currency_code,
         occurred_at: new_occurred,
         merchant: normalized.merchant,
         category_code: normalized.category_code,
@@ -1304,7 +1909,7 @@ pub async fn update_txn(
     merchant: String,
     category_code: String,
     account_code: String,
-    amount: f64,
+    amount: String,
     note: String,
     occurred_at: String,
 ) -> Result<Txn, ServerFnError> {
@@ -1313,8 +1918,26 @@ pub async fn update_txn(
         ep_auth::require_user_for_server_fn().await?;
         let doc_id = normalize_doc_id(&doc_id)?;
         let state = ep_core::app_state_context()?;
+        let pool = &state.db;
+        // Resolve the transaction's currency to parse the amount at the right
+        // precision; `update_txn_inner` re-reads the row for the rest.
+        // One JOIN to get the txn's currency precision; `update_txn_inner`
+        // re-reads the row for the rest of the update.
+        let decimals: Option<u8> = sqlx::query_scalar(
+            "SELECT c.decimals FROM fin_txn t
+               JOIN fin_currency c ON c.code = t.currency_code
+              WHERE t.doc_id = ?1",
+        )
+        .bind(&doc_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(server_err)?;
+        let Some(decimals) = decimals else {
+            return Err(ep_i18n::err_with("finance.err.txn_not_found", &doc_id));
+        };
+        let amount = parse_positive_minor(&amount, decimals)?;
         update_txn_inner(
-            &state.db,
+            pool,
             &doc_id,
             UpdateTxnFields {
                 merchant,
@@ -1329,6 +1952,15 @@ pub async fn update_txn(
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (
+            doc_id,
+            merchant,
+            category_code,
+            account_code,
+            amount,
+            note,
+            occurred_at,
+        );
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -1338,41 +1970,74 @@ pub async fn update_txn(
 // ---------------------------------------------------------------------------
 
 /// Writes two paired `tag='tfr'` `fin_txn` rows + symmetric `module_link`
-/// `kind='tfr-pair'` rows in one tx. Both legs share `occurred_at` and the
-/// `'TFR'` category. `delete_txn_inner` cascades via the `tfr-pair` links.
+/// `kind='tfr-pair'` rows in one tx. The legs may live in different
+/// currencies — there is no conversion, the caller supplies an explicit
+/// amount for each side. Both legs share `occurred_at` and file under their
+/// own currency's `TFR` category. `delete_txn_inner` cascades via the
+/// `tfr-pair` links.
 ///
-/// Validates inputs (non-empty / distinct accounts / finite positive amount,
-/// FK check on both accounts and TFR category). Wrappers don't need to
+/// Validates inputs (non-empty / distinct accounts / positive amounts, FK
+/// check on both accounts and both `TFR` categories). Wrappers don't need to
 /// re-validate.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a cross-currency transfer is intrinsically two (currency, account, amount) triples"
+)]
 #[cfg(feature = "ssr")]
 pub async fn add_transfer_inner(
     pool: &SqlitePool,
+    from_currency: &str,
     from_account: &str,
+    to_currency: &str,
     to_account: &str,
-    amount: f64,
+    from_amount: i64,
+    to_amount: i64,
     note: Option<&str>,
     occurred_at: i64,
 ) -> Result<(Txn, Txn), ServerFnError> {
+    let from_currency = from_currency.trim();
+    let to_currency = to_currency.trim();
     let from_account = from_account.trim();
     let to_account = to_account.trim();
-    if from_account.is_empty() || to_account.is_empty() {
+    if from_currency.is_empty()
+        || to_currency.is_empty()
+        || from_account.is_empty()
+        || to_account.is_empty()
+    {
         return Err(ep_i18n::err("finance.err.transfer_accounts_required"));
     }
-    if from_account == to_account {
+    // Same currency *and* same account would be a no-op self-transfer.
+    if from_currency == to_currency && from_account == to_account {
         return Err(ep_i18n::err("finance.err.transfer_accounts_same"));
     }
-    if !amount.is_finite() || amount < 0.005 {
+    if from_amount <= 0 || to_amount <= 0 {
         return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
     }
-    let (from_ok, to_ok, tfr_ok): (i64, i64, i64) = tokio::try_join!(
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
-            .bind(from_account)
-            .fetch_one(pool),
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_account WHERE code = ?1)")
-            .bind(to_account)
-            .fetch_one(pool),
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_category WHERE code = 'TFR')")
-            .fetch_one(pool),
+    let (from_ok, to_ok, from_tfr_ok, to_tfr_ok): (i64, i64, i64, i64) = tokio::try_join!(
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2)"
+        )
+        .bind(from_currency)
+        .bind(from_account)
+        .fetch_one(pool),
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2)"
+        )
+        .bind(to_currency)
+        .bind(to_account)
+        .fetch_one(pool),
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)"
+        )
+        .bind(from_currency)
+        .bind(TRANSFER_CATEGORY_CODE)
+        .fetch_one(pool),
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)"
+        )
+        .bind(to_currency)
+        .bind(TRANSFER_CATEGORY_CODE)
+        .fetch_one(pool),
     )
     .map_err(server_err)?;
     if from_ok == 0 {
@@ -1387,7 +2052,7 @@ pub async fn add_transfer_inner(
             to_account,
         ));
     }
-    if tfr_ok == 0 {
+    if from_tfr_ok == 0 || to_tfr_ok == 0 {
         return Err(ep_i18n::err("finance.err.tfr_category_missing"));
     }
 
@@ -1405,15 +2070,17 @@ pub async fn add_transfer_inner(
 
     sqlx::query(
         "INSERT INTO fin_txn
-            (doc_id, occurred_at, merchant, category_code, account_code,
+            (doc_id, currency_code, occurred_at, merchant, category_code, account_code,
              amount, tag, note, linked_doc_id)
-         VALUES (?1, ?2, ?3, 'TFR', ?4, ?5, 'tfr', ?6, ?7)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'tfr', ?8, ?9)",
     )
     .bind(&from_doc)
+    .bind(from_currency)
     .bind(occurred_at)
     .bind(&from_merchant)
+    .bind(TRANSFER_CATEGORY_CODE)
     .bind(from_account)
-    .bind(-amount)
+    .bind(-from_amount)
     .bind(&note_owned)
     .bind(&to_doc)
     .execute(&mut *tx)
@@ -1421,53 +2088,63 @@ pub async fn add_transfer_inner(
     .map_err(server_err)?;
     sqlx::query(
         "INSERT INTO fin_txn
-            (doc_id, occurred_at, merchant, category_code, account_code,
+            (doc_id, currency_code, occurred_at, merchant, category_code, account_code,
              amount, tag, note, linked_doc_id)
-         VALUES (?1, ?2, ?3, 'TFR', ?4, ?5, 'tfr', NULL, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'tfr', NULL, ?8)",
     )
     .bind(&to_doc)
+    .bind(to_currency)
     .bind(occurred_at)
     .bind(&to_merchant)
+    .bind(TRANSFER_CATEGORY_CODE)
     .bind(to_account)
-    .bind(amount)
+    .bind(to_amount)
     .bind(&from_doc)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
 
-    sqlx::query("UPDATE fin_account SET balance = balance - ?1 WHERE code = ?2")
-        .bind(amount)
-        .bind(from_account)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
-    sqlx::query("UPDATE fin_account SET balance = balance + ?1 WHERE code = ?2")
-        .bind(amount)
-        .bind(to_account)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
+    sqlx::query(
+        "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
+    )
+    .bind(from_amount)
+    .bind(from_currency)
+    .bind(from_account)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
+    sqlx::query(
+        "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
+    )
+    .bind(to_amount)
+    .bind(to_currency)
+    .bind(to_account)
+    .execute(&mut *tx)
+    .await
+    .map_err(server_err)?;
 
     sqlx::query(
-        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc)
-         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5)",
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, link_doc)
+         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(occurred_at)
     .bind(&from_doc)
     .bind(&from_merchant)
-    .bind(-amount)
+    .bind(-from_amount)
+    .bind(from_currency)
     .bind(&to_doc)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
     sqlx::query(
-        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, link_doc)
-         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5)",
+        "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, link_doc)
+         VALUES (?1, 'FIN', ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(occurred_at)
     .bind(&to_doc)
     .bind(&to_merchant)
-    .bind(amount)
+    .bind(to_amount)
+    .bind(to_currency)
     .bind(&from_doc)
     .execute(&mut *tx)
     .await
@@ -1496,22 +2173,24 @@ pub async fn add_transfer_inner(
     Ok((
         Txn {
             doc_id: from_doc.clone(),
+            currency_code: from_currency.to_string(),
             occurred_at,
             merchant: from_merchant,
-            category_code: "TFR".into(),
+            category_code: TRANSFER_CATEGORY_CODE.to_string(),
             account_code: from_account.into(),
-            amount: -amount,
+            amount: -from_amount,
             tag: "tfr".into(),
             note: note_owned.clone(),
             linked_doc_id: Some(to_doc.clone()),
         },
         Txn {
             doc_id: to_doc,
+            currency_code: to_currency.to_string(),
             occurred_at,
             merchant: to_merchant,
-            category_code: "TFR".into(),
+            category_code: TRANSFER_CATEGORY_CODE.to_string(),
             account_code: to_account.into(),
-            amount,
+            amount: to_amount,
             tag: "tfr".into(),
             note: None,
             linked_doc_id: Some(from_doc),
@@ -1523,7 +2202,8 @@ pub async fn add_transfer_inner(
 pub async fn add_transfer(
     from_account: String,
     to_account: String,
-    amount: f64,
+    from_amount: String,
+    to_amount: String,
     note: String,
     occurred_at: String,
 ) -> Result<(Txn, Txn), ServerFnError> {
@@ -1533,15 +2213,28 @@ pub async fn add_transfer(
         let state = ep_core::app_state_context()?;
         let pool = &state.db;
 
+        // The transfer picker emits "{currency}/{account}" option values.
+        let (from_currency, from_account) = split_currency_ref(&from_account)?;
+        let (to_currency, to_account) = split_currency_ref(&to_account)?;
+        let (from_cur, to_cur) = tokio::try_join!(
+            resolve_currency(pool, &from_currency),
+            resolve_currency(pool, &to_currency),
+        )?;
+        let from_minor = parse_positive_minor(&from_amount, from_cur.decimals)?;
+        let to_minor = parse_positive_minor(&to_amount, to_cur.decimals)?;
+
         let occurred = parse_occurred_at(pool, &occurred_at)
             .await?
             .unwrap_or_else(ep_core::unix_now);
 
         add_transfer_inner(
             pool,
+            &from_cur.code,
             &from_account,
+            &to_cur.code,
             &to_account,
-            amount,
+            from_minor,
+            to_minor,
             Some(&note),
             occurred,
         )
@@ -1549,6 +2242,14 @@ pub async fn add_transfer(
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (
+            from_account,
+            to_account,
+            from_amount,
+            to_amount,
+            note,
+            occurred_at,
+        );
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -1602,43 +2303,44 @@ fn validate_account_input(
 }
 
 /// `true` when an account row with `candidate` exists *other* than the
-/// (optional) `exclude` code. Used by [`unique_account_code`] so a
-/// rename that lands on the same slug as the current row's own code is
-/// treated as available.
+/// (optional) `exclude` code, within `currency_code`. Account codes are only
+/// unique per-currency now, so the uniqueness search is currency-scoped.
 #[cfg(feature = "ssr")]
 async fn account_code_taken(
     conn: &mut sqlx::SqliteConnection,
+    currency_code: &str,
     candidate: &str,
     exclude: Option<&str>,
 ) -> Result<bool, ServerFnError> {
     if exclude == Some(candidate) {
         return Ok(false);
     }
-    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM fin_account WHERE code = ?1 LIMIT 1")
-        .bind(candidate)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(server_err)?;
+    let r: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2 LIMIT 1",
+    )
+    .bind(currency_code)
+    .bind(candidate)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(server_err)?;
     Ok(r.is_some())
 }
 
-/// Pick a unique account code that mirrors `name`. Tries the ASCII slug
-/// first (e.g. "Cash Wallet" → "CASH-WALLET"). When the slug is empty
-/// (non-ASCII names like "招行储蓄"), seeds the search from a stable
-/// fingerprint hashed off `name` rather than always starting at `ACC-1`
-/// — that way renaming "招行储蓄" → "工行储蓄" actually rotates the
-/// generated code (`ACC-3742` → `ACC-5891`) instead of leaving the row
-/// stuck on its original fallback slot regardless of how many times the
-/// user edits the name. The `exclude` argument lets updates keep their
-/// current row's code "available" against themselves.
+/// Pick a unique account code (within `currency_code`) that mirrors `name`.
+/// Tries the ASCII slug first (e.g. "Cash Wallet" → "CASH-WALLET"). When the
+/// slug is empty (non-ASCII names like "招行储蓄"), seeds the search from a
+/// stable fingerprint hashed off `name` rather than always starting at
+/// `ACC-1`. The `exclude` argument lets updates keep their current row's code
+/// "available" against themselves.
 #[cfg(feature = "ssr")]
 async fn unique_account_code(
     conn: &mut sqlx::SqliteConnection,
+    currency_code: &str,
     name: &str,
     exclude: Option<&str>,
 ) -> Result<String, ServerFnError> {
     let slug = slugify_to_code(name, MAX_ACCOUNT_CODE_CHARS);
-    if !slug.is_empty() && !account_code_taken(conn, &slug, exclude).await? {
+    if !slug.is_empty() && !account_code_taken(conn, currency_code, &slug, exclude).await? {
         return Ok(slug);
     }
     let limit = fallback_seed_range("ACC-", MAX_ACCOUNT_CODE_CHARS);
@@ -1649,7 +2351,7 @@ async fn unique_account_code(
         if candidate.len() > MAX_ACCOUNT_CODE_CHARS {
             continue;
         }
-        if !account_code_taken(conn, &candidate, exclude).await? {
+        if !account_code_taken(conn, currency_code, &candidate, exclude).await? {
             return Ok(candidate);
         }
     }
@@ -1657,32 +2359,36 @@ async fn unique_account_code(
 }
 
 /// `true` when a category row with `candidate` exists *other* than the
-/// (optional) `exclude` code.
+/// (optional) `exclude` code, within `currency_code`.
 #[cfg(feature = "ssr")]
 async fn category_code_taken(
     conn: &mut sqlx::SqliteConnection,
+    currency_code: &str,
     candidate: &str,
     exclude: Option<&str>,
 ) -> Result<bool, ServerFnError> {
     if exclude == Some(candidate) {
         return Ok(false);
     }
-    let r: Option<i64> = sqlx::query_scalar("SELECT 1 FROM fin_category WHERE code = ?1 LIMIT 1")
-        .bind(candidate)
-        .fetch_optional(&mut *conn)
-        .await
-        .map_err(server_err)?;
+    let r: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2 LIMIT 1",
+    )
+    .bind(currency_code)
+    .bind(candidate)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(server_err)?;
     Ok(r.is_some())
 }
 
-/// Pick a unique category code that mirrors `name`. Slug character class
-/// is `[A-Z&]` (matches `validate_category_input`); fallback (when the
-/// name has no ASCII letters to slugify) is `CATN`, seeded from a stable
-/// fingerprint of `name` so renaming "餐饮" → "饮食" rotates `CAT37` to
-/// some other slot instead of leaving the row stuck on the same code.
+/// Pick a unique category code (within `currency_code`) that mirrors `name`.
+/// Slug character class is `[A-Z&]` (matches `validate_category_input`);
+/// fallback (when the name has no ASCII letters to slugify) is `CATN`, seeded
+/// from a stable fingerprint of `name`.
 #[cfg(feature = "ssr")]
 async fn unique_category_code(
     conn: &mut sqlx::SqliteConnection,
+    currency_code: &str,
     name: &str,
     exclude: Option<&str>,
 ) -> Result<String, ServerFnError> {
@@ -1690,7 +2396,7 @@ async fn unique_category_code(
         .chars()
         .filter(|c| c.is_ascii_uppercase() || *c == '&')
         .collect();
-    if !slug.is_empty() && !category_code_taken(conn, &slug, exclude).await? {
+    if !slug.is_empty() && !category_code_taken(conn, currency_code, &slug, exclude).await? {
         return Ok(slug);
     }
     let limit = fallback_seed_range("CAT", MAX_CATEGORY_CODE_CHARS);
@@ -1701,7 +2407,7 @@ async fn unique_category_code(
         if candidate.len() > MAX_CATEGORY_CODE_CHARS {
             continue;
         }
-        if !category_code_taken(conn, &candidate, exclude).await? {
+        if !category_code_taken(conn, currency_code, &candidate, exclude).await? {
             return Ok(candidate);
         }
     }
@@ -1727,8 +2433,6 @@ fn fallback_seed_range(prefix: &str, max_chars: usize) -> u64 {
 /// Stable per-name fingerprint mapped into `[0, modulus)`. Used to seed the
 /// fallback `{prefix}{N}` search so different names land on different
 /// starting slots even when the slugifier can't extract ASCII letters.
-/// The intentional simplicity (FNV-1a style mix) is fine here: we only need
-/// a deterministic shuffle, not a cryptographic hash.
 #[cfg(feature = "ssr")]
 fn name_fingerprint(name: &str, modulus: u64) -> u64 {
     if modulus == 0 {
@@ -1785,26 +2489,32 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 #[cfg(feature = "ssr")]
 pub async fn create_account_inner(
     pool: &SqlitePool,
+    currency_code: String,
     code: String,
     name: String,
     r#type: String,
     tone: String,
-    opening_balance: f64,
+    opening_balance: i64,
 ) -> Result<Account, ServerFnError> {
-    if !opening_balance.is_finite() {
-        return Err(ep_i18n::err("finance.err.opening_balance_invalid"));
+    // Callers (server-fn wrapper, PAT handler) already `resolve_currency`,
+    // so `currency_code` is expected to be a real registry row; the composite
+    // FK on `fin_account.currency_code` is the structural backstop.
+    let currency_code = currency_code.trim().to_string();
+    if currency_code.is_empty() {
+        return Err(ep_i18n::err("finance.err.no_currency"));
     }
     let (code, name, r#type, tone) = validate_account_input(&code, &name, &r#type, &tone)?;
     let code = if code.is_empty() {
         let mut conn = pool.acquire().await.map_err(server_err)?;
-        unique_account_code(&mut conn, &name, None).await?
+        unique_account_code(&mut conn, &currency_code, &name, None).await?
     } else {
         code
     };
     let res = sqlx::query(
-        "INSERT INTO fin_account (code, name, type, tone, balance, archived, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())",
+        "INSERT INTO fin_account (currency_code, code, name, type, tone, balance, archived, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, unixepoch())",
     )
+    .bind(&currency_code)
     .bind(&code)
     .bind(&name)
     .bind(&r#type)
@@ -1819,9 +2529,10 @@ pub async fn create_account_inner(
         return Err(server_err(e));
     }
     sqlx::query_as::<_, Account>(
-        "SELECT code, name, type, tone, balance, archived, created_at
-           FROM fin_account WHERE code = ?1",
+        "SELECT currency_code, code, name, type, tone, balance, archived, created_at
+           FROM fin_account WHERE currency_code = ?1 AND code = ?2",
     )
+    .bind(&currency_code)
     .bind(&code)
     .fetch_one(pool)
     .await
@@ -1831,73 +2542,80 @@ pub async fn create_account_inner(
 #[cfg(feature = "ssr")]
 pub async fn update_account_inner(
     pool: &SqlitePool,
+    currency_code: String,
     code: String,
     name: String,
     r#type: String,
     tone: String,
 ) -> Result<Account, ServerFnError> {
-    update_account_inner_with(pool, code, name, r#type, tone, /* rename_code */ true).await
+    update_account_inner_with(
+        pool,
+        currency_code,
+        code,
+        name,
+        r#type,
+        tone,
+        /* rename_code */ true,
+    )
+    .await
 }
 
-/// Internal counterpart of [`update_account_inner`] that lets the caller
-/// opt out of the name-driven code rename. The OpenAPI PATCH handler
-/// passes `rename_code = false` so external API consumers (PATs / Shortcuts)
-/// keep a stable key for the resource they just touched. The UI passes
-/// `true` so renaming "Cash" → "Wallet" keeps the internal `code` aligned
-/// with the human-visible name.
+/// Internal counterpart of [`update_account_inner`] that lets the caller opt
+/// out of the name-driven code rename. The OpenAPI PATCH handler passes
+/// `rename_code = false` so external API consumers keep a stable key for the
+/// resource they just touched. An account's `currency_code` is immutable —
+/// to move money between currencies, create a new account and transfer.
 #[cfg(feature = "ssr")]
 pub async fn update_account_inner_with(
     pool: &SqlitePool,
+    currency_code: String,
     code: String,
     name: String,
     r#type: String,
     tone: String,
     rename_code: bool,
 ) -> Result<Account, ServerFnError> {
+    let currency_code = currency_code.trim().to_string();
+    if currency_code.is_empty() {
+        return Err(ep_i18n::err("finance.err.no_currency"));
+    }
     let (code, name, r#type, tone) = validate_account_input(&code, &name, &r#type, &tone)?;
     if code.is_empty() {
         return Err(ep_i18n::err("finance.err.account_code_format"));
     }
     let mut tx = pool.begin().await.map_err(server_err)?;
     // Re-derive the canonical code from the new name when the caller asks
-    // for it. The UI never shows the code, so leaving a stale slug ("CASH"
-    // for an account renamed to "Wallet") would only surface in CSV
-    // exports / PAT API responses. The SQLite schema lacks
-    // ON UPDATE CASCADE, so we walk every referencing table
-    // (`fin_txn.account_code`) inside the same transaction.
-    //
-    // `defer_foreign_keys = ON` lets the FK check run at COMMIT time rather
-    // than after every statement, so updating `fin_account.code` before
-    // patching the `fin_txn.account_code` rows that still reference the
-    // old key doesn't trip a constraint failure mid-transaction.
+    // for it. `defer_foreign_keys = ON` lets the FK check run at COMMIT time
+    // rather than after every statement, so updating `fin_account.code`
+    // before patching the `fin_txn.account_code` rows that still reference
+    // the old key doesn't trip a constraint failure mid-transaction.
     sqlx::query("PRAGMA defer_foreign_keys = ON")
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
-    // Read the current name so we can tell whether this update actually
-    // changes it; renaming the internal code on a tone-only edit (or any
-    // other field-only edit) would gratuitously invalidate any manually
-    // assigned code (PATCH /api/v1/fin/account/{code} can install one).
     let cur_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM fin_account WHERE code = ?1")
+        sqlx::query_scalar("SELECT name FROM fin_account WHERE currency_code = ?1 AND code = ?2")
+            .bind(&currency_code)
             .bind(&code)
             .fetch_optional(&mut *tx)
             .await
             .map_err(server_err)?;
     let name_changed = cur_name.as_deref() != Some(name.as_str());
     let new_code = if rename_code && name_changed {
-        unique_account_code(&mut tx, &name, Some(&code)).await?
+        unique_account_code(&mut tx, &currency_code, &name, Some(&code)).await?
     } else {
         code.clone()
     };
     let res = if new_code != code {
         let res = sqlx::query(
-            "UPDATE fin_account SET code = ?1, name = ?2, type = ?3, tone = ?4 WHERE code = ?5",
+            "UPDATE fin_account SET code = ?1, name = ?2, type = ?3, tone = ?4
+              WHERE currency_code = ?5 AND code = ?6",
         )
         .bind(&new_code)
         .bind(&name)
         .bind(&r#type)
         .bind(&tone)
+        .bind(&currency_code)
         .bind(&code)
         .execute(&mut *tx)
         .await
@@ -1905,31 +2623,39 @@ pub async fn update_account_inner_with(
         if res.rows_affected() == 0 {
             return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
         }
-        sqlx::query("UPDATE fin_txn SET account_code = ?1 WHERE account_code = ?2")
-            .bind(&new_code)
-            .bind(&code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
+        sqlx::query(
+            "UPDATE fin_txn SET account_code = ?1 WHERE currency_code = ?2 AND account_code = ?3",
+        )
+        .bind(&new_code)
+        .bind(&currency_code)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
         res
     } else {
-        sqlx::query("UPDATE fin_account SET name = ?1, type = ?2, tone = ?3 WHERE code = ?4")
-            .bind(&name)
-            .bind(&r#type)
-            .bind(&tone)
-            .bind(&code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?
+        sqlx::query(
+            "UPDATE fin_account SET name = ?1, type = ?2, tone = ?3
+              WHERE currency_code = ?4 AND code = ?5",
+        )
+        .bind(&name)
+        .bind(&r#type)
+        .bind(&tone)
+        .bind(&currency_code)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?
     };
     if res.rows_affected() == 0 {
         return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
     }
     tx.commit().await.map_err(server_err)?;
     sqlx::query_as::<_, Account>(
-        "SELECT code, name, type, tone, balance, archived, created_at
-           FROM fin_account WHERE code = ?1",
+        "SELECT currency_code, code, name, type, tone, balance, archived, created_at
+           FROM fin_account WHERE currency_code = ?1 AND code = ?2",
     )
+    .bind(&currency_code)
     .bind(&new_code)
     .fetch_one(pool)
     .await
@@ -1937,23 +2663,32 @@ pub async fn update_account_inner_with(
 }
 
 #[cfg(feature = "ssr")]
-pub async fn delete_account_inner(pool: &SqlitePool, code: String) -> Result<(), ServerFnError> {
+pub async fn delete_account_inner(
+    pool: &SqlitePool,
+    currency_code: String,
+    code: String,
+) -> Result<(), ServerFnError> {
+    let currency_code = currency_code.trim().to_string();
     let code = code.trim().to_string();
-    if code.is_empty() {
+    if currency_code.is_empty() || code.is_empty() {
         return Err(ep_i18n::err("finance.err.account_code_format"));
     }
-    let txn_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_txn WHERE account_code = ?1")
-        .bind(&code)
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
+    let txn_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fin_txn WHERE currency_code = ?1 AND account_code = ?2",
+    )
+    .bind(&currency_code)
+    .bind(&code)
+    .fetch_one(pool)
+    .await
+    .map_err(server_err)?;
     if txn_count > 0 {
         return Err(ep_i18n::err_with(
             "finance.err.account_in_use",
             txn_count.to_string(),
         ));
     }
-    let res = sqlx::query("DELETE FROM fin_account WHERE code = ?1")
+    let res = sqlx::query("DELETE FROM fin_account WHERE currency_code = ?1 AND code = ?2")
+        .bind(&currency_code)
         .bind(&code)
         .execute(pool)
         .await
@@ -1966,26 +2701,49 @@ pub async fn delete_account_inner(pool: &SqlitePool, code: String) -> Result<(),
 
 #[server(CreateAccount, "/api/_internal/fin", "Url", "create_account")]
 pub async fn create_account(
+    currency_code: String,
     code: String,
     name: String,
     r#type: String,
     tone: String,
-    opening_balance: f64,
+    opening_balance: String,
 ) -> Result<Account, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        create_account_inner(&state.db, code, name, r#type, tone, opening_balance).await
+        let pool = &state.db;
+        let currency = resolve_currency(pool, &currency_code).await?;
+        // Opening balance is optional and may be negative (a credit card
+        // starts in the red); a blank field means zero.
+        let opening_balance = if opening_balance.trim().is_empty() {
+            0
+        } else {
+            ep_core::parse_minor(&opening_balance, currency.decimals).ok_or_else(|| {
+                ep_i18n::err_with("finance.err.amount_invalid", opening_balance.trim())
+            })?
+        };
+        create_account_inner(
+            pool,
+            currency.code,
+            code,
+            name,
+            r#type,
+            tone,
+            opening_balance,
+        )
+        .await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (currency_code, code, name, r#type, tone, opening_balance);
         Err(ep_core::server_err("ssr-only"))
     }
 }
 
 #[server(UpdateAccount, "/api/_internal/fin", "Url", "update_account")]
 pub async fn update_account(
+    currency_code: String,
     code: String,
     name: String,
     r#type: String,
@@ -1995,49 +2753,63 @@ pub async fn update_account(
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        update_account_inner(&state.db, code, name, r#type, tone).await
+        update_account_inner(&state.db, currency_code, code, name, r#type, tone).await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (currency_code, code, name, r#type, tone);
         Err(ep_core::server_err("ssr-only"))
     }
 }
 
 #[cfg(feature = "ssr")]
-pub async fn list_accounts_inner(pool: &SqlitePool) -> sqlx::Result<Vec<Account>> {
+pub async fn list_accounts_inner(
+    pool: &SqlitePool,
+    currency_code: &str,
+) -> sqlx::Result<Vec<Account>> {
     sqlx::query_as::<_, Account>(
-        "SELECT code, name, type, tone, balance, archived, created_at
+        "SELECT currency_code, code, name, type, tone, balance, archived, created_at
            FROM fin_account
+          WHERE currency_code = ?1
           ORDER BY code ASC",
     )
+    .bind(currency_code)
     .fetch_all(pool)
     .await
 }
 
 #[server(ListAccounts, "/api/_internal/fin", "Url", "list_accounts")]
-pub async fn list_accounts() -> Result<Vec<Account>, ServerFnError> {
+pub async fn list_accounts(currency_code: String) -> Result<Vec<Account>, ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        list_accounts_inner(&state.db).await.map_err(server_err)
+        let currency = resolve_currency(&state.db, &currency_code).await?;
+        list_accounts_inner(&state.db, &currency.code)
+            .await
+            .map_err(server_err)
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = currency_code;
         Err(ep_core::server_err("ssr-only"))
     }
 }
 
+/// `account_ref` is the `"{currency_code}/{code}"` value the management UI's
+/// delete control emits — a single field keeps it `RowDeleteAction`-shaped.
 #[server(DeleteAccount, "/api/_internal/fin", "Url", "delete_account")]
-pub async fn delete_account(code: String) -> Result<(), ServerFnError> {
+pub async fn delete_account(account_ref: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        delete_account_inner(&state.db, code).await
+        let (currency_code, code) = split_currency_ref(&account_ref)?;
+        delete_account_inner(&state.db, currency_code, code).await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = account_ref;
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -2057,10 +2829,9 @@ fn validate_category_input(
     let tone = tone.trim().to_string();
     // Inline char-class check (no regex dep). Accepts `&` for seed code
     // F&B and ASCII digits so the `CATN` fallback codes generated for
-    // non-ASCII names (e.g. "餐饮") survive a round-trip through this
-    // validator on update. An empty `code` is allowed at the input
-    // boundary and gets a generated value before insert (see
-    // `unique_category_code`).
+    // non-ASCII names survive a round-trip through this validator on update.
+    // An empty `code` is allowed at the input boundary and gets a generated
+    // value before insert (see `unique_category_code`).
     if !code.is_empty()
         && (code.len() > MAX_CATEGORY_CODE_CHARS
             || !code
@@ -2089,26 +2860,47 @@ fn validate_category_sort_order(sort_order: i64) -> Result<i64, ServerFnError> {
     Ok(sort_order)
 }
 
+/// Reject the reserved transfer-category code for user-facing category CRUD.
+/// The `TFR` category per currency is module plumbing, not a user category.
+#[cfg(feature = "ssr")]
+fn reject_reserved_category(code: &str) -> Result<(), ServerFnError> {
+    if code.eq_ignore_ascii_case(TRANSFER_CATEGORY_CODE) {
+        return Err(ep_i18n::err("finance.err.category_reserved"));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "ssr")]
 pub async fn create_category_inner(
     pool: &SqlitePool,
+    currency_code: String,
     code: String,
     name: String,
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
+    // Callers already `resolve_currency`; the composite FK on
+    // `fin_category.currency_code` is the structural backstop here.
+    let currency_code = currency_code.trim().to_string();
+    if currency_code.is_empty() {
+        return Err(ep_i18n::err("finance.err.no_currency"));
+    }
     let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    if !code.is_empty() {
+        reject_reserved_category(&code)?;
+    }
     let code = if code.is_empty() {
         let mut conn = pool.acquire().await.map_err(server_err)?;
-        unique_category_code(&mut conn, &name, None).await?
+        unique_category_code(&mut conn, &currency_code, &name, None).await?
     } else {
         code
     };
     let sort_order = validate_category_sort_order(sort_order)?;
     let res = sqlx::query(
-        "INSERT INTO fin_category (code, name, tone, sort_order, archived, created_at)
-         VALUES (?1, ?2, ?3, ?4, 0, unixepoch())",
+        "INSERT INTO fin_category (currency_code, code, name, tone, sort_order, archived, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())",
     )
+    .bind(&currency_code)
     .bind(&code)
     .bind(&name)
     .bind(&tone)
@@ -2122,9 +2914,10 @@ pub async fn create_category_inner(
         return Err(server_err(e));
     }
     sqlx::query_as::<_, Category>(
-        "SELECT code, name, tone, sort_order, archived, created_at
-           FROM fin_category WHERE code = ?1",
+        "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+           FROM fin_category WHERE currency_code = ?1 AND code = ?2",
     )
+    .bind(&currency_code)
     .bind(&code)
     .fetch_one(pool)
     .await
@@ -2134,69 +2927,78 @@ pub async fn create_category_inner(
 #[cfg(feature = "ssr")]
 pub async fn update_category_inner(
     pool: &SqlitePool,
+    currency_code: String,
     code: String,
     name: String,
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
     update_category_inner_with(
-        pool, code, name, tone, sort_order, /* rename_code */ true,
+        pool,
+        currency_code,
+        code,
+        name,
+        tone,
+        sort_order,
+        /* rename_code */ true,
     )
     .await
 }
 
 /// Internal counterpart of [`update_category_inner`]; mirrors
-/// [`update_account_inner_with`]. UI callers (`#[server] update_category`)
-/// opt into the rename; OpenAPI PATCH consumers opt out so external clients
-/// continue to address the resource by its original code.
+/// [`update_account_inner_with`]. A category's `currency_code` is immutable.
 #[cfg(feature = "ssr")]
 pub async fn update_category_inner_with(
     pool: &SqlitePool,
+    currency_code: String,
     code: String,
     name: String,
     tone: String,
     sort_order: i64,
     rename_code: bool,
 ) -> Result<Category, ServerFnError> {
+    let currency_code = currency_code.trim().to_string();
+    if currency_code.is_empty() {
+        return Err(ep_i18n::err("finance.err.no_currency"));
+    }
     let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
     if code.is_empty() {
         return Err(ep_i18n::err("finance.err.category_code_format"));
     }
+    // The reserved TFR category is not user-editable.
+    reject_reserved_category(&code)?;
     let sort_order = validate_category_sort_order(sort_order)?;
     let mut tx = pool.begin().await.map_err(server_err)?;
-    // Same cascade logic as `update_account_inner_with`: the UI never shows
-    // the category code, so renaming "Food" → "Dining" needs to bring the
-    // internal `code` along too. Walk `fin_txn` and `fin_budget` inside
-    // this transaction (SQLite schema has no ON UPDATE CASCADE), and defer
-    // FK checks to COMMIT so the parent-then-children order is allowed.
+    // Same cascade logic as `update_account_inner_with`: walk `fin_txn` and
+    // `fin_budget` inside this transaction (SQLite has no ON UPDATE CASCADE),
+    // and defer FK checks to COMMIT so the parent-then-children order works.
     sqlx::query("PRAGMA defer_foreign_keys = ON")
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
-    // Same guard as `update_account_inner_with`: only re-derive a code
-    // when the human-readable name actually changed. A tone-only or
-    // sort-order-only edit must leave a manually assigned code (set via
-    // the OpenAPI PATCH path) alone.
     let cur_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM fin_category WHERE code = ?1")
+        sqlx::query_scalar("SELECT name FROM fin_category WHERE currency_code = ?1 AND code = ?2")
+            .bind(&currency_code)
             .bind(&code)
             .fetch_optional(&mut *tx)
             .await
             .map_err(server_err)?;
     let name_changed = cur_name.as_deref() != Some(name.as_str());
     let new_code = if rename_code && name_changed {
-        unique_category_code(&mut tx, &name, Some(&code)).await?
+        unique_category_code(&mut tx, &currency_code, &name, Some(&code)).await?
     } else {
         code.clone()
     };
     let res = if new_code != code {
         let res = sqlx::query(
-            "UPDATE fin_category SET code = ?1, name = ?2, tone = ?3, sort_order = ?4 WHERE code = ?5",
+            "UPDATE fin_category SET code = ?1, name = ?2, tone = ?3, sort_order = ?4
+              WHERE currency_code = ?5 AND code = ?6",
         )
         .bind(&new_code)
         .bind(&name)
         .bind(&tone)
         .bind(sort_order)
+        .bind(&currency_code)
         .bind(&code)
         .execute(&mut *tx)
         .await
@@ -2204,37 +3006,48 @@ pub async fn update_category_inner_with(
         if res.rows_affected() == 0 {
             return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
         }
-        sqlx::query("UPDATE fin_txn SET category_code = ?1 WHERE category_code = ?2")
-            .bind(&new_code)
-            .bind(&code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-        sqlx::query("UPDATE fin_budget SET category_code = ?1 WHERE category_code = ?2")
-            .bind(&new_code)
-            .bind(&code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
+        sqlx::query(
+            "UPDATE fin_txn SET category_code = ?1 WHERE currency_code = ?2 AND category_code = ?3",
+        )
+        .bind(&new_code)
+        .bind(&currency_code)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
+        sqlx::query(
+            "UPDATE fin_budget SET category_code = ?1 WHERE currency_code = ?2 AND category_code = ?3",
+        )
+        .bind(&new_code)
+        .bind(&currency_code)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?;
         res
     } else {
-        sqlx::query("UPDATE fin_category SET name = ?1, tone = ?2, sort_order = ?3 WHERE code = ?4")
-            .bind(&name)
-            .bind(&tone)
-            .bind(sort_order)
-            .bind(&code)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?
+        sqlx::query(
+            "UPDATE fin_category SET name = ?1, tone = ?2, sort_order = ?3
+              WHERE currency_code = ?4 AND code = ?5",
+        )
+        .bind(&name)
+        .bind(&tone)
+        .bind(sort_order)
+        .bind(&currency_code)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+        .map_err(server_err)?
     };
     if res.rows_affected() == 0 {
         return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
     }
     tx.commit().await.map_err(server_err)?;
     sqlx::query_as::<_, Category>(
-        "SELECT code, name, tone, sort_order, archived, created_at
-           FROM fin_category WHERE code = ?1",
+        "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+           FROM fin_category WHERE currency_code = ?1 AND code = ?2",
     )
+    .bind(&currency_code)
     .bind(&new_code)
     .fetch_one(pool)
     .await
@@ -2242,17 +3055,26 @@ pub async fn update_category_inner_with(
 }
 
 #[cfg(feature = "ssr")]
-pub async fn delete_category_inner(pool: &SqlitePool, code: String) -> Result<(), ServerFnError> {
+pub async fn delete_category_inner(
+    pool: &SqlitePool,
+    currency_code: String,
+    code: String,
+) -> Result<(), ServerFnError> {
+    let currency_code = currency_code.trim().to_string();
     let code = code.trim().to_string();
-    if code.is_empty() {
+    if currency_code.is_empty() || code.is_empty() {
         return Err(ep_i18n::err("finance.err.category_code_format"));
     }
-    let txn_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM fin_txn WHERE category_code = ?1")
-            .bind(&code)
-            .fetch_one(pool)
-            .await
-            .map_err(server_err)?;
+    // The reserved TFR category cannot be deleted — transfers depend on it.
+    reject_reserved_category(&code)?;
+    let txn_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fin_txn WHERE currency_code = ?1 AND category_code = ?2",
+    )
+    .bind(&currency_code)
+    .bind(&code)
+    .fetch_one(pool)
+    .await
+    .map_err(server_err)?;
     if txn_count > 0 {
         return Err(ep_i18n::err_with(
             "finance.err.category_in_use",
@@ -2260,12 +3082,14 @@ pub async fn delete_category_inner(pool: &SqlitePool, code: String) -> Result<()
         ));
     }
     let mut tx = pool.begin().await.map_err(server_err)?;
-    sqlx::query("DELETE FROM fin_budget WHERE category_code = ?1")
+    sqlx::query("DELETE FROM fin_budget WHERE currency_code = ?1 AND category_code = ?2")
+        .bind(&currency_code)
         .bind(&code)
         .execute(&mut *tx)
         .await
         .map_err(server_err)?;
-    let res = sqlx::query("DELETE FROM fin_category WHERE code = ?1")
+    let res = sqlx::query("DELETE FROM fin_category WHERE currency_code = ?1 AND code = ?2")
+        .bind(&currency_code)
         .bind(&code)
         .execute(&mut *tx)
         .await
@@ -2279,6 +3103,7 @@ pub async fn delete_category_inner(pool: &SqlitePool, code: String) -> Result<()
 
 #[server(CreateCategory, "/api/_internal/fin", "Url", "create_category")]
 pub async fn create_category(
+    currency_code: String,
     code: String,
     name: String,
     tone: String,
@@ -2288,16 +3113,21 @@ pub async fn create_category(
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        create_category_inner(&state.db, code, name, tone, sort_order).await
+        // Wrappers always resolve so the empty / unknown → primary fallback
+        // lives in one place and `create_category_inner` can trust its input.
+        let currency = resolve_currency(&state.db, &currency_code).await?;
+        create_category_inner(&state.db, currency.code, code, name, tone, sort_order).await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (currency_code, code, name, tone, sort_order);
         Err(ep_core::server_err("ssr-only"))
     }
 }
 
 #[server(UpdateCategory, "/api/_internal/fin", "Url", "update_category")]
 pub async fn update_category(
+    currency_code: String,
     code: String,
     name: String,
     tone: String,
@@ -2307,24 +3137,29 @@ pub async fn update_category(
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        update_category_inner(&state.db, code, name, tone, sort_order).await
+        update_category_inner(&state.db, currency_code, code, name, tone, sort_order).await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = (currency_code, code, name, tone, sort_order);
         Err(ep_core::server_err("ssr-only"))
     }
 }
 
+/// `category_ref` is the `"{currency_code}/{code}"` value the management UI's
+/// delete control emits — a single field keeps it `RowDeleteAction`-shaped.
 #[server(DeleteCategory, "/api/_internal/fin", "Url", "delete_category")]
-pub async fn delete_category(code: String) -> Result<(), ServerFnError> {
+pub async fn delete_category(category_ref: String) -> Result<(), ServerFnError> {
     #[cfg(feature = "ssr")]
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        delete_category_inner(&state.db, code).await
+        let (currency_code, code) = split_currency_ref(&category_ref)?;
+        delete_category_inner(&state.db, currency_code, code).await
     }
     #[cfg(not(feature = "ssr"))]
     {
+        let _ = category_ref;
         Err(ep_core::server_err("ssr-only"))
     }
 }

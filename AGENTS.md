@@ -122,7 +122,7 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 
 ### Shared helpers (don't reinvent)
 
-- Number formatting: `ep_core::{fmt_int, fmt_money, thousands_sep}` — used by both `dashboard.rs` and `finance::view`.
+- Number formatting: `ep_core::{fmt_int, fmt_minor, fmt_minor_compact, fmt_minor_raw, parse_minor, major_to_minor, amount_step, thousands_sep}` — `fmt_minor*` is the i64 minor-unit money formatter (per-currency precision); `fmt_int` stays for non-money integer counts. Used across `app/src/views/{dashboard,today,reports}.rs`, `modules/finance/src/{view,suggestions}.rs`, and the finance i18n templates.
 - HTML escape: `ep_core::html_escape`.
 - Unauthorized JSON response: `ep_auth::unauthorized(message)`.
 - HTTP client (notifiers): provider implementations share the crate-private `ep_notify` HTTP client (`OnceLock<reqwest::Client>`); callers should go through `NotifyBus` / channel helpers, not direct HTTP access.

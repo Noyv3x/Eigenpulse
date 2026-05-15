@@ -29,9 +29,105 @@ pub fn fmt_int(v: f64) -> String {
     thousands_sep(&format!("{:.0}", v))
 }
 
-/// Format an `f64` as money with two decimals and thousands separators (e.g. `18,400.00`).
-pub fn fmt_money(v: f64) -> String {
-    thousands_sep(&format!("{:.2}", v))
+/// Format an integer minor-unit amount with `decimals` fractional places and
+/// thousands separators. `fmt_minor(1_840_000, 2)` → `"18,400.00"`;
+/// `fmt_minor(18_400, 0)` → `"18,400"`; `fmt_minor(-4_250, 2)` → `"-42.50"`;
+/// `fmt_minor(50_000_000, 8)` → `"0.50000000"`. Pure integer/string math —
+/// safe in wasm32 view code.
+pub fn fmt_minor(amount: i64, decimals: u8) -> String {
+    thousands_sep(&fmt_minor_raw(amount, decimals))
+}
+
+/// Like [`fmt_minor`] but without thousands separators — suitable for the
+/// `value` of an `<input type="number">`. `fmt_minor_raw(123_456, 2)` →
+/// `"1234.56"`.
+pub fn fmt_minor_raw(amount: i64, decimals: u8) -> String {
+    if decimals == 0 {
+        return amount.to_string();
+    }
+    let neg = amount < 0;
+    // i128 + unsigned_abs dodges the i64::MIN overflow corner.
+    let mag = i128::from(amount).unsigned_abs();
+    let scale = 10u128.pow(u32::from(decimals));
+    let int_part = mag / scale;
+    let frac_part = mag % scale;
+    let sign = if neg { "-" } else { "" };
+    format!(
+        "{sign}{int_part}.{frac_part:0width$}",
+        width = usize::from(decimals)
+    )
+}
+
+/// Format only the integer (major-unit) part of a minor-unit amount, rounded
+/// half-up to the nearest major unit, with thousands separators. For compact
+/// KPI displays that intentionally drop the fractional part.
+/// `fmt_minor_compact(1_840_050, 2)` → `"18,401"`.
+pub fn fmt_minor_compact(amount: i64, decimals: u8) -> String {
+    if decimals == 0 {
+        return thousands_sep(&amount.to_string());
+    }
+    let neg = amount < 0;
+    let mag = i128::from(amount).unsigned_abs();
+    let scale = 10u128.pow(u32::from(decimals));
+    let major = (mag + scale / 2) / scale;
+    // `major != 0` keeps a rounded-to-zero negative from printing "-0".
+    let s = if neg && major != 0 {
+        format!("-{major}")
+    } else {
+        major.to_string()
+    };
+    thousands_sep(&s)
+}
+
+/// Parse a human decimal string into integer minor units at `decimals`
+/// precision. Accepts an optional leading `-`, ASCII digits, and an optional
+/// `.` fraction; fractional digits beyond `decimals` are rounded half-up.
+/// Thousands separators, exponents, and other shapes return `None`, as does
+/// an `i64` overflow. Pure math — safe in wasm32 view code.
+pub fn parse_minor(s: &str, decimals: u8) -> Option<i64> {
+    let s = s.trim();
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (int_str, frac_str) = match body.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (body, ""),
+    };
+    if int_str.is_empty() && frac_str.is_empty() {
+        return None;
+    }
+    if !int_str.bytes().all(|b| b.is_ascii_digit()) || !frac_str.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let dec = usize::from(decimals);
+    let scale = 10i128.pow(u32::from(decimals));
+    let int_part: i128 = if int_str.is_empty() {
+        0
+    } else {
+        int_str.parse().ok()?
+    };
+    // Fractional value scaled to `decimals`, rounding half-up on excess digits.
+    let frac_value: i128 = if frac_str.len() <= dec {
+        let padded = format!("{frac_str:0<dec$}");
+        if padded.is_empty() {
+            0
+        } else {
+            padded.parse().ok()?
+        }
+    } else {
+        let kept: i128 = if dec == 0 {
+            0
+        } else {
+            frac_str[..dec].parse().ok()?
+        };
+        let round_up = frac_str.as_bytes()[dec] >= b'5';
+        kept + i128::from(round_up)
+    };
+    let total = int_part.checked_mul(scale)?.checked_add(frac_value)?;
+    let total = if neg { -total } else { total };
+    i64::try_from(total).ok()
 }
 
 /// Format an `Option<unix_seconds>` as `YYYY-MM-DD`. Returns `—` for `None` or
@@ -49,6 +145,33 @@ pub fn fmt_ts_minute(ts: Option<i64>) -> String {
     unix_to_ymdhm(t)
         .map(|(_, m, d, hh, mm)| format!("{m:02}-{d:02} {hh:02}:{mm:02}"))
         .unwrap_or_else(|| "—".into())
+}
+
+/// Format an `Option<unix_seconds>` as `YYYY-MM-DD`. Empty string for None /
+/// invalid — the empty-fallback flavor of [`fmt_ts_date`], suitable as the
+/// `value` of an `<input type="date">` where `"—"` would be invalid HTML.
+pub fn fmt_ts_ymd(ts: Option<i64>) -> String {
+    ts.and_then(unix_to_ymdhm)
+        .map(|(y, m, d, _, _)| format!("{y:04}-{m:02}-{d:02}"))
+        .unwrap_or_default()
+}
+
+/// Scale a major-unit amount (e.g. `500` yuan) into minor units (`50_000`
+/// at 2 decimals). Saturating multiplication keeps the threshold meaningful
+/// even at the upper end of `MAX_CURRENCY_DECIMALS = 8`.
+pub fn major_to_minor(major: i64, decimals: u8) -> i64 {
+    major.saturating_mul(10_i64.pow(u32::from(decimals)))
+}
+
+/// The `step` / smallest-positive value for an `<input type="number">` money
+/// field at a given precision. `decimals=2` → `"0.01"`, `0` → `"1"`,
+/// `8` → `"0.00000001"`.
+pub fn amount_step(decimals: u8) -> String {
+    if decimals == 0 {
+        "1".to_string()
+    } else {
+        format!("0.{}1", "0".repeat(decimals as usize - 1))
+    }
 }
 
 /// Format an `Option<unix_seconds>` as `MM-DD`. Empty string for None / invalid
@@ -188,10 +311,57 @@ mod tests {
     }
 
     #[test]
-    fn fmt_money_pos_neg_zero() {
-        assert_eq!(fmt_money(18_400.0), "18,400.00");
-        assert_eq!(fmt_money(-42.5), "-42.50");
-        assert_eq!(fmt_money(0.0), "0.00");
+    fn fmt_minor_handles_precision_sign_and_thousands() {
+        // 2-decimal currency.
+        assert_eq!(fmt_minor(1_840_000, 2), "18,400.00");
+        assert_eq!(fmt_minor(-4_250, 2), "-42.50");
+        assert_eq!(fmt_minor(5, 2), "0.05");
+        assert_eq!(fmt_minor(0, 2), "0.00");
+        // 0-decimal currency (e.g. JPY) drops the point entirely.
+        assert_eq!(fmt_minor(18_400, 0), "18,400");
+        assert_eq!(fmt_minor(-7, 0), "-7");
+        // High-precision currency (e.g. BTC at 8 places).
+        assert_eq!(fmt_minor(150_000_000, 8), "1.50000000");
+        // i64::MIN must not panic (i128 + unsigned_abs path).
+        assert!(fmt_minor(i64::MIN, 2).starts_with('-'));
+    }
+
+    #[test]
+    fn fmt_minor_raw_omits_thousands_separators() {
+        // `<input type="number">` values must stay comma-free.
+        assert_eq!(fmt_minor_raw(123_456, 2), "1234.56");
+        assert_eq!(fmt_minor_raw(18_400, 0), "18400");
+        assert_eq!(fmt_minor_raw(-4_250, 2), "-42.50");
+    }
+
+    #[test]
+    fn fmt_minor_compact_rounds_to_major_unit() {
+        assert_eq!(fmt_minor_compact(1_840_050, 2), "18,401"); // .50 rounds up
+        assert_eq!(fmt_minor_compact(1_840_049, 2), "18,400");
+        assert_eq!(fmt_minor_compact(18_400, 0), "18,400");
+        // A negative that rounds to zero must not print "-0".
+        assert_eq!(fmt_minor_compact(-30, 2), "0");
+        assert_eq!(fmt_minor_compact(-1_840_050, 2), "-18,401");
+    }
+
+    #[test]
+    fn parse_minor_scales_rounds_and_rejects_bad_shapes() {
+        assert_eq!(parse_minor("42", 2), Some(4_200));
+        assert_eq!(parse_minor("42.5", 2), Some(4_250));
+        assert_eq!(parse_minor("-42.50", 2), Some(-4_250));
+        assert_eq!(parse_minor(" 0 ", 2), Some(0));
+        // Excess fractional digits round half-up; carry propagates.
+        assert_eq!(parse_minor("0.567", 2), Some(57));
+        assert_eq!(parse_minor("1.999", 2), Some(200));
+        // 0-decimal currency rounds the whole fraction away.
+        assert_eq!(parse_minor("42.5", 0), Some(43));
+        assert_eq!(parse_minor("42.4", 0), Some(42));
+        // 8-decimal currency.
+        assert_eq!(parse_minor("1.5", 8), Some(150_000_000));
+        // Bad shapes: thousands separators, exponents, blanks, double dots.
+        for bad in ["", "-", "1,234.56", "1e3", "abc", "4..2", "4.2.1", "."] {
+            assert_eq!(parse_minor(bad, 2), None, "bad={bad}");
+        }
     }
 
     #[test]

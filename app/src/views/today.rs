@@ -1,4 +1,5 @@
-use ep_core::IconKind;
+use ep_core::{fmt_minor_compact, IconKind};
+use ep_finance::Currency;
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{Card, Direction, EmptyState, Kpi, PageHead, SkeletonCard, SkeletonKpi};
 use leptos::prelude::*;
@@ -17,9 +18,12 @@ pub struct TodayData {
     pub date: String, // YYYY-MM-DD
     pub items: Vec<TodayItem>,
     pub event_count: u32,
-    pub fin_expense: f64, // today, magnitude (yuan)
+    /// Today's expense magnitude in the primary currency's minor units.
+    pub fin_expense: i64,
     pub fit_count: u32,
     pub lrn_count: u32,
+    /// Every currency, so the timeline can format each row's amount.
+    pub currencies: Vec<Currency>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +32,10 @@ pub struct TodayItem {
     pub module: String, // FIN / FIT / LRN / SYS
     pub doc_id: String,
     pub summary: String,
-    pub amount: Option<f64>,
+    /// Signed minor-unit amount (finance rows only).
+    pub amount: Option<i64>,
+    /// Currency of the amount; `None` for non-finance rows.
+    pub currency_code: Option<String>,
     pub link_doc: Option<String>,
 }
 
@@ -40,12 +47,26 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
         let st = ep_core::app_state_context()?;
         let pool = &st.db;
 
-        let today = ep_core::load_today_activity(pool, TodayActivityOrder::Asc, None)
-            .await
-            .map_err(server_err)?;
+        // The "spent today" KPI is a cross-module aggregate — primary currency
+        // only (currencies never convert into one another). Three independent
+        // fetches join in parallel; sqlx errors get normalized to ServerFnError
+        // so they ride in the same try_join.
+        let primary_fut = ep_finance::resolve_currency(pool, "");
+        let today_fut = async {
+            ep_core::load_today_activity(pool, TodayActivityOrder::Asc, None)
+                .await
+                .map_err(server_err)
+        };
+        let currencies_fut = async {
+            ep_finance::list_currencies_inner(pool)
+                .await
+                .map_err(server_err)
+        };
+        let (primary, today, currencies) =
+            tokio::try_join!(primary_fut, today_fut, currencies_fut)?;
 
         let event_count = today.rows.len() as u32;
-        let mut fin_expense = 0.0;
+        let mut fin_expense: i64 = 0;
         let mut fit_count: u32 = 0;
         let mut lrn_count: u32 = 0;
         let items: Vec<TodayItem> = today
@@ -53,11 +74,10 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
             .into_iter()
             .map(|row| {
                 match row.module.as_str() {
-                    "FIN" => {
-                        if let Some(a) = row.amount {
-                            if a < 0.0 {
-                                fin_expense += -a;
-                            }
+                    // Only the primary currency feeds the cross-module KPI.
+                    "FIN" if row.currency_code.as_deref() == Some(primary.code.as_str()) => {
+                        if let Some(a) = row.amount.filter(|a| *a < 0.0) {
+                            fin_expense += (-a) as i64;
                         }
                     }
                     "FIT" => fit_count += 1,
@@ -69,7 +89,8 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
                     module: row.module,
                     doc_id: row.doc_id,
                     summary: row.summary,
-                    amount: row.amount,
+                    amount: row.amount.map(|a| a as i64),
+                    currency_code: row.currency_code,
                     link_doc: row.link_doc,
                 }
             })
@@ -82,6 +103,7 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
             fin_expense,
             fit_count,
             lrn_count,
+            currencies,
         })
     }
     #[cfg(not(feature = "ssr"))]
@@ -115,13 +137,25 @@ fn render_today(d: TodayData) -> impl IntoView {
     let locale = use_locale();
     let title_cn = tf(locale, "app.today.page.title_cn", &[("date", &d.date)]);
     let event_value = format!("{}", d.event_count);
-    let fin_value = if d.fin_expense > 0.0 {
-        format!("¥{}", ep_core::fmt_int(d.fin_expense))
-    } else {
-        "¥0".to_string()
-    };
+    let (primary_symbol, primary_decimals) = d
+        .currencies
+        .iter()
+        .find(|c| c.is_primary)
+        .map(|c| (c.symbol.clone(), c.decimals))
+        .unwrap_or_else(|| (String::new(), 2));
+    let fin_value = format!(
+        "{}{}",
+        primary_symbol,
+        fmt_minor_compact(d.fin_expense.max(0), primary_decimals)
+    );
     let fit_value = format!("{}", d.fit_count);
     let lrn_value = format!("{}", d.lrn_count);
+    // code → (symbol, decimals) for the mixed-currency timeline.
+    let cur_map: std::collections::HashMap<String, (String, u8)> = d
+        .currencies
+        .iter()
+        .map(|c| (c.code.clone(), (c.symbol.clone(), c.decimals)))
+        .collect();
     let items = d.items;
     let empty = items.is_empty();
 
@@ -163,7 +197,7 @@ fn render_today(d: TodayData) -> impl IntoView {
             } else {
                 view! {
                     <div class="today-list">
-                        {items.into_iter().map(render_today_item).collect_view()}
+                        {items.into_iter().map(|it| render_today_item(it, &cur_map)).collect_view()}
                     </div>
                 }.into_any()
             }}
@@ -171,7 +205,10 @@ fn render_today(d: TodayData) -> impl IntoView {
     }
 }
 
-fn render_today_item(it: TodayItem) -> impl IntoView {
+fn render_today_item(
+    it: TodayItem,
+    cur_map: &std::collections::HashMap<String, (String, u8)>,
+) -> impl IntoView {
     let module_link = match it.module.as_str() {
         "FIN" => "/finance",
         "FIT" => "/fitness",
@@ -179,11 +216,14 @@ fn render_today_item(it: TodayItem) -> impl IntoView {
         _ => "/",
     };
     let amount_text = it.amount.map(|a| {
-        if a > 0.0 {
-            format!("+¥{}", ep_core::fmt_money(a))
-        } else {
-            format!("−¥{}", ep_core::fmt_money(a.abs()))
-        }
+        let (sym, dec) = it
+            .currency_code
+            .as_deref()
+            .and_then(|c| cur_map.get(c))
+            .cloned()
+            .unwrap_or_else(|| (String::new(), 2));
+        let sign = if a >= 0 { "+" } else { "−" };
+        format!("{sign}{sym}{}", fmt_minor_compact(a.abs(), dec))
     });
     let _ = it.doc_id;
     let _ = it.link_doc;

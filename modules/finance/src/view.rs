@@ -1,8 +1,10 @@
-use crate::model::{Account, AccountStats, Category, MonthBucket, Tag, Txn, ACCOUNT_TYPES, TONES};
+use crate::model::{
+    Account, AccountStats, Category, Currency, MonthBucket, Tag, Txn, ACCOUNT_TYPES, TONES,
+};
 use crate::server_fns::*;
 use ep_core::{
-    fmt_int, fmt_money, fmt_ts_date, fmt_ts_hm, fmt_ts_md, unix_to_ymdhm, ymd_to_unix_midnight,
-    IconKind, Tone,
+    amount_step, fmt_minor, fmt_minor_compact, fmt_minor_raw, fmt_ts_date, fmt_ts_hm, fmt_ts_md,
+    fmt_ts_ymd, major_to_minor, parse_ymd, unix_to_ymdhm, ymd_to_unix_midnight, IconKind, Tone,
 };
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
@@ -33,10 +35,14 @@ struct FinanceActions {
     delete_category: ServerAction<DeleteCategory>,
     update_txn: ServerAction<UpdateTxn>,
     add_transfer: ServerAction<AddTransfer>,
+    create_currency: ServerAction<CreateCurrency>,
+    update_currency: ServerAction<UpdateCurrency>,
+    delete_currency: ServerAction<DeleteCurrency>,
+    set_primary_currency: ServerAction<SetPrimaryCurrency>,
 }
 
 impl FinanceActions {
-    fn versions(self) -> [usize; 12] {
+    fn versions(self) -> [usize; 16] {
         [
             self.add.version().get(),
             self.delete.version().get(),
@@ -50,6 +56,10 @@ impl FinanceActions {
             self.delete_category.version().get(),
             self.update_txn.version().get(),
             self.add_transfer.version().get(),
+            self.create_currency.version().get(),
+            self.update_currency.version().get(),
+            self.delete_currency.version().get(),
+            self.set_primary_currency.version().get(),
         ]
     }
 }
@@ -57,6 +67,9 @@ impl FinanceActions {
 #[derive(Clone, Copy)]
 struct FinanceUiState {
     active: RwSignal<String>,
+    /// Currency code the whole module is scoped to ("每个货币独立分页"). Empty
+    /// resolves to the primary currency server-side.
+    selected_currency: RwSignal<String>,
     txn_modal_open: RwSignal<bool>,
     txn_modal_mode: RwSignal<String>,
     filters: LedgerFilters,
@@ -97,7 +110,11 @@ fn wire_action_toast<S, F>(
 pub fn FinanceView() -> impl IntoView {
     let locale = use_locale();
     let active = RwSignal::new(String::from("ledger"));
-    let ledger = Resource::new(|| (), |_| async { load_ledger().await });
+    let selected_currency = RwSignal::new(String::new());
+    let ledger = Resource::new(
+        move || selected_currency.get(),
+        |code| async move { load_ledger(code).await },
+    );
     let add = ServerAction::<AddTxn>::new();
     let delete = ServerAction::<DeleteTxn>::new();
     let set_budget = ServerAction::<SetBudget>::new();
@@ -110,6 +127,10 @@ pub fn FinanceView() -> impl IntoView {
     let delete_category = ServerAction::<DeleteCategory>::new();
     let update_txn = ServerAction::<UpdateTxn>::new();
     let add_transfer = ServerAction::<AddTransfer>::new();
+    let create_currency = ServerAction::<CreateCurrency>::new();
+    let update_currency = ServerAction::<UpdateCurrency>::new();
+    let delete_currency = ServerAction::<DeleteCurrency>::new();
+    let set_primary_currency = ServerAction::<SetPrimaryCurrency>::new();
     let txn_modal_open = RwSignal::new(false);
     let txn_modal_mode = RwSignal::new(String::from("txn"));
     let merchant_filter = RwSignal::new(String::new());
@@ -129,9 +150,14 @@ pub fn FinanceView() -> impl IntoView {
         delete_category,
         update_txn,
         add_transfer,
+        create_currency,
+        update_currency,
+        delete_currency,
+        set_primary_currency,
     };
     let ui = FinanceUiState {
         active,
+        selected_currency,
         txn_modal_open,
         txn_modal_mode,
         filters: LedgerFilters {
@@ -143,8 +169,9 @@ pub fn FinanceView() -> impl IntoView {
     };
 
     // Refetch when any action's version ticks. We compare per-element via a
-    // fixed-size array so the closure stays Send + 'static.
-    Effect::new(move |prev: Option<[usize; 12]>| {
+    // fixed-size array so the closure stays Send + 'static. (Switching the
+    // selected currency refetches on its own — it is the resource's source.)
+    Effect::new(move |prev: Option<[usize; 16]>| {
         let cur = actions.versions();
         if prev.is_some_and(|p| p != cur) {
             ledger.refetch();
@@ -156,12 +183,8 @@ pub fn FinanceView() -> impl IntoView {
     // to Ok, push a toast and close any open modal so the user gets a clear
     // "done" signal without manually dismissing.
     let toast = use_toast();
-    wire_action_toast(add, toast, Some(txn_modal_open), move |txn: &Txn| {
-        ep_i18n::tf(
-            locale,
-            "finance.toast.txn_added",
-            &[("amount", &format!("¥{}", fmt_money(txn.amount.abs())))],
-        )
+    wire_action_toast(add, toast, Some(txn_modal_open), move |_| {
+        t(locale, "finance.toast.txn_added").to_string()
     });
     wire_action_toast(update_txn, toast, Some(txn_modal_open), move |_| {
         t(locale, "finance.toast.txn_updated").to_string()
@@ -196,11 +219,19 @@ pub fn FinanceView() -> impl IntoView {
     wire_action_toast(import_budgets, toast, None, move |_| {
         t(locale, "finance.toast.budget_imported").to_string()
     });
+    wire_action_toast(create_currency, toast, None, move |c: &Currency| {
+        ep_i18n::tf(locale, "finance.toast.currency_added", &[("name", &c.name)])
+    });
+    wire_action_toast(update_currency, toast, None, move |_| {
+        t(locale, "finance.toast.currency_updated").to_string()
+    });
+    wire_action_toast(delete_currency, toast, None, move |_| {
+        t(locale, "finance.toast.currency_deleted").to_string()
+    });
+    wire_action_toast(set_primary_currency, toast, None, move |_| {
+        t(locale, "finance.toast.primary_set").to_string()
+    });
 
-    // Fixed page-head action: a single "+ Add Transaction" button. When the
-    // user hasn't set up accounts or categories yet, the modal itself shows
-    // an inline hint pointing at the prerequisite tab — there is no
-    // separate onboarding component.
     let page_actions = view! {
         <button class="btn primary" type="button"
                 on:click=move |_| {
@@ -238,12 +269,50 @@ pub fn FinanceView() -> impl IntoView {
     }
 }
 
+/// The currency switcher strip — one button per currency, the active one (as
+/// resolved server-side) highlighted. Clicking re-scopes the whole module.
+fn render_currency_switcher(d: &LedgerData, selected: RwSignal<String>) -> impl IntoView {
+    let active_code = d.currency.code.clone();
+    let pills: Vec<_> = d
+        .currencies
+        .iter()
+        .map(|c| {
+            let code = c.code.clone();
+            let is_active = code == active_code;
+            let label = format!("{} {}", c.symbol, c.code);
+            let name = c.name.clone();
+            let cls = if is_active {
+                "btn primary sm"
+            } else {
+                "btn sm"
+            };
+            view! {
+                <button class=cls type="button" title=name
+                        on:click=move |_| {
+                            if selected.get_untracked() != code {
+                                selected.set(code.clone());
+                            }
+                        }>
+                    {label}
+                </button>
+            }
+        })
+        .collect();
+    view! {
+        <div class="hstack" style="gap:6px;flex-wrap:wrap;margin-bottom:16px;align-items:center">
+            {pills}
+        </div>
+    }
+}
+
 fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) -> impl IntoView {
     let locale = use_locale();
     let active = ui.active;
+    let decimals = data.currency.decimals;
+    let symbol = data.currency.symbol.clone();
     let m = &data.month;
-    let bud_pct = if m.budget_total > 0.0 {
-        (m.expense / m.budget_total * 100.0).round() as u32
+    let bud_pct = if m.budget_total > 0 {
+        (m.expense as f64 / m.budget_total as f64 * 100.0).round() as u32
     } else {
         0
     };
@@ -253,15 +322,16 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
         _ => Direction::Down,
     };
     // Daily spend / 3-month-rolling daily spend, used for the FIN-K02 trend.
-    let daily_now = m.expense / m.days_elapsed.max(1) as f64;
-    // 3m rolling has 90 days denominator (avg_expense_3m is a monthly figure).
-    let daily_3m = m.avg_expense_3m / 30.0;
+    // All figures are minor units; the threshold scales with the currency.
+    let daily_now = m.expense as f64 / m.days_elapsed.max(1) as f64;
+    let daily_3m = m.avg_expense_3m as f64 / 30.0;
     let daily_delta = daily_now - daily_3m;
-    let daily_dir = if daily_delta < -0.5 {
+    let dir_eps = 0.5 * 10f64.powi(i32::from(decimals));
+    let daily_dir = if daily_delta < -dir_eps {
         Direction::Up
     }
     // less spend = up (saving)
-    else if daily_delta > 0.5 {
+    else if daily_delta > dir_eps {
         Direction::Down
     } else {
         Direction::Flat
@@ -285,7 +355,9 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
     let accounts_count = data.accounts.len() as u32;
     let budgets_count = data.budgets.len() as u32;
     let categories_count = data.categories.len() as u32;
+    let currencies_count = data.currencies.len() as u32;
 
+    let switcher = render_currency_switcher(&data, ui.selected_currency);
     let banner = render_banner(&data);
     // Pre-compute attribute strings — the `view!` macro rejects bare if/else
     // in attribute-value position.
@@ -294,7 +366,14 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
         tf(
             locale,
             "finance.kpi.spend_vs_avg",
-            &[("sign", sign), ("amount", &fmt_int(daily_delta.abs()))],
+            &[
+                ("sign", sign),
+                ("symbol", &symbol),
+                (
+                    "amount",
+                    &fmt_minor_compact(daily_delta.abs() as i64, decimals),
+                ),
+            ],
         )
     } else {
         tf(
@@ -303,38 +382,56 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
             &[("day", &m.days_elapsed.to_string())],
         )
     };
-    let savings_delta_text = if m.savings >= 0.0 {
+    let savings_delta_text = if m.savings >= 0 {
         tf(
             locale,
             "finance.kpi.net_savings",
-            &[("amount", &fmt_int(m.savings))],
+            &[
+                ("symbol", &symbol),
+                ("amount", &fmt_minor_compact(m.savings, decimals)),
+            ],
         )
     } else {
         tf(
             locale,
             "finance.kpi.net_deficit",
-            &[("amount", &fmt_int(m.savings.abs()))],
+            &[
+                ("symbol", &symbol),
+                ("amount", &fmt_minor_compact(m.savings.abs(), decimals)),
+            ],
         )
     };
-    let emergency_delta_text = if m.avg_expense_3m > 0.0 {
+    let emergency_delta_text = if m.avg_expense_3m > 0 {
         tf(
             locale,
             "finance.kpi.emergency_delta",
             &[
-                ("liquid", &fmt_int(m.liquid_balance)),
-                ("avg", &fmt_int(m.avg_expense_3m)),
+                ("symbol", &symbol),
+                ("liquid", &fmt_minor_compact(m.liquid_balance, decimals)),
+                ("avg", &fmt_minor_compact(m.avg_expense_3m, decimals)),
             ],
         )
     } else {
         t(locale, "finance.kpi.emergency_empty").to_string()
     };
+    let kpi_budget = format!(
+        "{s}{} / {s}{}",
+        fmt_minor_compact(m.expense, decimals),
+        fmt_minor_compact(m.budget_total, decimals),
+        s = symbol
+    );
+    let kpi_daily = format!(
+        "{}{}",
+        symbol,
+        fmt_minor_compact(daily_now as i64, decimals)
+    );
     let kpis = view! {
         <div class="kpi-grid">
             <Kpi code="FIN-K01" label=t(locale, "finance.kpi.budget") value=format!("{}", bud_pct) unit="%".to_string()
-                 delta=format!("¥{} / ¥{}", fmt_int(m.expense), fmt_int(m.budget_total))
+                 delta=kpi_budget
                  dir=bud_dir/>
             <Kpi code="FIN-K02" label=t(locale, "finance.kpi.daily_spend")
-                 value=format!("¥{}", fmt_int(daily_now))
+                 value=kpi_daily
                  delta=daily_delta_text
                  dir=daily_dir/>
             <Kpi code="FIN-K03" label=t(locale, "finance.kpi.savings_rate")
@@ -349,7 +446,8 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
     };
 
     // Order matches the real onboarding path: Ledger (daily use) →
-    // Accounts → Categories (setup) → Budget (planning) → Reports (review).
+    // Accounts → Categories (setup) → Budget (planning) → Reports (review),
+    // with the occasional-use Currencies config last.
     let tabs = vec![
         TabSpec::new("ledger", t(locale, "finance.tab.ledger")).with_count(txns_count),
         TabSpec::new("accounts", t(locale, "finance.tab.accounts")).with_count(accounts_count),
@@ -357,6 +455,8 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
             .with_count(categories_count),
         TabSpec::new("budget", t(locale, "finance.tab.budget")).with_count(budgets_count),
         TabSpec::new("reports", t(locale, "finance.tab.reports")),
+        TabSpec::new("currencies", t(locale, "finance.tab.currencies"))
+            .with_count(currencies_count),
     ];
 
     // Share the loaded LedgerData across every tab branch by Arc instead of
@@ -367,9 +467,11 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
     let data_for_budget = data.clone();
     let data_for_accounts = data.clone();
     let data_for_categories = data.clone();
+    let data_for_currencies = data.clone();
     let data_for_reports = data;
 
     view! {
+        {switcher}
         {banner}
         {kpis}
         <Tabs tabs=tabs active=active/>
@@ -378,12 +480,12 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
             "accounts" => render_accounts(&data_for_accounts, actions.create_account, actions.update_account, actions.delete_account).into_any(),
             "categories" => render_categories(&data_for_categories, actions.create_category, actions.update_category, actions.delete_category).into_any(),
             "reports" => render_reports(&data_for_reports).into_any(),
+            "currencies" => render_currencies(&data_for_currencies, actions.create_currency, actions.update_currency, actions.delete_currency, actions.set_primary_currency).into_any(),
             _ => view! {
                 {render_txn_modal(
                     actions.add,
                     actions.add_transfer,
-                    data_for_ledger.categories.clone(),
-                    data_for_ledger.accounts.clone(),
+                    data_for_ledger.clone(),
                     ui.txn_modal_open,
                     ui.txn_modal_mode,
                 )}
@@ -401,30 +503,43 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
 fn render_banner(d: &LedgerData) -> impl IntoView {
     let locale = use_locale();
     let m = &d.month;
-    let week_sign = if m.balance_delta >= 0.0 { "+" } else { "−" };
+    let decimals = d.currency.decimals;
+    let symbol = d.currency.symbol.clone();
+    let week_sign = if m.balance_delta >= 0 { "+" } else { "−" };
     let savings_pct = (m.savings_rate * 100.0).round() as u32;
     // Net-worth tone tracks the most recent week: + → green/healthy,
     // 0 → flat/neutral, − → rose/watch.
-    let (worth_tone, worth_label_key) = if m.balance_delta > 0.0 {
+    let (worth_tone, worth_label_key) = if m.balance_delta > 0 {
         (Tone::Green, "finance.banner.status.healthy")
-    } else if m.balance_delta == 0.0 {
+    } else if m.balance_delta == 0 {
         (Tone::None, "finance.banner.status.flat")
     } else {
         (Tone::Rose, "finance.banner.status.watch")
     };
+    let glyph = symbol.clone();
+    let balance_text = format!("{}{}", symbol, fmt_minor(m.balance, decimals));
+    let income_text = format!("+{}{}", symbol, fmt_minor_compact(m.income, decimals));
+    let expense_text = format!("−{}{}", symbol, fmt_minor_compact(m.expense, decimals));
+    let savings_text = format!(
+        "{}{}{}",
+        if m.savings >= 0 { "" } else { "−" },
+        symbol,
+        fmt_minor_compact(m.savings.abs(), decimals)
+    );
     view! {
         <div class="module-banner">
-            <div class="module-glyph fin mono">"¥"</div>
+            <div class="module-glyph fin mono">{glyph}</div>
             <div style="flex:1">
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
                     <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">{t(locale, "finance.banner.net_worth")}</span>
                     <UiTag tone=worth_tone dot=true>{t(locale, worth_label_key)}</UiTag>
+                    <span class="mono" style="font-size:10.5px;color:var(--ink-4)">{d.currency.name.clone()}</span>
                 </div>
                 <div class="mono" style="font-size:32px;font-weight:600;letter-spacing:-0.02em;line-height:1.1">
-                    "¥" {fmt_money(m.balance)}
+                    {balance_text}
                 </div>
                 <div class="hstack" style="gap:16px;margin-top:8px;font-size:12.5px;color:var(--ink-3)">
-                    <span class="mono">{tf(locale, "finance.banner.balance_delta", &[("sign", week_sign), ("amount", &fmt_int(m.balance_delta.abs()))])}</span>
+                    <span class="mono">{tf(locale, "finance.banner.balance_delta", &[("sign", week_sign), ("symbol", &symbol), ("amount", &fmt_minor_compact(m.balance_delta.abs(), decimals))])}</span>
                     <span class="mono">{tf(locale, "finance.banner.savings_rate", &[("pct", &savings_pct.to_string())])}</span>
                     <span class="mono">{
                         let n = d.accounts.len();
@@ -436,17 +551,17 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
             <div class="hstack" style="gap:20px;padding-right:8px">
                 <div>
                     <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">{t(locale, "finance.banner.income")}</div>
-                    <div class="mono" style="font-size:18px;font-weight:600;color:var(--primary-ink)">"+¥" {fmt_int(m.income)}</div>
+                    <div class="mono" style="font-size:18px;font-weight:600;color:var(--primary-ink)">{income_text}</div>
                 </div>
                 <div class="sep-v"></div>
                 <div>
                     <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">{t(locale, "finance.banner.spend")}</div>
-                    <div class="mono" style="font-size:18px;font-weight:600">"−¥" {fmt_int(m.expense)}</div>
+                    <div class="mono" style="font-size:18px;font-weight:600">{expense_text}</div>
                 </div>
                 <div class="sep-v"></div>
                 <div>
                     <div class="mono" style="font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px">{t(locale, "finance.banner.net_savings")}</div>
-                    <div class="mono" style="font-size:18px;font-weight:600">{format!("{}¥{}", if m.savings >= 0.0 { "" } else { "−" }, fmt_int(m.savings.abs()))}</div>
+                    <div class="mono" style="font-size:18px;font-weight:600">{savings_text}</div>
                 </div>
             </div>
         </div>
@@ -461,8 +576,7 @@ const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacin
 fn render_txn_modal(
     add: ServerAction<AddTxn>,
     add_transfer: ServerAction<AddTransfer>,
-    categories: Vec<Category>,
-    accounts: Vec<Account>,
+    data: std::sync::Arc<LedgerData>,
     open: RwSignal<bool>,
     mode: RwSignal<String>,
 ) -> impl IntoView {
@@ -486,6 +600,11 @@ fn render_txn_modal(
                 };
                 let txn_btn_class = if is_transfer { "btn ghost" } else { "btn primary" };
                 let transfer_btn_class = if is_transfer { "btn primary" } else { "btn ghost" };
+                let body = if is_transfer {
+                    render_transfer_form(add_transfer, &data).into_any()
+                } else {
+                    render_new_txn_form(add, &data).into_any()
+                };
                 view! {
                     <div class="fin-modal-backdrop">
                         <div class="fin-modal" role="dialog" aria-modal="true">
@@ -509,11 +628,7 @@ fn render_txn_modal(
                                         <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
                                     </button>
                                 </div>
-                                {if is_transfer {
-                                    render_transfer_form(add_transfer, accounts.clone()).into_any()
-                                } else {
-                                    render_new_txn_form(add, categories.clone(), accounts.clone()).into_any()
-                                }}
+                                {body}
                             </div>
                         </div>
                     </div>
@@ -523,20 +638,27 @@ fn render_txn_modal(
     }
 }
 
-fn render_new_txn_form(
-    add: ServerAction<AddTxn>,
-    categories: Vec<Category>,
-    accounts: Vec<Account>,
-) -> impl IntoView {
+fn render_new_txn_form(add: ServerAction<AddTxn>, data: &LedgerData) -> impl IntoView {
     let locale = use_locale();
+    let categories = data.categories.clone();
+    let accounts = data.accounts.clone();
+    let currency_code = data.currency.code.clone();
+    let decimals = data.currency.decimals;
+    let amount_label = tf(
+        locale,
+        "finance.field.amount_in",
+        &[("symbol", &data.currency.symbol)],
+    );
+    let step = amount_step(decimals);
     view! {
         <ActionForm action=add attr:class="vstack fin-op-form" attr:style="gap:12px">
+            <input type="hidden" name="currency_code" value=currency_code/>
             // Row 1 — money: amount + expense/income toggle. This is the
             // single most consequential field, so it's prominent + first.
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                 <label class="vstack" style="gap:4px">
-                    <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
-                    <input name="amount" type="number" step="0.01" min="0.01" required
+                    <span class="mono dim" style=FIELD_LABEL>{amount_label}</span>
+                    <input name="amount" type="number" step=step.clone() min=step required
                            autofocus
                            placeholder="42.00" style=INPUT_STYLE_MONO/>
                 </label>
@@ -601,38 +723,67 @@ fn render_new_txn_form(
 }
 
 /// Transfer card; submits to `add_transfer` (writes the paired ±amount rows).
+/// The account pickers span every currency — a transfer may cross currencies,
+/// in which case the user enters the out-amount and in-amount separately
+/// (there is no conversion). Option values are `"{currency}/{code}"`.
 fn render_transfer_form(
     add_transfer: ServerAction<AddTransfer>,
-    accounts: Vec<Account>,
+    data: &LedgerData,
 ) -> impl IntoView {
     let locale = use_locale();
-    let active_accounts: Vec<Account> = accounts;
-    let from_accounts = active_accounts.clone();
-    let to_accounts = active_accounts;
+    // Map currency code → symbol so each account option can show its currency.
+    let symbol_of = |code: &str| {
+        data.currencies
+            .iter()
+            .find(|c| c.code == code)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default()
+    };
+    let opts: Vec<(String, String)> = data
+        .transfer_accounts
+        .iter()
+        .map(|a| {
+            let value = format!("{}/{}", a.currency_code, a.code);
+            let label = format!(
+                "{} · {} {}",
+                a.name,
+                symbol_of(&a.currency_code),
+                a.currency_code
+            );
+            (value, label)
+        })
+        .collect();
+    let from_opts = opts.clone();
+    let to_opts = opts;
     view! {
             <ActionForm action=add_transfer attr:class="vstack fin-op-form" attr:style="gap:10px">
-                <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.from_account")}</span>
                         <select name="from_account" style=INPUT_STYLE>
-                            {from_accounts.into_iter().enumerate().map(|(i, a)| {
-                                let code = a.code.clone();
-                                view! { <option value=code selected={i == 0}>{a.name.clone()}</option> }
+                            {from_opts.into_iter().enumerate().map(|(i, (value, label))| {
+                                view! { <option value=value selected={i == 0}>{label}</option> }
                             }).collect_view()}
                         </select>
                     </label>
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.to_account")}</span>
                         <select name="to_account" style=INPUT_STYLE>
-                            {to_accounts.into_iter().enumerate().map(|(i, a)| {
-                                let code = a.code.clone();
-                                view! { <option value=code selected={i == 1}>{a.name.clone()}</option> }
+                            {to_opts.into_iter().enumerate().map(|(i, (value, label))| {
+                                view! { <option value=value selected={i == 1}>{label}</option> }
                             }).collect_view()}
                         </select>
                     </label>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
                     <label class="vstack" style="gap:4px">
-                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
-                        <input name="amount" type="number" step="0.01" min="0.01" required
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.transfer_out")}</span>
+                        <input name="from_amount" type="number" step="any" min="0" required
+                               placeholder="500.00" style=INPUT_STYLE_MONO/>
+                    </label>
+                    <label class="vstack" style="gap:4px">
+                        <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.transfer_in")}</span>
+                        <input name="to_amount" type="number" step="any" min="0" required
                                placeholder="500.00" style=INPUT_STYLE_MONO/>
                     </label>
                     <label class="vstack" style="gap:4px">
@@ -641,6 +792,9 @@ fn render_transfer_form(
                                title=t(locale, "finance.placeholder.date_now")/>
                     </label>
                 </div>
+                <p class="mono dim" style="font-size:10.5px;margin:-2px 0 2px">
+                    {t(locale, "finance.card.transfer.hint")}
+                </p>
                 <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
                         <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.note_optional")}</span>
@@ -663,6 +817,11 @@ fn render_ledger_tab(
     filters: LedgerFilters,
 ) -> impl IntoView {
     let locale = use_locale();
+    let decimals = d.currency.decimals;
+    let symbol = d.currency.symbol.clone();
+    // The reactive tbody closure (a `<Card>` child) captures its own symbol
+    // clone so the sibling category-share card can still use `symbol`.
+    let row_symbol = symbol.clone();
     let txns = d.txns.clone();
     let cat_summary = d.category_summary.clone();
     // Share category/account vectors via `Arc` so each `render_txn_row`
@@ -680,7 +839,7 @@ fn render_ledger_tab(
     // Computed once per render of this tab. The parent re-runs render_ledger_tab
     // whenever the resource refetches (add / delete), so the export link picks
     // up new rows automatically — no reactive attribute needed.
-    let export_href = csv_data_uri(&txns);
+    let export_href = csv_data_uri(&txns, decimals);
     // Same lifetime story for rule suggestions: compute now while we still
     // hold `&d`, hand the owned `Vec<Suggestion>` to the view macro.
     let suggestions = crate::suggestions::compute_suggestions(d, locale);
@@ -766,7 +925,7 @@ fn render_ledger_tab(
                                         && to_ts.map(|to| t.occurred_at <= to).unwrap_or(true)
                                     })
                                     .cloned()
-                                    .map(|t| render_txn_row(t, cat_lookup, cat_options.clone(), acc_options.clone(), delete, update_txn))
+                                    .map(|t| render_txn_row(t, cat_lookup, cat_options.clone(), acc_options.clone(), delete, update_txn, decimals, row_symbol.clone()))
                                     .collect_view()
                             }}
                         </tbody>
@@ -787,7 +946,7 @@ fn render_ledger_tab(
                             />
                         }.into_any()
                     } else {
-                        render_category_share_rows(cat_summary).into_any()
+                        render_category_share_rows(cat_summary, &symbol, decimals).into_any()
                     }}
                 </Card>
 
@@ -803,10 +962,11 @@ fn render_ledger_tab(
 
 /// Per-row budget delete: "delete" here means "set this period's budget
 /// for the category to zero", so we route through the `set_budget`
-/// action with three hidden fields. Shape mirrors `RowDeleteAction` but
+/// action with four hidden fields. Shape mirrors `RowDeleteAction` but
 /// can't reuse it because that helper ships exactly one hidden field.
 fn render_budget_delete(
     action: ServerAction<SetBudget>,
+    currency_code: String,
     period: String,
     category_code: String,
     confirm_text: String,
@@ -816,6 +976,7 @@ fn render_budget_delete(
     let confirm_label = t(locale, "finance.action.confirm_delete").to_string();
     let cancel_label = t(locale, "finance.confirm.cancel").to_string();
     let open = RwSignal::new(false);
+    let currency_inner = currency_code.clone();
     let period_inner = period.clone();
     let category_inner = category_code.clone();
     let confirm_inner = confirm_text.clone();
@@ -829,6 +990,7 @@ fn render_budget_delete(
                 if !open.get() {
                     return view! { <span></span> }.into_any();
                 }
+                let currency = currency_inner.clone();
                 let period = period_inner.clone();
                 let category = category_inner.clone();
                 let confirm_text = confirm_inner.clone();
@@ -848,6 +1010,7 @@ fn render_budget_delete(
                                 </div>
                             </div>
                             <ActionForm action=action attr:class="confirm-foot">
+                                <input type="hidden" name="currency_code" value=currency/>
                                 <input type="hidden" name="period" value=period/>
                                 <input type="hidden" name="category_code" value=category/>
                                 <input type="hidden" name="amount" value="0"/>
@@ -906,6 +1069,10 @@ fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoVi
     .into_any()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "row renderer threads shared lookups plus the scoped currency"
+)]
 fn render_txn_row(
     t: Txn,
     cat_lookup: &std::collections::HashMap<String, Category>,
@@ -913,11 +1080,13 @@ fn render_txn_row(
     acc_options: std::sync::Arc<Vec<Account>>,
     delete: ServerAction<DeleteTxn>,
     update_txn: ServerAction<UpdateTxn>,
+    decimals: u8,
+    symbol: String,
 ) -> impl IntoView {
     let locale = use_locale();
     let date = fmt_ts_md(Some(t.occurred_at));
     let time_ = fmt_ts_hm(Some(t.occurred_at));
-    let cls_amt = if t.amount > 0.0 {
+    let cls_amt = if t.amount > 0 {
         "num amt-pos"
     } else {
         "num amt-neg"
@@ -927,10 +1096,10 @@ fn render_txn_row(
         Some(Tag::Tfr) => "txind tfr",
         _ => "txind exp",
     };
-    let amount_text = if t.amount > 0.0 {
-        format!("+¥{}", fmt_money(t.amount))
+    let amount_text = if t.amount > 0 {
+        format!("+{}{}", symbol, fmt_minor(t.amount, decimals))
     } else {
-        format!("−¥{}", fmt_money(t.amount.abs()))
+        format!("−{}{}", symbol, fmt_minor(t.amount.abs(), decimals))
     };
     let is_tfr = matches!(Tag::parse(&t.tag), Some(Tag::Tfr));
     let cat_tone = cat_lookup
@@ -965,8 +1134,6 @@ fn render_txn_row(
     // the modal naturally closes without another client-side action.
     let editing = RwSignal::new(false);
 
-    // Action column varies by tfr-ness — non-tfr gets an edit dialog,
-    // tfr gets a tooltip-bearing placeholder.
     let action_cell = if is_tfr {
         view! {
             <span class="dim mono"
@@ -988,7 +1155,15 @@ fn render_txn_row(
         .into_any()
     };
 
-    let edit_form = render_txn_edit_form(&t, editing, is_tfr, cat_options, acc_options, update_txn);
+    let edit_form = render_txn_edit_form(
+        &t,
+        editing,
+        is_tfr,
+        cat_options,
+        acc_options,
+        update_txn,
+        decimals,
+    );
 
     view! {
         <tr>
@@ -1026,20 +1201,21 @@ fn render_txn_edit_form(
     cat_options: std::sync::Arc<Vec<Category>>,
     acc_options: std::sync::Arc<Vec<Account>>,
     update_txn: ServerAction<UpdateTxn>,
+    decimals: u8,
 ) -> impl IntoView {
     let locale = use_locale();
     if is_tfr {
         return view! { <span></span> }.into_any();
     }
-    // Pre-baked prefilled values for the edit form.
     let edit_doc_id = t.doc_id.clone();
     let edit_merchant = t.merchant.clone();
-    let edit_amount_str = format!("{:.2}", t.amount.abs());
+    let edit_amount_str = fmt_minor_raw(t.amount.abs(), decimals);
     let edit_account = t.account_code.clone();
     let edit_category = t.category_code.clone();
     let edit_note = t.note.clone().unwrap_or_default();
-    let edit_date = fmt_ts_yyyymmdd(t.occurred_at);
+    let edit_date = fmt_ts_ymd(Some(t.occurred_at));
     let edit_sub_merchant = t.merchant.clone();
+    let step = amount_step(decimals);
     let cat_opts_active = cat_options;
     let acc_opts_active = acc_options;
     view! {
@@ -1053,6 +1229,7 @@ fn render_txn_edit_form(
                     let form_note = edit_note.clone();
                     let form_date = edit_date.clone();
                     let sub_merchant = edit_sub_merchant.clone();
+                    let form_step = step.clone();
                     let form_cat_opts = cat_opts_active.clone();
                     let form_acc_opts = acc_opts_active.clone();
                     view! {
@@ -1079,7 +1256,7 @@ fn render_txn_edit_form(
                                             </label>
                                             <label class="vstack" style="gap:4px">
                                                 <span class="mono dim" style=FIELD_LABEL>{ep_i18n::t(locale, "finance.field.amount")}</span>
-                                                <input name="amount" type="number" step="0.01" min="0.01"
+                                                <input name="amount" type="number" step=form_step.clone() min=form_step
                                                        value=form_amount style=INPUT_STYLE_MONO/>
                                             </label>
                                         </div>
@@ -1135,21 +1312,16 @@ fn render_txn_edit_form(
     .into_any()
 }
 
-/// Format a unix-second timestamp to `YYYY-MM-DD` (UTC). Used by the inline
-/// edit form's `<input type="date">`.
-fn fmt_ts_yyyymmdd(ts: i64) -> String {
-    unix_to_ymdhm(ts)
-        .map(|(y, m, d, _, _)| format!("{y:04}-{m:02}-{d:02}"))
-        .unwrap_or_default()
-}
-
 /// One budget row in the FIN-BDG-01 pool card — category name, used/total bar,
 /// inline amount-edit form, and the per-row delete affordance. Lifted out of
 /// `render_budget`'s per-budget `map` closure to keep that function's `view!`
 /// body readable; the emitted `<div>` subtree is unchanged.
 fn render_budget_row(
     b: crate::model::BudgetEntry,
+    currency_code: &str,
     period: &str,
+    decimals: u8,
+    symbol: &str,
     cat_lookup: &std::collections::HashMap<String, (String, String)>,
     set_budget: ServerAction<SetBudget>,
 ) -> impl IntoView {
@@ -1158,8 +1330,8 @@ fn render_budget_row(
         .get(&b.category_code)
         .cloned()
         .unwrap_or_else(|| (b.category_code.clone(), String::new()));
-    let pct_f = if b.amount > 0.0 {
-        b.used / b.amount * 100.0
+    let pct_f = if b.amount > 0 {
+        b.used as f64 / b.amount as f64 * 100.0
     } else {
         0.0
     };
@@ -1173,11 +1345,20 @@ fn render_budget_row(
     };
     let pct_class = if pct > 100 { "amt-neg" } else { "dim" };
     let bar_width = (pct as i64).clamp(0, 100);
+    let edit_currency = currency_code.to_string();
     let edit_period = period.to_string();
     let edit_category = b.category_code.clone();
+    let delete_currency = currency_code.to_string();
     let delete_period = period.to_string();
     let delete_category = b.category_code.clone();
-    let row_amount = format!("{:.2}", b.amount);
+    let row_amount = fmt_minor_raw(b.amount, decimals);
+    let used_total = format!(
+        "{s}{} / {s}{} · ",
+        fmt_minor_compact(b.used, decimals),
+        fmt_minor_compact(b.amount, decimals),
+        s = symbol
+    );
+    let step = amount_step(decimals);
     let row_action = set_budget;
     let delete_action = set_budget;
     let delete_confirm = tf(locale, "finance.budget.confirm_delete", &[("name", &name)]);
@@ -1188,16 +1369,17 @@ fn render_budget_row(
                     <span style="font-weight:500">{name}</span>
                 </div>
                 <div class="mono" style="font-size:12px">
-                    {format!("¥{} / ¥{} · ", fmt_int(b.used), fmt_int(b.amount))}
+                    {used_total}
                     <span class=pct_class>{format!("{}%", pct)}</span>
                 </div>
             </div>
             <div class="bar thick"><span style=format!("width:{}%;background:{}", bar_width, bar_color)></span></div>
             <div class="hstack" style="gap:8px;margin-top:8px;justify-content:flex-end;flex-wrap:wrap">
                 <ActionForm action=row_action attr:class="hstack" attr:style="gap:6px;align-items:center">
+                    <input type="hidden" name="currency_code" value=edit_currency/>
                     <input type="hidden" name="period" value=edit_period/>
                     <input type="hidden" name="category_code" value=edit_category/>
-                    <input name="amount" type="number" step="50" min="0.01"
+                    <input name="amount" type="number" step=step min="0"
                            value=row_amount
                            style=format!("width:110px;{}", INPUT_STYLE_MONO)/>
                     <button class="btn sm" type="submit">
@@ -1206,6 +1388,7 @@ fn render_budget_row(
                 </ActionForm>
                 {render_budget_delete(
                     delete_action,
+                    delete_currency,
                     delete_period,
                     delete_category,
                     delete_confirm,
@@ -1222,6 +1405,9 @@ fn render_budget(
 ) -> impl IntoView {
     let locale = use_locale();
     let m = &d.month;
+    let decimals = d.currency.decimals;
+    let symbol = d.currency.symbol.clone();
+    let currency_code = d.currency.code.clone();
     let period = m.period.clone();
     let categories_for_form = d.categories.clone();
     // Owned-string lookup so the closures below don't capture a borrow into
@@ -1255,9 +1441,10 @@ fn render_budget(
             locale,
             "finance.budget.pool_sub",
             &[
+                ("symbol", &symbol),
                 ("count", &budgets_count.to_string()),
-                ("used", &fmt_int(m.expense)),
-                ("total", &fmt_int(m.budget_total)),
+                ("used", &fmt_minor_compact(m.expense, decimals)),
+                ("total", &fmt_minor_compact(m.budget_total, decimals)),
             ],
         )
     };
@@ -1276,7 +1463,16 @@ fn render_budget(
         "finance.budget.card.next_sub",
         &[("period", &next_period_label)],
     );
+    let editor_currency = currency_code.clone();
     let editor_period = period.clone();
+    let import_currency = currency_code.clone();
+    let row_currency = currency_code.clone();
+    let unbudgeted_symbol = symbol.clone();
+    let planner_symbol = symbol.clone();
+    // Distinct clone for the budget-row map (a `<Card>` child); `symbol`
+    // itself is still needed by the editor card's amount label below.
+    let row_symbol = symbol.clone();
+    let step = amount_step(decimals);
 
     view! {
         <div class="grid-2">
@@ -1287,6 +1483,7 @@ fn render_budget(
                             <p class="muted">{empty_period_hint}</p>
                             <div class="hstack" style="gap:8px">
                                 <ActionForm action=import_budgets attr:style="display:inline">
+                                    <input type="hidden" name="currency_code" value=import_currency.clone()/>
                                     <input type="hidden" name="source_period" value=import_source.clone()/>
                                     <input type="hidden" name="target_period" value=import_target.clone()/>
                                     <button class="btn primary" type="submit">
@@ -1302,7 +1499,7 @@ fn render_budget(
                     view! {
                         <div class="vstack" style="gap:14px">
                             {budgets.into_iter()
-                                .map(|b| render_budget_row(b, &period, &cat_lookup, set_budget))
+                                .map(|b| render_budget_row(b, &row_currency, &period, decimals, &row_symbol, &cat_lookup, set_budget))
                                 .collect_view()}
                             {if unbudgeted.is_empty() {
                                 view! { <span></span> }.into_any()
@@ -1310,11 +1507,14 @@ fn render_budget(
                                 view! {
                                     <div style="margin-top:6px;padding-top:10px;border-top:1px dashed var(--border)">
                                         <div class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">{t(locale, "finance.budget.unbudgeted")}</div>
-                                        {unbudgeted.into_iter().map(|c| view! {
-                                            <div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0">
-                                                <span>{c.name.clone()}</span>
-                                                <span class="mono">{format!("¥{}", fmt_int(c.value))}</span>
-                                            </div>
+                                        {unbudgeted.into_iter().map(|c| {
+                                            let amount = format!("{}{}", unbudgeted_symbol, fmt_minor_compact(c.value, decimals));
+                                            view! {
+                                                <div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0">
+                                                    <span>{c.name.clone()}</span>
+                                                    <span class="mono">{amount}</span>
+                                                </div>
+                                            }
                                         }).collect_view()}
                                     </div>
                                 }.into_any()
@@ -1328,6 +1528,7 @@ fn render_budget(
                 <Card title=t(locale, "finance.budget.card.edit_title") code="FIN-BDG-EDIT"
                       sub=t(locale, "finance.budget.card.edit_sub")>
                     <ActionForm action=set_budget attr:class="vstack" attr:style="gap:10px">
+                        <input type="hidden" name="currency_code" value=editor_currency/>
                         <div style="display:grid;grid-template-columns:1fr 1.5fr 1fr auto;gap:10px;align-items:end">
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.period")}</span>
@@ -1346,8 +1547,8 @@ fn render_budget(
                                 </select>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.amount_yuan")}</span>
-                                <input name="amount" type="number" step="50" min="0"
+                                <span class="mono dim" style=FIELD_LABEL>{tf(locale, "finance.field.amount_in", &[("symbol", &symbol)])}</span>
+                                <input name="amount" type="number" step=step min="0"
                                        placeholder="3200" style=INPUT_STYLE_MONO/>
                             </label>
                             <button class="btn primary" type="submit">
@@ -1365,13 +1566,14 @@ fn render_budget(
                         view! {
                             <div class="vstack" style="gap:10px">
                                 {next_month_planner.into_iter().map(|(name, code, suggested)| {
+                                    let amount = format!("{}{}", planner_symbol, fmt_minor_compact(suggested, decimals));
                                     view! {
                                         <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:13px">
                                             <span>
                                                 {name}
                                                 <span class="mono dim" style="margin-left:6px;font-size:10.5px">{code}</span>
                                             </span>
-                                            <span class="mono">{format!("¥{}", fmt_int(suggested))}</span>
+                                            <span class="mono">{amount}</span>
                                         </div>
                                     }
                                 }).collect_view()}
@@ -1422,6 +1624,9 @@ fn render_accounts(
     update_account: ServerAction<UpdateAccount>,
     delete_account: ServerAction<DeleteAccount>,
 ) -> impl IntoView {
+    let decimals = d.currency.decimals;
+    let symbol = d.currency.symbol.clone();
+    let currency_code = d.currency.code.clone();
     let pairs: Vec<(Account, AccountStats)> = d
         .accounts
         .iter()
@@ -1429,16 +1634,20 @@ fn render_accounts(
         .zip(d.account_stats.iter().cloned())
         .collect();
     view! {
-        {render_account_manager(create_account)}
+        {render_account_manager(create_account, currency_code.clone(), decimals)}
         <div class="grid-3" style="margin-top:20px">
             {pairs.into_iter().map(|(a, s)| {
-                render_account_card(a, s, update_account, delete_account)
+                render_account_card(a, s, update_account, delete_account, decimals, symbol.clone())
             }).collect_view()}
         </div>
     }
 }
 
-fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl IntoView {
+fn render_account_manager(
+    create_account: ServerAction<CreateAccount>,
+    currency_code: String,
+    decimals: u8,
+) -> impl IntoView {
     let locale = use_locale();
     let open = RwSignal::new(false);
     let toggle = move |_| open.update(|v| *v = !*v);
@@ -1453,6 +1662,7 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
             last_v.set(v);
         }
     });
+    let step = amount_step(decimals);
     view! {
         <Card title=t(locale, "finance.account.manager.title") code="FIN-ACC-MGR" sub=t(locale, "finance.account.manager.sub")>
             <div class="hstack" style="margin-bottom:10px">
@@ -1461,8 +1671,14 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
                 </button>
             </div>
             {move || if open.get() {
+                // Per-render clones — the `<ActionForm>` children closure
+                // moves whatever it captures, so the outer reactive closure
+                // must hand it fresh values to stay `FnMut`.
+                let currency_code = currency_code.clone();
+                let step = step.clone();
                 view! {
                     <ActionForm action=create_account attr:class="vstack" attr:style="gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+                        <input type="hidden" name="currency_code" value=currency_code.clone()/>
                         <input type="hidden" name="code" value=""/>
                         <input type="hidden" name="tone" value=""/>
                         <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px">
@@ -1483,7 +1699,7 @@ fn render_account_manager(create_account: ServerAction<CreateAccount>) -> impl I
                             </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.opening_balance")}</span>
-                                <input name="opening_balance" type="number" step="0.01" value="0"
+                                <input name="opening_balance" type="number" step=step value="0"
                                        style=INPUT_STYLE_MONO/>
                             </label>
                         </div>
@@ -1510,6 +1726,8 @@ fn render_account_card(
     s: AccountStats,
     update_account: ServerAction<UpdateAccount>,
     delete_account: ServerAction<DeleteAccount>,
+    decimals: u8,
+    symbol: String,
 ) -> impl IntoView {
     let locale = use_locale();
     let tone = Tone::parse(&a.tone);
@@ -1525,12 +1743,17 @@ fn render_account_card(
     // inside `value=` (AGENTS.md "Don't put a `move ||`-returning attribute
     // on a child element passed through a prop"). render_accounts re-runs
     // on each ledger refetch — that's a fresh value capture each time.
+    let currency_code = a.currency_code.clone();
     let code = a.code.clone();
     let name = a.name.clone();
     let type_str = a.r#type.clone();
     let tone_str = a.tone.clone();
     let card_title = a.name.clone();
     let card_sub = a.r#type.clone();
+    let balance_text = format!("{}{}", symbol, fmt_minor(a.balance, decimals));
+    let delete_ref = format!("{}/{}", a.currency_code, a.code);
+    // ChartBars takes f64 heights; the per-day spend is minor-unit i64.
+    let history: Vec<f64> = s.history_14d.iter().map(|&v| v as f64).collect();
     let confirm_msg = tf(
         locale,
         "finance.account.confirm_delete",
@@ -1539,14 +1762,14 @@ fn render_account_card(
     view! {
         <Card title=card_title sub=card_sub>
             <div class="mono" style="font-size:24px;font-weight:600;letter-spacing:-0.02em">
-                "¥" {fmt_money(a.balance)}
+                {balance_text}
             </div>
             <div class="hstack" style="margin-top:10px;gap:10px">
                 <UiTag tone=tone>{a.r#type.clone()}</UiTag>
                 <span class="mono dim" style="font-size:10.5px">{last_seen}</span>
             </div>
             <div style="margin-top:14px">
-                <ChartBars data=s.history_14d/>
+                <ChartBars data=history/>
             </div>
             <div class="hstack" style="margin-top:12px;gap:6px;flex-wrap:wrap">
                 <details style="flex:1;min-width:0">
@@ -1554,6 +1777,7 @@ fn render_account_card(
                         <Icon kind=IconKind::Settings size=12/>{t(locale, "finance.action.edit")}
                     </summary>
                     <ActionForm action=update_account attr:class="vstack" attr:style="gap:8px;margin-top:8px">
+                        <input type="hidden" name="currency_code" value=currency_code/>
                         <input type="hidden" name="code" value=code.clone()/>
                         <label class="vstack" style="gap:4px">
                             <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
@@ -1587,7 +1811,7 @@ fn render_account_card(
                         </div>
                     </ActionForm>
                 </details>
-                <RowDeleteAction action=delete_account value=a.code.clone() field="code"
+                <RowDeleteAction action=delete_account value=delete_ref field="account_ref"
                                  confirm=confirm_msg label=t(locale, "finance.action.delete")/>
             </div>
         </Card>
@@ -1601,6 +1825,7 @@ fn render_categories(
     delete_category: ServerAction<DeleteCategory>,
 ) -> impl IntoView {
     let locale = use_locale();
+    let currency_code = d.currency.code.clone();
     // Sort by sort_order then code so the management table matches what the
     // dropdown shows. Cloning is fine — the categories vec is small (≤ ~20).
     let mut cats = d.categories.clone();
@@ -1628,8 +1853,12 @@ fn render_categories(
                 </button>
             </div>
             {move || if open.get() {
+                // Per-render clone — the `<ActionForm>` children closure moves
+                // what it captures; the outer reactive closure stays `FnMut`.
+                let currency_code = currency_code.clone();
                 view! {
                     <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+                        <input type="hidden" name="currency_code" value=currency_code.clone()/>
                         <input type="hidden" name="code" value=""/>
                         <input type="hidden" name="tone" value=""/>
                         <input type="hidden" name="sort_order" value=next_sort.to_string()/>
@@ -1692,11 +1921,13 @@ fn render_category_row(
         "finance.category.confirm_delete",
         &[("name", &c.name)],
     );
+    let currency_code = c.currency_code.clone();
     let code = c.code.clone();
     let name = c.name.clone();
     let tone_str = c.tone.clone();
     let sort_order_str = c.sort_order.to_string();
     let display_name = c.name.clone();
+    let delete_ref = format!("{}/{}", c.currency_code, c.code);
     let display_tone_label = if c.tone.is_empty() {
         "—".to_string()
     } else {
@@ -1716,6 +1947,7 @@ fn render_category_row(
                             <Icon kind=IconKind::Settings size=12/>{t(locale, "finance.action.edit")}
                         </summary>
                         <ActionForm action=update_category attr:class="vstack" attr:style="gap:8px;margin-top:8px;min-width:240px">
+                            <input type="hidden" name="currency_code" value=currency_code/>
                             <input type="hidden" name="code" value=code.clone()/>
                             <input type="hidden" name="sort_order" value=sort_order_str/>
                             <label class="vstack" style="gap:4px">
@@ -1741,7 +1973,190 @@ fn render_category_row(
                             </div>
                         </ActionForm>
                     </details>
-                    <RowDeleteAction action=delete_category value=c.code.clone() field="code"
+                    <RowDeleteAction action=delete_category value=delete_ref field="category_ref"
+                                     confirm=confirm_msg label=t(locale, "finance.action.delete")/>
+                </div>
+            </td>
+        </tr>
+    }
+}
+
+/// The currency management tab — CRUD over `fin_currency`. Each currency is an
+/// isolated finance "page"; this tab is where they're created, renamed, given
+/// a custom symbol / precision, and promoted to primary.
+fn render_currencies(
+    d: &LedgerData,
+    create_currency: ServerAction<CreateCurrency>,
+    update_currency: ServerAction<UpdateCurrency>,
+    delete_currency: ServerAction<DeleteCurrency>,
+    set_primary_currency: ServerAction<SetPrimaryCurrency>,
+) -> impl IntoView {
+    let locale = use_locale();
+    let currencies = d.currencies.clone();
+    let next_sort = currencies.iter().map(|c| c.sort_order).max().unwrap_or(0) + 1;
+    let open = RwSignal::new(false);
+    let toggle = move |_| open.update(|v| *v = !*v);
+    let last_v = RwSignal::new(0usize);
+    Effect::new(move |_| {
+        let v = create_currency.version().get();
+        if v != 0
+            && v != last_v.get_untracked()
+            && matches!(create_currency.value().get(), Some(Ok(_)))
+        {
+            open.set(false);
+            last_v.set(v);
+        }
+    });
+    view! {
+        <Card title=t(locale, "finance.currency.manager.title") code="FIN-CUR-MGR"
+              sub=t(locale, "finance.currency.manager.sub")>
+            <div class="hstack" style="margin-bottom:10px">
+                <button class="btn primary" type="button" on:click=toggle>
+                    <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.currency.new")}
+                </button>
+            </div>
+            {move || if open.get() {
+                view! {
+                    <ActionForm action=create_currency attr:class="vstack" attr:style="gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+                        <input type="hidden" name="sort_order" value=next_sort.to_string()/>
+                        <div style="display:grid;grid-template-columns:1fr 1fr 2fr 1fr;gap:10px">
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_code")}</span>
+                                <input name="code" required autofocus maxlength="8"
+                                       placeholder="USD" style=INPUT_STYLE_MONO/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_symbol")}</span>
+                                <input name="symbol" required maxlength="8"
+                                       placeholder="$" style=INPUT_STYLE/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_name")}</span>
+                                <input name="name" required maxlength="32"
+                                       placeholder=t(locale, "finance.placeholder.currency_name") style=INPUT_STYLE/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_decimals")}</span>
+                                <input name="decimals" type="number" min="0" max="8" value="2" required
+                                       style=INPUT_STYLE_MONO/>
+                            </label>
+                        </div>
+                        <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                            <ErrorSlot action=create_currency style="flex:1"/>
+                            <button class="btn ghost" type="button"
+                                    on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
+                            <button class="btn primary" type="submit">
+                                <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
+                            </button>
+                        </div>
+                    </ActionForm>
+                }.into_any()
+            } else {
+                view! { <span></span> }.into_any()
+            }}
+
+            <div class="scroll-x" style="margin-top:14px">
+                <table class="tbl">
+                    <thead>
+                        <tr>
+                            <th>{t(locale, "finance.field.currency_code")}</th>
+                            <th style="width:70px">{t(locale, "finance.field.currency_symbol")}</th>
+                            <th>{t(locale, "finance.field.currency_name")}</th>
+                            <th class="num" style="width:80px">{t(locale, "finance.field.currency_decimals")}</th>
+                            <th class="num" style="width:300px">{t(locale, "finance.field.ops")}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {currencies.into_iter().map(|c| render_currency_row(c, update_currency, delete_currency, set_primary_currency)).collect_view()}
+                    </tbody>
+                </table>
+            </div>
+        </Card>
+    }
+}
+
+/// Single row of the currency management table. `code` is immutable — the
+/// edit form only touches symbol / name / decimals / sort order.
+fn render_currency_row(
+    c: Currency,
+    update_currency: ServerAction<UpdateCurrency>,
+    delete_currency: ServerAction<DeleteCurrency>,
+    set_primary_currency: ServerAction<SetPrimaryCurrency>,
+) -> impl IntoView {
+    let locale = use_locale();
+    let is_primary = c.is_primary;
+    let edit_code = c.code.clone();
+    let primary_code = c.code.clone();
+    let delete_code = c.code.clone();
+    let symbol = c.symbol.clone();
+    let name = c.name.clone();
+    let sort_order_str = c.sort_order.to_string();
+    let decimals_value = c.decimals.to_string();
+    let display_code = c.code.clone();
+    let display_symbol = c.symbol.clone();
+    let display_name = c.name.clone();
+    let display_decimals = c.decimals.to_string();
+    let confirm_msg = tf(
+        locale,
+        "finance.currency.confirm_delete",
+        &[("name", &c.name)],
+    );
+    let primary_cell = if is_primary {
+        view! { <UiTag tone=Tone::Green>{t(locale, "finance.currency.primary")}</UiTag> }.into_any()
+    } else {
+        view! {
+            <ActionForm action=set_primary_currency attr:style="display:inline">
+                <input type="hidden" name="code" value=primary_code/>
+                <button class="btn sm" type="submit">{t(locale, "finance.currency.set_primary")}</button>
+            </ActionForm>
+        }
+        .into_any()
+    };
+    view! {
+        <tr>
+            <td class="mono">
+                {display_code}
+                {if is_primary {
+                    view! { " " <UiTag tone=Tone::Green dot=true>{t(locale, "finance.currency.primary")}</UiTag> }.into_any()
+                } else {
+                    view! { <span></span> }.into_any()
+                }}
+            </td>
+            <td class="mono">{display_symbol}</td>
+            <td>{display_name}</td>
+            <td class="num mono">{display_decimals}</td>
+            <td class="num">
+                <div class="hstack" style="gap:6px;justify-content:flex-end;flex-wrap:wrap">
+                    <details>
+                        <summary class="btn ghost" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px">
+                            <Icon kind=IconKind::Settings size=12/>{t(locale, "finance.action.edit")}
+                        </summary>
+                        <ActionForm action=update_currency attr:class="vstack" attr:style="gap:8px;margin-top:8px;min-width:240px">
+                            <input type="hidden" name="code" value=edit_code/>
+                            <input type="hidden" name="sort_order" value=sort_order_str/>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_symbol")}</span>
+                                <input name="symbol" required maxlength="8" value=symbol style=INPUT_STYLE/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_name")}</span>
+                                <input name="name" required maxlength="32" value=name style=INPUT_STYLE/>
+                            </label>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_decimals")}</span>
+                                <input name="decimals" type="number" min="0" max="8" value=decimals_value style=INPUT_STYLE_MONO/>
+                                <span class="mono dim" style="font-size:10px">{t(locale, "finance.currency.decimals_hint")}</span>
+                            </label>
+                            <div class="hstack" style="gap:8px;align-items:center">
+                                <button class="btn primary" type="submit">
+                                    <Icon kind=IconKind::Check size=12/>{t(locale, "finance.action.save")}
+                                </button>
+                                <ErrorSlot action=update_currency/>
+                            </div>
+                        </ActionForm>
+                    </details>
+                    {primary_cell}
+                    <RowDeleteAction action=delete_currency value=delete_code field="code"
                                      confirm=confirm_msg label=t(locale, "finance.action.delete")/>
                 </div>
             </td>
@@ -1751,6 +2166,8 @@ fn render_category_row(
 
 fn render_reports(d: &LedgerData) -> impl IntoView {
     let locale = use_locale();
+    let decimals = d.currency.decimals;
+    let symbol = d.currency.symbol.clone();
     let months = d.months_12.clone();
     if months.is_empty() {
         return view! {
@@ -1764,15 +2181,15 @@ fn render_reports(d: &LedgerData) -> impl IntoView {
         .iter()
         .map(|m| m.period.split('-').nth(1).unwrap_or("?").to_string())
         .collect();
-    let income_data: Vec<f64> = months.iter().map(|m| m.income).collect();
-    let expense_data: Vec<f64> = months.iter().map(|m| m.expense).collect();
+    let income_data: Vec<f64> = months.iter().map(|m| m.income as f64).collect();
+    let expense_data: Vec<f64> = months.iter().map(|m| m.expense as f64).collect();
     let last = months.last().cloned().unwrap_or(MonthBucket {
         period: d.month.period.clone(),
-        income: 0.0,
-        expense: 0.0,
-        net: 0.0,
+        income: 0,
+        expense: 0,
+        net: 0,
     });
-    let net_strip = render_net_strip(&months);
+    let net_strip = render_net_strip(&months, decimals);
 
     let category_share = render_category_share_card(d);
 
@@ -1780,10 +2197,11 @@ fn render_reports(d: &LedgerData) -> impl IntoView {
         <div class="grid-2">
             <Card title=t(locale, "finance.reports.month_title") code="FIN-RPT-01"
                   sub=tf(locale, "finance.reports.month_sub", &[
+                      ("symbol", &symbol),
                       ("count", &months.len().to_string()),
-                      ("net", &fmt_int(last.net)),
-                      ("income", &fmt_int(last.income)),
-                      ("expense", &fmt_int(last.expense)),
+                      ("net", &fmt_minor_compact(last.net, decimals)),
+                      ("income", &fmt_minor_compact(last.income, decimals)),
+                      ("expense", &fmt_minor_compact(last.expense, decimals)),
                   ])>
                 <div class="vstack" style="gap:14px">
                     <div>
@@ -1807,12 +2225,12 @@ fn render_reports(d: &LedgerData) -> impl IntoView {
 
 /// 12-month net trend rendered as coloured cells rather than `ChartBars`:
 /// `ChartBars` clamps to a 4% minimum and normalises against a positive
-/// max, so a deficit month would render the same as a +¥0 month.
-pub fn render_net_strip(months: &[MonthBucket]) -> impl IntoView {
+/// max, so a deficit month would render the same as a +0 month.
+pub fn render_net_strip(months: &[MonthBucket], decimals: u8) -> impl IntoView {
     let n = months.len();
     let cells: Vec<_> = months.iter().map(|m| {
         let mm = m.period.split('-').nth(1).unwrap_or("?").to_string();
-        let (color_var, sign, val) = net_cell_parts(m.net);
+        let (color_var, sign, val) = net_cell_parts(m.net, decimals);
         let cell_style = format!(
             "padding:6px 4px;background:var(--bg-2);border-radius:4px;color:{};text-align:center",
             color_var
@@ -1832,13 +2250,17 @@ pub fn render_net_strip(months: &[MonthBucket]) -> impl IntoView {
 }
 
 /// `(css color var, sign prefix, formatted absolute value)` for one month's
-/// net. Surplus uses `--primary-ink` (the design system has no `--green-*`
-/// — sage green lives under `--primary-*`; see `.tag.green` in styles.css).
-fn net_cell_parts(net: f64) -> (&'static str, &'static str, String) {
-    if net > 0.0 {
-        ("var(--primary-ink)", "+", fmt_int(net))
-    } else if net < 0.0 {
-        ("var(--rose-ink)", "−", fmt_int(net.abs()))
+/// net (minor units). Surplus uses `--primary-ink` (the design system has no
+/// `--green-*` — sage green lives under `--primary-*`; see `.tag.green`).
+fn net_cell_parts(net: i64, decimals: u8) -> (&'static str, &'static str, String) {
+    if net > 0 {
+        ("var(--primary-ink)", "+", fmt_minor_compact(net, decimals))
+    } else if net < 0 {
+        (
+            "var(--rose-ink)",
+            "−",
+            fmt_minor_compact(net.abs(), decimals),
+        )
     } else {
         ("var(--ink-4)", "", "0".to_string())
     }
@@ -1848,48 +2270,58 @@ fn net_cell_parts(net: f64) -> (&'static str, &'static str, String) {
 /// tab's side card and the reports tab's FIN-RPT-02 card render the identical
 /// row layout — only their surrounding `<Card>` chrome and empty state differ,
 /// so just this inner list is shared.
-fn render_category_share_rows(cats: Vec<crate::model::CategorySummary>) -> impl IntoView {
+fn render_category_share_rows(
+    cats: Vec<crate::model::CategorySummary>,
+    symbol: &str,
+    decimals: u8,
+) -> impl IntoView {
+    let rows: Vec<_> = cats
+        .into_iter()
+        .map(|c| {
+            let bar_color = Tone::parse(&c.tone).css_var();
+            let pct = (c.pct * 3.0).min(100.0);
+            let value = format!("{}{}", symbol, fmt_minor_compact(c.value, decimals));
+            view! {
+                <div>
+                    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+                        <div style="font-size:12.5px">{c.name.clone()}</div>
+                        <div class="mono" style="font-size:12px">{value} <span class="dim">{format!("· {}%", c.pct)}</span></div>
+                    </div>
+                    <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
+                </div>
+            }
+        })
+        .collect();
     view! {
         <div class="vstack" style="gap:10px">
-            {cats.into_iter().map(|c| {
-                let bar_color = Tone::parse(&c.tone).css_var();
-                let pct = (c.pct * 3.0).min(100.0);
-                view! {
-                    <div>
-                        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                            <div style="font-size:12.5px"><span>{c.name.clone()}</span></div>
-                            <div class="mono" style="font-size:12px">{format!("¥{}", fmt_int(c.value))} <span class="dim">{format!("· {}%", c.pct)}</span></div>
-                        </div>
-                        <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
-                    </div>
-                }
-            }).collect_view()}
+            {rows}
         </div>
     }
 }
 
 fn render_category_share_card(d: &LedgerData) -> impl IntoView {
     let locale = use_locale();
+    let decimals = d.currency.decimals;
+    let symbol = d.currency.symbol.clone();
     let cats = d.category_summary.clone();
-    // `.abs()` because `fmt_int` of IEEE -0.0 prints "-0".
-    let total: f64 = cats.iter().map(|c| c.value).sum::<f64>().abs();
+    let total: i64 = cats.iter().map(|c| c.value).sum::<i64>().abs();
     view! {
         <Card title=t(locale, "finance.reports.category_title") code="FIN-RPT-02"
-              sub=tf(locale, "finance.reports.category_sub", &[("total", &fmt_int(total))])>
+              sub=tf(locale, "finance.reports.category_sub", &[("symbol", &symbol), ("total", &fmt_minor_compact(total, decimals))])>
             {if cats.is_empty() {
                 view! { <p class="muted">{t(locale, "finance.reports.category_empty")}</p> }.into_any()
             } else {
-                render_category_share_rows(cats).into_any()
+                render_category_share_rows(cats, &symbol, decimals).into_any()
             }}
         </Card>
     }
 }
 
 /// Suggested per-category budgets for next month, derived from the last
-/// 3 calendar months of activity. Returns `(name, code, amount_rounded_to_50)`
-/// for every category that had any expense in the window. Empty when there's
-/// no 3-month history yet (fresh install).
-fn next_month_plan(d: &LedgerData) -> Vec<(String, String, f64)> {
+/// 3 calendar months of activity. Returns `(name, code, amount_minor)` for
+/// every category that had any expense in the window, rounded to a tidy grid.
+/// Empty when there's no 3-month history yet (fresh install).
+fn next_month_plan(d: &LedgerData) -> Vec<(String, String, i64)> {
     use std::collections::HashMap;
     // Bucket months_12's last 3 months: months_12 is oldest → newest, so the
     // tail-3 is the recent quarter.
@@ -1899,33 +2331,29 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, f64)> {
     }
     // months_12 only carries totals, not per-category. For the per-category
     // average we approximate using the current month's category_summary
-    // (which is signed, accurate, and already aggregated). Scaling the
-    // current-month spend by the elapsed-day ratio gives the user a
-    // forward-looking estimate without a second SQL pass.
-    //
-    // Note: this is a simplification — a more accurate planner would track
-    // per-category-per-month rollups, but that's a 12×N row payload for
-    // marginal gain. The current heuristic is "what would the rest of this
-    // month look like if today's pace continued?", clamped to a 50-yuan grid.
+    // (signed, accurate, already aggregated). Scaling the current-month spend
+    // by the elapsed-day ratio gives a forward-looking estimate without a
+    // second SQL pass — "what would the rest of this month look like if
+    // today's pace continued?", snapped to a tidy 50-major-unit grid.
     let elapsed = d.month.days_elapsed.max(1) as f64;
-    // Approximate days in the user's current month (28..31). Erring high
-    // (31) gives a more conservative budget suggestion. We don't import
-    // `time` here — just use 31 as a static ceiling.
     let projected_factor = (31.0 / elapsed).min(2.5);
-    let mut by_code: HashMap<String, (String, f64)> = HashMap::new();
+    // 50 major units, expressed in the currency's minor units.
+    let grid = major_to_minor(50, d.currency.decimals);
+    let grid_f = grid as f64;
+    let mut by_code: HashMap<String, (String, i64)> = HashMap::new();
     for c in &d.category_summary {
-        let projected = c.value * projected_factor;
-        // Round to nearest 50, with a floor of 50 to avoid 0-budget noise.
-        let suggested = ((projected / 50.0).round() * 50.0).max(50.0);
+        let projected = c.value as f64 * projected_factor;
+        // Round to nearest grid step, with a floor of one step to avoid noise.
+        let suggested = ((projected / grid_f).round() * grid_f).max(grid_f) as i64;
         by_code.insert(c.code.clone(), (c.name.clone(), suggested));
     }
-    let mut out: Vec<(String, String, f64)> = by_code
+    let mut out: Vec<(String, String, i64)> = by_code
         .into_iter()
         .map(|(code, (name, suggested))| (name, code, suggested))
         .collect();
     // Largest suggested first — the user's attention is most valuable on
     // the categories that drive most of the spend.
-    out.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by_key(|entry| std::cmp::Reverse(entry.2));
     out
 }
 
@@ -1933,27 +2361,13 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, f64)> {
 /// that day in UTC. Empty / malformed input yields `None`. Pure math, safe
 /// on wasm32.
 fn parse_date_floor(s: &str) -> Option<i64> {
-    parse_date_components(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 0))
+    parse_ymd(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 0))
 }
 
 /// Same as `parse_date_floor` but at the END of the day (23:59:59 UTC) so
 /// `t.occurred_at <= to_ts` is an inclusive day filter.
 fn parse_date_ceiling(s: &str) -> Option<i64> {
-    parse_date_components(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 86_399))
-}
-
-fn parse_date_components(s: &str) -> Option<(i32, u8, u8)> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return None;
-    }
-    let y: i32 = s[..4].parse().ok()?;
-    let m: u8 = s[5..7].parse().ok()?;
-    let d: u8 = s[8..10].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    Some((y, m, d))
+    parse_ymd(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 86_399))
 }
 
 fn date_to_unix(year: i32, month: u8, day: u8, offset_seconds: i64) -> Option<i64> {
@@ -1962,25 +2376,26 @@ fn date_to_unix(year: i32, month: u8, day: u8, offset_seconds: i64) -> Option<i6
 
 // CSV export — pure-Rust so the same code path runs on SSR (initial href is
 // rendered as part of the page) and hydrate (refreshed reactively when the
-// resource refetches).
-fn csv_data_uri(txns: &[Txn]) -> String {
+// resource refetches). Amounts are written at the scoped currency's precision.
+fn csv_data_uri(txns: &[Txn], decimals: u8) -> String {
     use std::fmt::Write as _;
 
     let mut csv = String::with_capacity(80 + txns.len() * 96);
-    csv.push_str("doc_id,occurred_at,merchant,category,account,amount,tag,note\n");
+    csv.push_str("doc_id,occurred_at,merchant,category,account,currency,amount,tag,note\n");
     for t in txns {
         let occurred = unix_to_ymdhm(t.occurred_at)
             .map(|(y, m, d, hh, mm)| format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:00Z"))
             .unwrap_or_default();
         let _ = writeln!(
             csv,
-            "{},{},{},{},{},{:.2},{},{}",
+            "{},{},{},{},{},{},{},{},{}",
             t.doc_id,
             occurred,
             csv_escape(&t.merchant),
             t.category_code,
             t.account_code,
-            t.amount,
+            t.currency_code,
+            fmt_minor_raw(t.amount, decimals),
             t.tag,
             csv_escape(t.note.as_deref().unwrap_or("")),
         );
@@ -2089,21 +2504,23 @@ mod tests {
     fn csv_data_uri_contains_encoded_header_and_rows() {
         let txns = [Txn {
             doc_id: "FIN-1".into(),
+            currency_code: "CNY".into(),
             occurred_at: 0,
             merchant: "a,b".into(),
             category_code: "F&B".into(),
             account_code: "ACC-01".into(),
-            amount: -12.3,
+            amount: -1_230,
             tag: "exp".into(),
             note: Some("x\"y".into()),
             linked_doc_id: None,
         }];
 
-        let uri = csv_data_uri(&txns);
+        let uri = csv_data_uri(&txns, 2);
 
         assert!(uri.starts_with("data:text/csv;charset=utf-8,doc_id%2Coccurred_at"));
         assert!(uri.contains("FIN-1%2C1970-01-01T00%3A00%3A00Z"));
         assert!(uri.contains("%22a%2Cb%22"));
+        // -1230 minor units at 2 decimals → "-12.30"; `,exp,` follows.
         assert!(uri.contains("-12.30%2Cexp%2C%22x%22%22y%22"));
     }
 
@@ -2117,6 +2534,14 @@ mod tests {
     fn next_period_handles_december_rollover() {
         assert_eq!(next_period("2025-12"), "2026-01");
         assert_eq!(next_period("2026-05"), "2026-06");
+    }
+
+    #[test]
+    fn amount_step_scales_with_precision() {
+        assert_eq!(amount_step(0), "1");
+        assert_eq!(amount_step(1), "0.1");
+        assert_eq!(amount_step(2), "0.01");
+        assert_eq!(amount_step(8), "0.00000001");
     }
 
     #[test]
@@ -2142,38 +2567,24 @@ mod tests {
 
     #[test]
     fn net_cell_surplus_uses_primary_ink_and_plus_sign() {
-        let (color, sign, val) = net_cell_parts(1_234.56);
-        // Project has no `--green-*` family; the sage-green tone lives in
-        // `--primary-*`. Asserting the exact token guards against a future
-        // regression that re-introduces `--green-ink` (which silently
-        // resolves to nothing in CSS, leaving surplus months uncoloured).
+        // 123_456 minor units at 2 decimals → 1,234.56 → compact "1,235".
+        let (color, sign, val) = net_cell_parts(123_456, 2);
         assert_eq!(color, "var(--primary-ink)");
         assert_eq!(sign, "+");
-        assert_eq!(val, "1,235"); // fmt_int rounds .56 → 1,235
+        assert_eq!(val, "1,235");
     }
 
     #[test]
     fn net_cell_deficit_uses_rose_ink_and_minus_sign() {
-        let (color, sign, val) = net_cell_parts(-1_234.56);
+        let (color, sign, val) = net_cell_parts(-123_456, 2);
         assert_eq!(color, "var(--rose-ink)");
         assert_eq!(sign, "−"); // U+2212 minus, not ASCII '-'
-                               // Magnitude only — the sign lives in the `sign` slot.
         assert_eq!(val, "1,235");
     }
 
     #[test]
     fn net_cell_zero_renders_dim_no_sign() {
-        let (color, sign, val) = net_cell_parts(0.0);
-        assert_eq!(color, "var(--ink-4)");
-        assert_eq!(sign, "");
-        assert_eq!(val, "0");
-    }
-
-    #[test]
-    fn net_cell_negative_zero_treated_as_zero() {
-        // Without the explicit `< 0.0` check, an IEEE -0.0 would route to
-        // the deficit branch and show "−0".
-        let (color, sign, val) = net_cell_parts(-0.0);
+        let (color, sign, val) = net_cell_parts(0, 2);
         assert_eq!(color, "var(--ink-4)");
         assert_eq!(sign, "");
         assert_eq!(val, "0");

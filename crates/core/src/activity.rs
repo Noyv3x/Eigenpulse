@@ -14,6 +14,11 @@ pub struct TodayActivity {
 
 /// Mirrors the `activity` table column-for-column so `sqlx::FromRow` can
 /// decode a row straight into it — no hand-written tuple mapping.
+///
+/// `amount` stays `f64` even though finance now writes integer minor units:
+/// the `activity` column keeps REAL affinity, and every value finance writes
+/// is a whole number well within `f64`'s exact-integer range. Consumers cast
+/// to `i64` and format with `currency_code`'s precision.
 #[derive(Clone, Debug, PartialEq, sqlx::FromRow)]
 pub struct TodayActivityRow {
     pub occurred_at: i64,
@@ -21,6 +26,9 @@ pub struct TodayActivityRow {
     pub doc_id: String,
     pub summary: String,
     pub amount: Option<f64>,
+    /// Currency of the source transaction (finance rows only); `None` for
+    /// non-finance modules and for finance rows with no monetary amount.
+    pub currency_code: Option<String>,
     pub status: Option<String>,
     pub link_doc: Option<String>,
 }
@@ -44,7 +52,7 @@ pub async fn load_today_activity(
         TodayActivityOrder::Desc => "DESC",
     };
     let mut sql = format!(
-        "SELECT occurred_at, module, doc_id, summary, amount, status, link_doc
+        "SELECT occurred_at, module, doc_id, summary, amount, currency_code, status, link_doc
            FROM activity
           WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
           ORDER BY occurred_at {direction}"
@@ -75,6 +83,7 @@ mod tests {
                 doc_id TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 amount REAL,
+                currency_code TEXT,
                 status TEXT,
                 link_doc TEXT
             )",

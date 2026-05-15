@@ -6,7 +6,7 @@ mod view;
 #[cfg(feature = "ssr")]
 mod api;
 
-pub use model::{CategorySummary, MonthBucket};
+pub use model::{CategorySummary, Currency, MonthBucket};
 pub use view::{render_net_strip, FinanceView};
 
 #[cfg(feature = "ssr")]
@@ -14,9 +14,10 @@ pub use api::open_api;
 #[cfg(feature = "ssr")]
 pub use server_fns::{
     add_transfer_inner, add_txn_inner, create_account_inner, create_category_inner,
-    delete_account_inner, delete_category_inner, delete_txn_inner, load_month_buckets_12,
-    parse_occurred_at, set_budget_inner, update_account_inner, update_category_inner,
-    update_txn_inner, AddTxnFields, UpdateTxnFields,
+    create_currency_inner, delete_account_inner, delete_category_inner, delete_currency_inner,
+    delete_txn_inner, list_currencies_inner, load_month_buckets_12, parse_occurred_at,
+    resolve_currency, set_budget_inner, set_primary_currency_inner, update_account_inner,
+    update_category_inner, update_currency_inner, update_txn_inner, AddTxnFields, UpdateTxnFields,
 };
 
 #[cfg(feature = "ssr")]
@@ -33,7 +34,13 @@ mod ssr_module {
         }
 
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[("001_finance", include_str!("../migrations/001_finance.sql"))]
+            &[
+                ("001_finance", include_str!("../migrations/001_finance.sql")),
+                (
+                    "002_multi_currency",
+                    include_str!("../migrations/002_multi_currency.sql"),
+                ),
+            ]
         }
 
         fn open_api(&self, state: AppState) -> axum::Router<AppState> {
@@ -72,6 +79,7 @@ mod ssr_module {
                     summary TEXT NOT NULL,
                     status TEXT,
                     amount REAL,
+                    currency_code TEXT,
                     link_doc TEXT
                 )",
             )
@@ -98,7 +106,9 @@ mod ssr_module {
         #[tokio::test]
         async fn initial_migration_has_empty_finance_records_but_keeps_sequence() {
             let pool = migrated_pool().await;
-            let counts = [
+            // The 002 migration ships no user data — txns / budgets / accounts
+            // all start empty.
+            let empty = [
                 (
                     "fin_txn",
                     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fin_txn")
@@ -120,17 +130,34 @@ mod ssr_module {
                         .await
                         .unwrap(),
                 ),
-                (
-                    "fin_category",
-                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fin_category")
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap(),
-                ),
             ];
-            for (table, count) in counts {
+            for (table, count) in empty {
                 assert_eq!(count, 0, "{table} should start empty");
             }
+
+            // 002_multi_currency.sql seeds exactly one currency (CNY) and one
+            // reserved transfer category (CNY/TFR) — both are module plumbing,
+            // not user data.
+            let currency_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_currency")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(currency_count, 1, "002 seeds the CNY currency");
+            let category_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_category")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                category_count, 1,
+                "002 seeds the reserved CNY/TFR transfer category"
+            );
+            let tfr_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM fin_category WHERE currency_code = 'CNY' AND code = 'TFR'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(tfr_count, 1, "the seeded category is CNY/TFR");
 
             let activity_count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM activity WHERE module = 'FIN'")

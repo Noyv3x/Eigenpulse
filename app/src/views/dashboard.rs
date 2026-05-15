@@ -1,10 +1,10 @@
-use ep_core::{fmt_int, IconKind};
-// `fmt_ts_hm` is consumed only inside the
-// `#[cfg(feature = "ssr")]` body of `load_dashboard`; importing them at
-// module scope would warn on the wasm32 hydrate target where the body is
-// replaced by an `ssr-only` stub.
+use ep_core::{fmt_minor_compact, IconKind};
+// `fmt_ts_hm` is consumed only inside the `#[cfg(feature = "ssr")]` body of
+// `load_dashboard`; importing it at module scope would warn on the wasm32
+// hydrate target where the body is replaced by an `ssr-only` stub.
 #[cfg(feature = "ssr")]
 use ep_core::{fmt_ts_hm, server_err};
+use ep_finance::Currency;
 use ep_i18n::{server_fn_error_text, t, use_locale};
 use ep_ui::{
     Card, Direction, EmptyState, Kpi, PageHead, SectionLabel, SkeletonCard, SkeletonKpi, Tag,
@@ -15,13 +15,17 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DashboardData {
-    pub savings: f64,
+    /// Finance figures are scoped to the primary currency, in its minor units.
+    pub savings: i64,
     pub budget_pct: u32,
-    pub budget_remain: f64,
+    pub budget_remain: i64,
     pub today_events: u32,
     pub weekly_workouts: u32,
     pub weekly_learning: u32,
     pub recent: Vec<ActivityRow>,
+    /// Every currency, so the activity feed can format each row's amount with
+    /// the right symbol and precision.
+    pub currencies: Vec<Currency>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,11 +35,22 @@ pub struct ActivityRow {
     pub doc_id: String,
     pub summary: String,
     pub link_doc: Option<String>,
-    pub amount: Option<f64>,
+    /// Signed minor-unit amount (finance rows only).
+    pub amount: Option<i64>,
+    /// Currency of the amount; `None` for non-finance rows.
+    pub currency_code: Option<String>,
 }
 
 #[cfg(feature = "ssr")]
-type ActivityQueryRow = (i64, String, String, String, Option<String>, Option<f64>);
+type ActivityQueryRow = (
+    i64,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<f64>,
+    Option<String>,
+);
 
 #[server(LoadDashboard, "/api/_internal/dsh", "Url", "load_dashboard")]
 pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
@@ -44,66 +59,83 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
         let pool = &state.db;
-        let income: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_txn
-              WHERE amount > 0 AND tag='inc'
+        // Cross-module aggregate view: finance KPIs show the primary currency
+        // only — there is no conversion, so summing across currencies would
+        // be meaningless.
+        let primary = ep_finance::resolve_currency(pool, "").await?;
+        // Eight independent read-only queries — fan out via tokio::try_join!
+        // so the request pays one slowest-query latency instead of eight.
+        let income_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM fin_txn
+              WHERE currency_code = ?1 AND amount > 0 AND tag='inc'
                 AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
         )
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
-        let expense: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(-amount), 0.0) FROM fin_txn
-              WHERE tag = 'exp'
+        .bind(&primary.code)
+        .fetch_one(pool);
+        let expense_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(-amount), 0) FROM fin_txn
+              WHERE currency_code = ?1 AND tag = 'exp'
                 AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
         )
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
-        let savings = income - expense;
-        let budget_total: f64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(amount), 0.0) FROM fin_budget
-              WHERE period = strftime('%Y-%m','now','localtime')",
+        .bind(&primary.code)
+        .fetch_one(pool);
+        let budget_total_q = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(amount), 0) FROM fin_budget
+              WHERE currency_code = ?1 AND period = strftime('%Y-%m','now','localtime')",
         )
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
-        let budget_pct = if budget_total > 0.0 {
-            (expense / budget_total * 100.0).round() as u32
-        } else {
-            0
-        };
-        let budget_remain = (budget_total - expense).max(0.0);
-        let today_events: i64 = sqlx::query_scalar(
+        .bind(&primary.code)
+        .fetch_one(pool);
+        let today_events_q = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM activity
               WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')",
         )
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
-        let weekly_workouts: i64 = sqlx::query_scalar(
+        .fetch_one(pool);
+        let weekly_workouts_q = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM fit_workout
               WHERE occurred_at >= unixepoch('now','localtime','-6 days','start of day','utc')",
         )
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
-        let weekly_learning: i64 = sqlx::query_scalar(
+        .fetch_one(pool);
+        let weekly_learning_q = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM activity
               WHERE module = 'LRN'
                 AND occurred_at >= unixepoch('now','localtime','-6 days','start of day','utc')",
         )
-        .fetch_one(pool)
-        .await
-        .map_err(server_err)?;
-
-        let rows: Vec<ActivityQueryRow> = sqlx::query_as(
-            "SELECT occurred_at, module, doc_id, summary, link_doc, amount
+        .fetch_one(pool);
+        let rows_q = sqlx::query_as::<_, ActivityQueryRow>(
+            "SELECT occurred_at, module, doc_id, summary, link_doc, amount, currency_code
                FROM activity ORDER BY occurred_at DESC LIMIT 12",
         )
-        .fetch_all(pool)
-        .await
+        .fetch_all(pool);
+        let currencies_q = ep_finance::list_currencies_inner(pool);
+        let (
+            income,
+            expense,
+            budget_total,
+            today_events,
+            weekly_workouts,
+            weekly_learning,
+            rows,
+            currencies,
+        ) = tokio::try_join!(
+            income_q,
+            expense_q,
+            budget_total_q,
+            today_events_q,
+            weekly_workouts_q,
+            weekly_learning_q,
+            rows_q,
+            currencies_q,
+        )
         .map_err(server_err)?;
+        let savings = income - expense;
+        let budget_pct = if budget_total > 0 {
+            (expense as f64 / budget_total as f64 * 100.0).round() as u32
+        } else {
+            0
+        };
+        let budget_remain = (budget_total - expense).max(0);
+        // `activity.amount` keeps REAL affinity but only ever holds whole
+        // minor-unit integers — exact within f64's integer range.
         let recent = rows
             .into_iter()
             .map(|r| ActivityRow {
@@ -112,7 +144,8 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
                 doc_id: r.2,
                 summary: r.3,
                 link_doc: r.4,
-                amount: r.5,
+                amount: r.5.map(|a| a as i64),
+                currency_code: r.6,
             })
             .collect();
 
@@ -124,6 +157,7 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             weekly_workouts: weekly_workouts.max(0) as u32,
             weekly_learning: weekly_learning.max(0) as u32,
             recent,
+            currencies,
         })
     }
     #[cfg(not(feature = "ssr"))]
@@ -162,13 +196,37 @@ pub fn DashboardView() -> impl IntoView {
 
 fn render_body(d: DashboardData) -> impl IntoView {
     let locale = use_locale();
+    // Primary-currency symbol/precision for the finance KPIs.
+    let (primary_symbol, primary_decimals) = d
+        .currencies
+        .iter()
+        .find(|c| c.is_primary)
+        .map(|c| (c.symbol.clone(), c.decimals))
+        .unwrap_or_else(|| (String::new(), 2));
+    // code → (symbol, decimals) for the mixed-currency activity feed.
+    let cur_map: std::collections::HashMap<String, (String, u8)> = d
+        .currencies
+        .iter()
+        .map(|c| (c.code.clone(), (c.symbol.clone(), c.decimals)))
+        .collect();
     let recent = d.recent.clone();
+    let savings_value = format!(
+        "{}{}",
+        primary_symbol,
+        fmt_minor_compact(d.savings, primary_decimals)
+    );
+    let budget_remain_text = format!(
+        "{}{} {}",
+        primary_symbol,
+        fmt_minor_compact(d.budget_remain, primary_decimals),
+        t(locale, "app.dashboard.kpi.budget_remain_suffix")
+    );
     view! {
         <div class="kpi-grid">
-            <Kpi code="FIN-K01" label=t(locale, "app.dashboard.kpi.monthly_savings") value=format!("¥{}", fmt_int(d.savings))
+            <Kpi code="FIN-K01" label=t(locale, "app.dashboard.kpi.monthly_savings") value=savings_value
                  delta=t(locale, "app.dashboard.kpi.current_month") dir=Direction::Flat/>
             <Kpi code="FIN-K02" label=t(locale, "app.dashboard.kpi.budget_usage") value=format!("{}", d.budget_pct) unit="%"
-                 delta=format!("¥{} {}", fmt_int(d.budget_remain), t(locale, "app.dashboard.kpi.budget_remain_suffix")) dir=Direction::Flat/>
+                 delta=budget_remain_text dir=Direction::Flat/>
             <Kpi code="TDY-K01" label=t(locale, "app.dashboard.kpi.today_events") value=format!("{}", d.today_events)
                  unit=t(locale, "app.dashboard.unit.entries").to_string()
                  delta=t(locale, "app.dashboard.kpi.since_midnight") dir=Direction::Flat/>
@@ -212,10 +270,16 @@ fn render_body(d: DashboardData) -> impl IntoView {
                                         "LRN" => ep_core::Tone::Blue,
                                         _ => ep_core::Tone::None,
                                     };
-                                    let amt = match r.amount {
-                                        Some(v) if v >= 0.0 => view! { <td class="num amt-pos">{format!("+¥{}", fmt_int(v))}</td> }.into_any(),
-                                        Some(v) => view! { <td class="num amt-neg">{format!("−¥{}", fmt_int(v.abs()))}</td> }.into_any(),
-                                        None => view! { <td class="num dim">"—"</td> }.into_any(),
+                                    let (amt_cls, amt_text) = match r.amount {
+                                        Some(v) => {
+                                            let (sym, dec) = r.currency_code.as_deref()
+                                                .and_then(|c| cur_map.get(c))
+                                                .cloned()
+                                                .unwrap_or_else(|| (String::new(), 2));
+                                            let (cls, sign) = if v >= 0 { ("num amt-pos", "+") } else { ("num amt-neg", "−") };
+                                            (cls, format!("{sign}{sym}{}", fmt_minor_compact(v.abs(), dec)))
+                                        }
+                                        None => ("num dim", "—".to_string()),
                                     };
                                     let _ = r.doc_id;
                                     let _ = r.link_doc;
@@ -224,7 +288,7 @@ fn render_body(d: DashboardData) -> impl IntoView {
                                             <td class="mono dim">{r.time}</td>
                                             <td><Tag tone=tone>{r.module.clone()}</Tag></td>
                                             <td>{r.summary.clone()}</td>
-                                            {amt}
+                                            <td class=amt_cls>{amt_text}</td>
                                         </tr>
                                     }
                                 }).collect_view()}
