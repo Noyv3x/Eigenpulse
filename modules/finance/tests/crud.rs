@@ -209,7 +209,7 @@ async fn pool_helper_applies_finance_migrations() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 3, "expected all finance migrations to be ledgered");
+    assert_eq!(n, 4, "expected all finance migrations to be ledgered");
 }
 
 /// Idempotency: running the migrations a second time should be a no-op,
@@ -227,7 +227,50 @@ async fn pool_helper_is_idempotent_on_double_apply() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 3);
+    assert_eq!(n, 4);
+}
+
+#[tokio::test]
+async fn duplicate_currency_code_reports_domain_error() {
+    let pool = make_test_pool().await.expect("pool");
+    let err = ep_finance::create_currency_inner(
+        &pool,
+        "CNY".into(),
+        "¥".into(),
+        "duplicate".into(),
+        2,
+        0,
+    )
+    .await
+    .expect_err("duplicate code should be rejected");
+
+    assert_eq!(
+        server_fn_error_text_en(&err),
+        "Currency code 'CNY' already exists"
+    );
+}
+
+#[tokio::test]
+async fn list_currencies_orders_primary_first() {
+    let pool = make_test_pool().await.expect("pool");
+    ep_finance::create_currency_inner(&pool, "USD".into(), "$".into(), "".into(), 2, 0)
+        .await
+        .expect("usd");
+    ep_finance::create_currency_inner(&pool, "ETH".into(), "ETH".into(), "".into(), 18, 10)
+        .await
+        .expect("eth");
+    ep_finance::set_primary_currency_inner(&pool, "ETH".into())
+        .await
+        .expect("set primary");
+
+    let codes: Vec<String> = ep_finance::list_currencies_inner(&pool)
+        .await
+        .expect("list currencies")
+        .into_iter()
+        .map(|c| c.code)
+        .collect();
+
+    assert_eq!(codes, ["ETH", "CNY", "USD"]);
 }
 
 /// `seed_account` + `fetch_balance` round-trip. Cheap fixture-helper test

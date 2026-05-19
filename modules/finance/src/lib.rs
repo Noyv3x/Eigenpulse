@@ -45,6 +45,10 @@ mod ssr_module {
                     "003_money_text",
                     include_str!("../migrations/003_money_text.sql"),
                 ),
+                (
+                    "004_currency_remark",
+                    include_str!("../migrations/004_currency_remark.sql"),
+                ),
             ]
         }
 

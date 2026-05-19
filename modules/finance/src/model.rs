@@ -63,14 +63,15 @@ pub const TRANSFER_CATEGORY_CODE: &str = "TFR";
 /// A currency — the top-level partition of the finance module. Accounts,
 /// categories, transactions and budgets each belong to exactly one currency,
 /// and currencies never convert into one another ("每个货币独立分页"). `code`
-/// is the immutable identifier; `symbol`, `name`, `decimals` and `sort_order`
+/// is the immutable identifier; `symbol`, `remark`, `decimals` and `sort_order`
 /// are user-editable.
 #[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Currency {
     pub code: String,
     pub symbol: String,
-    pub name: String,
+    /// Optional user-facing note. The code remains the primary label.
+    pub remark: String,
     /// Minor-unit precision: how many fractional digits this currency keeps —
     /// `2` for yuan/dollar cents, `0` for yen, `8` for BTC, `18` for ETH and
     /// many ERC-20 style assets. Validated to `0..=18` on every write.

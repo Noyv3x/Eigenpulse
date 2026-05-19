@@ -25,7 +25,7 @@ pub(crate) const MAX_CURRENCY_CODE_CHARS: usize = 8;
 #[cfg(feature = "ssr")]
 pub(crate) const MAX_CURRENCY_SYMBOL_CHARS: usize = 8;
 #[cfg(feature = "ssr")]
-pub(crate) const MAX_CURRENCY_NAME_CHARS: usize = 32;
+pub(crate) const MAX_CURRENCY_REMARK_CHARS: usize = 32;
 /// Upper bound on a currency's minor-unit precision. 18 covers ETH / many
 /// token ledgers; amounts are stored as exact decimal TEXT and held in i128.
 #[cfg(feature = "ssr")]
@@ -226,7 +226,7 @@ pub async fn resolve_currency(pool: &SqlitePool, code: &str) -> Result<Currency,
     let code = code.trim();
     if !code.is_empty() {
         if let Some(c) = sqlx::query_as::<_, Currency>(
-            "SELECT code, symbol, name, decimals, is_primary, sort_order
+            "SELECT code, symbol, remark, decimals, is_primary, sort_order
                FROM fin_currency WHERE code = ?1",
         )
         .bind(code)
@@ -238,7 +238,7 @@ pub async fn resolve_currency(pool: &SqlitePool, code: &str) -> Result<Currency,
         }
     }
     sqlx::query_as::<_, Currency>(
-        "SELECT code, symbol, name, decimals, is_primary, sort_order
+        "SELECT code, symbol, remark, decimals, is_primary, sort_order
            FROM fin_currency ORDER BY is_primary DESC, sort_order, code LIMIT 1",
     )
     .fetch_optional(pool)
@@ -248,18 +248,18 @@ pub async fn resolve_currency(pool: &SqlitePool, code: &str) -> Result<Currency,
 }
 
 /// Pure validator for currency input. Returns the trimmed, upper-cased code
-/// plus the validated symbol / name / decimals / sort_order.
+/// plus the validated symbol / remark / decimals / sort_order.
 #[cfg(feature = "ssr")]
 fn validate_currency_input(
     code: &str,
     symbol: &str,
-    name: &str,
+    remark: &str,
     decimals: i64,
     sort_order: i64,
 ) -> Result<(String, String, String, u8, i64), ServerFnError> {
     let code = code.trim().to_uppercase();
     let symbol = symbol.trim().to_string();
-    let name = name.trim().to_string();
+    let remark = remark.trim().to_string();
     if code.len() < MIN_CURRENCY_CODE_CHARS || code.len() > MAX_CURRENCY_CODE_CHARS {
         return Err(ep_i18n::err("finance.err.currency_code_format"));
     }
@@ -272,8 +272,11 @@ fn validate_currency_input(
     if symbol.is_empty() || symbol.chars().count() > MAX_CURRENCY_SYMBOL_CHARS {
         return Err(ep_i18n::err("finance.err.currency_symbol_format"));
     }
-    if name.is_empty() || name.chars().count() > MAX_CURRENCY_NAME_CHARS {
-        return Err(ep_i18n::err("finance.err.currency_name_format"));
+    if remark.chars().count() > MAX_CURRENCY_REMARK_CHARS {
+        return Err(ep_i18n::err_with(
+            "finance.err.currency_remark_format",
+            MAX_CURRENCY_REMARK_CHARS,
+        ));
     }
     if !(0..=i64::from(MAX_CURRENCY_DECIMALS)).contains(&decimals) {
         return Err(ep_i18n::err_with(
@@ -284,14 +287,14 @@ fn validate_currency_input(
     if sort_order < 0 {
         return Err(ep_i18n::err("finance.err.currency_sort_order_invalid"));
     }
-    Ok((code, symbol, name, decimals as u8, sort_order))
+    Ok((code, symbol, remark, decimals as u8, sort_order))
 }
 
 #[cfg(feature = "ssr")]
 pub async fn list_currencies_inner(pool: &SqlitePool) -> sqlx::Result<Vec<Currency>> {
     sqlx::query_as::<_, Currency>(
-        "SELECT code, symbol, name, decimals, is_primary, sort_order
-           FROM fin_currency ORDER BY sort_order, code",
+        "SELECT code, symbol, remark, decimals, is_primary, sort_order
+           FROM fin_currency ORDER BY is_primary DESC, sort_order, code",
     )
     .fetch_all(pool)
     .await
@@ -302,13 +305,22 @@ pub async fn create_currency_inner(
     pool: &SqlitePool,
     code: String,
     symbol: String,
-    name: String,
+    remark: String,
     decimals: i64,
     sort_order: i64,
 ) -> Result<Currency, ServerFnError> {
-    let (code, symbol, name, decimals, sort_order) =
-        validate_currency_input(&code, &symbol, &name, decimals, sort_order)?;
+    let (code, symbol, remark, decimals, sort_order) =
+        validate_currency_input(&code, &symbol, &remark, decimals, sort_order)?;
     let mut tx = pool.begin().await.map_err(server_err)?;
+    let exists: i64 =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fin_currency WHERE code = ?1)")
+            .bind(&code)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    if exists != 0 {
+        return Err(ep_i18n::err_with("finance.err.currency_code_taken", &code));
+    }
     // The very first currency is primary by default; later ones are not.
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fin_currency")
         .fetch_one(&mut *tx)
@@ -316,12 +328,12 @@ pub async fn create_currency_inner(
         .map_err(server_err)?;
     let is_primary = i64::from(count == 0);
     let res = sqlx::query(
-        "INSERT INTO fin_currency (code, symbol, name, decimals, is_primary, sort_order)
+        "INSERT INTO fin_currency (code, symbol, remark, decimals, is_primary, sort_order)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(&code)
     .bind(&symbol)
-    .bind(&name)
+    .bind(&remark)
     .bind(decimals)
     .bind(is_primary)
     .bind(sort_order)
@@ -348,7 +360,7 @@ pub async fn create_currency_inner(
     Ok(Currency {
         code,
         symbol,
-        name,
+        remark,
         decimals,
         is_primary: is_primary == 1,
         sort_order,
@@ -360,12 +372,12 @@ pub async fn update_currency_inner(
     pool: &SqlitePool,
     code: String,
     symbol: String,
-    name: String,
+    remark: String,
     decimals: i64,
     sort_order: i64,
 ) -> Result<Currency, ServerFnError> {
-    let (code, symbol, name, decimals, sort_order) =
-        validate_currency_input(&code, &symbol, &name, decimals, sort_order)?;
+    let (code, symbol, remark, decimals, sort_order) =
+        validate_currency_input(&code, &symbol, &remark, decimals, sort_order)?;
     let mut tx = pool.begin().await.map_err(server_err)?;
     let current: Option<i64> =
         sqlx::query_scalar("SELECT decimals FROM fin_currency WHERE code = ?1")
@@ -391,11 +403,11 @@ pub async fn update_currency_inner(
         }
     }
     sqlx::query(
-        "UPDATE fin_currency SET symbol = ?1, name = ?2, decimals = ?3, sort_order = ?4
+        "UPDATE fin_currency SET symbol = ?1, remark = ?2, decimals = ?3, sort_order = ?4
           WHERE code = ?5",
     )
     .bind(&symbol)
-    .bind(&name)
+    .bind(&remark)
     .bind(decimals)
     .bind(sort_order)
     .bind(&code)
@@ -404,7 +416,7 @@ pub async fn update_currency_inner(
     .map_err(server_err)?;
     tx.commit().await.map_err(server_err)?;
     sqlx::query_as::<_, Currency>(
-        "SELECT code, symbol, name, decimals, is_primary, sort_order
+        "SELECT code, symbol, remark, decimals, is_primary, sort_order
            FROM fin_currency WHERE code = ?1",
     )
     .bind(&code)
@@ -520,7 +532,7 @@ pub async fn list_currencies() -> Result<Vec<Currency>, ServerFnError> {
 pub async fn create_currency(
     code: String,
     symbol: String,
-    name: String,
+    remark: String,
     decimals: i64,
     sort_order: i64,
 ) -> Result<Currency, ServerFnError> {
@@ -528,7 +540,7 @@ pub async fn create_currency(
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        create_currency_inner(&state.db, code, symbol, name, decimals, sort_order).await
+        create_currency_inner(&state.db, code, symbol, remark, decimals, sort_order).await
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -540,7 +552,7 @@ pub async fn create_currency(
 pub async fn update_currency(
     code: String,
     symbol: String,
-    name: String,
+    remark: String,
     decimals: i64,
     sort_order: i64,
 ) -> Result<Currency, ServerFnError> {
@@ -548,7 +560,7 @@ pub async fn update_currency(
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        update_currency_inner(&state.db, code, symbol, name, decimals, sort_order).await
+        update_currency_inner(&state.db, code, symbol, remark, decimals, sort_order).await
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -713,7 +725,20 @@ mod tests {
         assert!(validate_currency_input("U", "$", "x", 2, 0).is_err()); // too short
         assert!(validate_currency_input("US-D", "$", "x", 2, 0).is_err()); // bad charset
         assert!(validate_currency_input("USD", "", "x", 2, 0).is_err()); // empty symbol
-        assert!(validate_currency_input("USD", "$", "", 2, 0).is_err()); // empty name
+        assert_eq!(
+            validate_currency_input("USD", "$", "", 2, 0)
+                .expect("empty remark is valid")
+                .2,
+            ""
+        );
+        assert!(validate_currency_input(
+            "USD",
+            "$",
+            &"x".repeat(MAX_CURRENCY_REMARK_CHARS + 1),
+            2,
+            0
+        )
+        .is_err()); // remark too long
         assert!(validate_currency_input("USD", "$", "x", -1, 0).is_err()); // decimals < 0
         assert_eq!(
             validate_currency_input("ETH", "ETH", "Ethereum", 18, 0)

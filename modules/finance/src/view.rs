@@ -231,7 +231,7 @@ pub fn FinanceView() -> impl IntoView {
         t(locale, "finance.toast.budget_imported").to_string()
     });
     wire_action_toast(create_currency, toast, None, move |c: &Currency| {
-        ep_i18n::tf(locale, "finance.toast.currency_added", &[("name", &c.name)])
+        ep_i18n::tf(locale, "finance.toast.currency_added", &[("code", &c.code)])
     });
     wire_action_toast(update_currency, toast, None, move |_| {
         t(locale, "finance.toast.currency_updated").to_string()
@@ -291,14 +291,14 @@ fn render_currency_switcher(d: &LedgerData, selected: RwSignal<String>) -> impl 
             let code = c.code.clone();
             let is_active = code == active_code;
             let label = format!("{} {}", c.symbol, c.code);
-            let name = c.name.clone();
+            let title = currency_caption(c);
             let cls = if is_active {
                 "btn primary sm"
             } else {
                 "btn sm"
             };
             view! {
-                <button class=cls type="button" title=name
+                <button class=cls type="button" title=title
                         on:click=move |_| {
                             if selected.get_untracked() != code {
                                 selected.set(code.clone());
@@ -530,6 +530,7 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
         symbol,
         fmt_minor_compact(m.savings.abs(), decimals)
     );
+    let currency_label = currency_caption(&d.currency);
     view! {
         <div class="module-banner">
             <div class="module-glyph fin mono">{glyph}</div>
@@ -537,7 +538,7 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
                 <div class="hstack" style="margin-bottom:6px;gap:8px">
                     <span class="mono" style="font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.06em">{t(locale, "finance.banner.net_worth")}</span>
                     <UiTag tone=worth_tone dot=true>{t(locale, worth_label_key)}</UiTag>
-                    <span class="mono" style="font-size:10.5px;color:var(--ink-4)">{d.currency.name.clone()}</span>
+                    <span class="mono" style="font-size:10.5px;color:var(--ink-4)">{currency_label}</span>
                 </div>
                 <div class="mono" style="font-size:32px;font-weight:600;letter-spacing:-0.02em;line-height:1.1">
                     {balance_text}
@@ -576,6 +577,15 @@ const INPUT_STYLE: &str =
     "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
 const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
 const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
+
+fn currency_caption(c: &Currency) -> String {
+    let remark = c.remark.trim();
+    if remark.is_empty() {
+        c.code.clone()
+    } else {
+        format!("{} · {}", c.code, remark)
+    }
+}
 
 fn render_txn_modal(
     add: ServerAction<AddTxn>,
@@ -2033,9 +2043,9 @@ fn render_currencies(
                                        placeholder="$" style=INPUT_STYLE/>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_name")}</span>
-                                <input name="name" required maxlength="32"
-                                       placeholder=t(locale, "finance.placeholder.currency_name") style=INPUT_STYLE/>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_remark")}</span>
+                                <input name="remark" maxlength="32"
+                                       placeholder=t(locale, "finance.placeholder.currency_remark") style=INPUT_STYLE/>
                             </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_decimals")}</span>
@@ -2043,8 +2053,8 @@ fn render_currencies(
                                        style=INPUT_STYLE_MONO/>
                             </label>
                         </div>
+                        <ErrorSlot action=create_currency/>
                         <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                            <ErrorSlot action=create_currency style="flex:1"/>
                             <button class="btn ghost" type="button"
                                     on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
                             <button class="btn primary" type="submit">
@@ -2063,7 +2073,7 @@ fn render_currencies(
                         <tr>
                             <th>{t(locale, "finance.field.currency_code")}</th>
                             <th style="width:70px">{t(locale, "finance.field.currency_symbol")}</th>
-                            <th>{t(locale, "finance.field.currency_name")}</th>
+                            <th>{t(locale, "finance.field.currency_remark")}</th>
                             <th class="num" style="width:80px">{t(locale, "finance.field.currency_decimals")}</th>
                             <th class="num" style="width:300px">{t(locale, "finance.field.ops")}</th>
                         </tr>
@@ -2078,7 +2088,7 @@ fn render_currencies(
 }
 
 /// Single row of the currency management table. `code` is immutable — the
-/// edit form only touches symbol / name / decimals / sort order.
+/// edit form only touches symbol / remark / decimals / sort order.
 fn render_currency_row(
     c: Currency,
     update_currency: ServerAction<UpdateCurrency>,
@@ -2091,17 +2101,17 @@ fn render_currency_row(
     let primary_code = c.code.clone();
     let delete_code = c.code.clone();
     let symbol = c.symbol.clone();
-    let name = c.name.clone();
+    let remark = c.remark.clone();
     let sort_order_str = c.sort_order.to_string();
     let decimals_value = c.decimals.to_string();
     let display_code = c.code.clone();
     let display_symbol = c.symbol.clone();
-    let display_name = c.name.clone();
+    let display_remark = c.remark.clone();
     let display_decimals = c.decimals.to_string();
     let confirm_msg = tf(
         locale,
         "finance.currency.confirm_delete",
-        &[("name", &c.name)],
+        &[("code", &c.code)],
     );
     let primary_cell = if is_primary {
         view! { <UiTag tone=Tone::Green>{t(locale, "finance.currency.primary")}</UiTag> }.into_any()
@@ -2125,7 +2135,7 @@ fn render_currency_row(
                 }}
             </td>
             <td class="mono">{display_symbol}</td>
-            <td>{display_name}</td>
+            <td>{display_remark}</td>
             <td class="num mono">{display_decimals}</td>
             <td class="num">
                 <div class="hstack" style="gap:6px;justify-content:flex-end;flex-wrap:wrap">
@@ -2141,8 +2151,8 @@ fn render_currency_row(
                                 <input name="symbol" required maxlength="8" value=symbol style=INPUT_STYLE/>
                             </label>
                             <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_name")}</span>
-                                <input name="name" required maxlength="32" value=name style=INPUT_STYLE/>
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_remark")}</span>
+                                <input name="remark" maxlength="32" value=remark style=INPUT_STYLE/>
                             </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_decimals")}</span>

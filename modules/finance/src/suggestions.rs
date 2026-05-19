@@ -130,7 +130,7 @@ mod tests {
         Currency {
             code: "CNY".into(),
             symbol: "¥".into(),
-            name: "人民币".into(),
+            remark: "人民币".into(),
             decimals: 2,
             is_primary: true,
             sort_order: 0,

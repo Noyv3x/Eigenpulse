@@ -66,7 +66,7 @@ fn parse_api_amount(input: &str, decimals: u8) -> Result<ep_core::MinorAmount, R
 struct CurrencyInput {
     pub code: String,
     pub symbol: String,
-    pub name: String,
+    pub remark: String,
     pub decimals: i64,
     #[serde(default)]
     pub sort_order: i64,
@@ -93,7 +93,7 @@ async fn post_currency(
         &state.db,
         input.code,
         input.symbol,
-        input.name,
+        input.remark,
         input.decimals,
         input.sort_order,
     )
@@ -105,7 +105,7 @@ async fn post_currency(
 #[derive(Debug, Deserialize)]
 struct PatchCurrencyInput {
     pub symbol: Option<String>,
-    pub name: Option<String>,
+    pub remark: Option<String>,
     pub decimals: Option<i64>,
     pub sort_order: Option<i64>,
 }
@@ -120,13 +120,13 @@ async fn patch_currency(
     let code = code.trim().to_string();
     type Row = (String, String, i64, i64);
     let cur: Option<Row> = sqlx::query_as(
-        "SELECT symbol, name, decimals, sort_order FROM fin_currency WHERE code = ?1",
+        "SELECT symbol, remark, decimals, sort_order FROM fin_currency WHERE code = ?1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
     .await
     .map_err(db_err_response)?;
-    let Some((cur_symbol, cur_name, cur_decimals, cur_sort)) = cur else {
+    let Some((cur_symbol, cur_remark, cur_decimals, cur_sort)) = cur else {
         return Err(server_err_to_response(ep_i18n::err_with(
             "finance.err.currency_not_found",
             &code,
@@ -136,7 +136,7 @@ async fn patch_currency(
         &state.db,
         code,
         input.symbol.unwrap_or(cur_symbol),
-        input.name.unwrap_or(cur_name),
+        input.remark.unwrap_or(cur_remark),
         input.decimals.unwrap_or(cur_decimals),
         input.sort_order.unwrap_or(cur_sort),
     )
