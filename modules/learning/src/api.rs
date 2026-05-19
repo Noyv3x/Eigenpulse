@@ -14,7 +14,7 @@ use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
 pub fn open_api(_state: AppState) -> Router<AppState> {
-    Router::new()
+    Router::<AppState>::new()
         .route("/note", get(list_notes).post(post_note))
         .route("/note/:doc_id", patch(patch_note).delete(delete_note))
         .route("/book", get(list_books).post(post_book))
@@ -242,7 +242,7 @@ async fn patch_note(
         )));
     };
     let title = input.title.unwrap_or(cur_title);
-    let body = patch_nullable_string(input.body, cur_body);
+    let body = ep_core::apply_nullable_patch_or_default(input.body, cur_body);
     let normalized = normalize_note_input(&title, &body).map_err(server_err_to_response)?;
     update_note_inner(&state.db, &doc_id, normalized)
         .await
@@ -271,7 +271,7 @@ async fn patch_book(
         )));
     };
     let name = input.name.unwrap_or(cur_name);
-    let author = patch_nullable_string(input.author, cur_author);
+    let author = ep_core::apply_nullable_patch_or_default(input.author, cur_author);
     let status = input.status.unwrap_or(cur_status);
     let normalized =
         normalize_book_input(&name, &author, &status).map_err(server_err_to_response)?;
@@ -305,10 +305,10 @@ async fn patch_course(
         )));
     };
     let name = input.name.unwrap_or(cur_name);
-    let provider = patch_nullable_string(input.provider, cur_provider);
+    let provider = ep_core::apply_nullable_patch_or_default(input.provider, cur_provider);
     let progress_pct = input.progress_pct.unwrap_or(cur_progress * 100.0);
-    let due_on = patch_nullable_string(input.due_on, cur_due_on);
-    let tone = patch_nullable_string(input.tone, cur_tone);
+    let due_on = ep_core::apply_nullable_patch_or_default(input.due_on, cur_due_on);
+    let tone = ep_core::apply_nullable_patch_or_default(input.tone, cur_tone);
     let normalized = normalize_course_input(&name, &provider, progress_pct, &due_on, &tone)
         .map_err(server_err_to_response)?;
     update_course_inner(&state.db, &doc_id, normalized)
@@ -354,14 +354,6 @@ async fn delete_course(
         .await
         .map_err(server_err_to_response)?;
     Ok(Json(CourseDeleted { doc_id }))
-}
-
-fn patch_nullable_string(input: Option<Option<String>>, current: Option<String>) -> String {
-    match input {
-        Some(Some(value)) => value,
-        Some(None) => String::new(),
-        None => current.unwrap_or_default(),
-    }
 }
 
 // Error mapping delegates to the shared implementation in `ep_i18n::api_error`.

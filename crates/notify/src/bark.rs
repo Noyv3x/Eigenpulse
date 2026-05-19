@@ -96,7 +96,12 @@ impl Notifier for BarkNotifier {
             sound: self.cfg.sound.as_deref(),
             icon: self.cfg.icon_url.as_deref(),
         };
-        let resp = crate::http_client().post(&url).json(&body).send().await?;
+        let resp = crate::http_client()
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("bark request failed: {}", e.without_url()))?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "bark status {}: {}",

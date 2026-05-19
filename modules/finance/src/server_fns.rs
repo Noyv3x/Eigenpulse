@@ -10,25 +10,25 @@ use sqlx::SqlitePool;
 
 pub(crate) const MAX_TXN_MERCHANT_CHARS: usize = 128;
 pub(crate) const MAX_TXN_NOTE_CHARS: usize = 2_000;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MIN_ACCOUNT_CODE_CHARS: usize = 2;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MAX_ACCOUNT_CODE_CHARS: usize = 16;
 pub(crate) const MAX_ACCOUNT_NAME_CHARS: usize = 64;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MAX_CATEGORY_CODE_CHARS: usize = 8;
 pub(crate) const MAX_CATEGORY_NAME_CHARS: usize = 32;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MIN_CURRENCY_CODE_CHARS: usize = 2;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MAX_CURRENCY_CODE_CHARS: usize = 8;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MAX_CURRENCY_SYMBOL_CHARS: usize = 8;
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MAX_CURRENCY_NAME_CHARS: usize = 32;
 /// Upper bound on a currency's minor-unit precision. 8 covers satoshi-style
 /// assets; `10^8` stays comfortably inside `i64` for any realistic balance.
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub(crate) const MAX_CURRENCY_DECIMALS: u8 = 8;
 
 #[cfg(feature = "ssr")]
@@ -1969,6 +1969,20 @@ pub async fn update_txn(
 // Transfer (paired tfr txns)
 // ---------------------------------------------------------------------------
 
+/// Input bundle for a paired transfer. Each leg carries its own currency,
+/// account, and positive minor-unit amount; no conversion is implied.
+#[cfg(feature = "ssr")]
+pub struct AddTransferFields {
+    pub from_currency: String,
+    pub from_account: String,
+    pub to_currency: String,
+    pub to_account: String,
+    pub from_amount: i64,
+    pub to_amount: i64,
+    pub note: Option<String>,
+    pub occurred_at: i64,
+}
+
 /// Writes two paired `tag='tfr'` `fin_txn` rows + symmetric `module_link`
 /// `kind='tfr-pair'` rows in one tx. The legs may live in different
 /// currencies — there is no conversion, the caller supplies an explicit
@@ -1979,26 +1993,25 @@ pub async fn update_txn(
 /// Validates inputs (non-empty / distinct accounts / positive amounts, FK
 /// check on both accounts and both `TFR` categories). Wrappers don't need to
 /// re-validate.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "a cross-currency transfer is intrinsically two (currency, account, amount) triples"
-)]
 #[cfg(feature = "ssr")]
 pub async fn add_transfer_inner(
     pool: &SqlitePool,
-    from_currency: &str,
-    from_account: &str,
-    to_currency: &str,
-    to_account: &str,
-    from_amount: i64,
-    to_amount: i64,
-    note: Option<&str>,
-    occurred_at: i64,
+    fields: AddTransferFields,
 ) -> Result<(Txn, Txn), ServerFnError> {
-    let from_currency = from_currency.trim();
-    let to_currency = to_currency.trim();
-    let from_account = from_account.trim();
-    let to_account = to_account.trim();
+    let AddTransferFields {
+        from_currency,
+        from_account,
+        to_currency,
+        to_account,
+        from_amount,
+        to_amount,
+        note,
+        occurred_at,
+    } = fields;
+    let from_currency = from_currency.trim().to_string();
+    let to_currency = to_currency.trim().to_string();
+    let from_account = from_account.trim().to_string();
+    let to_account = to_account.trim().to_string();
     if from_currency.is_empty()
         || to_currency.is_empty()
         || from_account.is_empty()
@@ -2017,25 +2030,25 @@ pub async fn add_transfer_inner(
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2)"
         )
-        .bind(from_currency)
-        .bind(from_account)
+        .bind(&from_currency)
+        .bind(&from_account)
         .fetch_one(pool),
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM fin_account WHERE currency_code = ?1 AND code = ?2)"
         )
-        .bind(to_currency)
-        .bind(to_account)
+        .bind(&to_currency)
+        .bind(&to_account)
         .fetch_one(pool),
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)"
         )
-        .bind(from_currency)
+        .bind(&from_currency)
         .bind(TRANSFER_CATEGORY_CODE)
         .fetch_one(pool),
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)"
         )
-        .bind(to_currency)
+        .bind(&to_currency)
         .bind(TRANSFER_CATEGORY_CODE)
         .fetch_one(pool),
     )
@@ -2043,13 +2056,13 @@ pub async fn add_transfer_inner(
     if from_ok == 0 {
         return Err(ep_i18n::err_with(
             "finance.err.account_not_found",
-            from_account,
+            &from_account,
         ));
     }
     if to_ok == 0 {
         return Err(ep_i18n::err_with(
             "finance.err.account_not_found",
-            to_account,
+            &to_account,
         ));
     }
     if from_tfr_ok == 0 || to_tfr_ok == 0 {
@@ -2066,7 +2079,7 @@ pub async fn add_transfer_inner(
 
     let from_merchant = format!("Transfer out → {to_account}");
     let to_merchant = format!("Transfer in ← {from_account}");
-    let note_owned = normalize_txn_note(note)?;
+    let note_owned = normalize_txn_note(note.as_deref())?;
 
     sqlx::query(
         "INSERT INTO fin_txn
@@ -2075,11 +2088,11 @@ pub async fn add_transfer_inner(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'tfr', ?8, ?9)",
     )
     .bind(&from_doc)
-    .bind(from_currency)
+    .bind(&from_currency)
     .bind(occurred_at)
     .bind(&from_merchant)
     .bind(TRANSFER_CATEGORY_CODE)
-    .bind(from_account)
+    .bind(&from_account)
     .bind(-from_amount)
     .bind(&note_owned)
     .bind(&to_doc)
@@ -2093,11 +2106,11 @@ pub async fn add_transfer_inner(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'tfr', NULL, ?8)",
     )
     .bind(&to_doc)
-    .bind(to_currency)
+    .bind(&to_currency)
     .bind(occurred_at)
     .bind(&to_merchant)
     .bind(TRANSFER_CATEGORY_CODE)
-    .bind(to_account)
+    .bind(&to_account)
     .bind(to_amount)
     .bind(&from_doc)
     .execute(&mut *tx)
@@ -2108,8 +2121,8 @@ pub async fn add_transfer_inner(
         "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
     )
     .bind(from_amount)
-    .bind(from_currency)
-    .bind(from_account)
+    .bind(&from_currency)
+    .bind(&from_account)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
@@ -2117,8 +2130,8 @@ pub async fn add_transfer_inner(
         "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
     )
     .bind(to_amount)
-    .bind(to_currency)
-    .bind(to_account)
+    .bind(&to_currency)
+    .bind(&to_account)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
@@ -2131,7 +2144,7 @@ pub async fn add_transfer_inner(
     .bind(&from_doc)
     .bind(&from_merchant)
     .bind(-from_amount)
-    .bind(from_currency)
+    .bind(&from_currency)
     .bind(&to_doc)
     .execute(&mut *tx)
     .await
@@ -2144,7 +2157,7 @@ pub async fn add_transfer_inner(
     .bind(&to_doc)
     .bind(&to_merchant)
     .bind(to_amount)
-    .bind(to_currency)
+    .bind(&to_currency)
     .bind(&from_doc)
     .execute(&mut *tx)
     .await
@@ -2173,11 +2186,11 @@ pub async fn add_transfer_inner(
     Ok((
         Txn {
             doc_id: from_doc.clone(),
-            currency_code: from_currency.to_string(),
+            currency_code: from_currency.clone(),
             occurred_at,
             merchant: from_merchant,
             category_code: TRANSFER_CATEGORY_CODE.to_string(),
-            account_code: from_account.into(),
+            account_code: from_account.clone(),
             amount: -from_amount,
             tag: "tfr".into(),
             note: note_owned.clone(),
@@ -2185,11 +2198,11 @@ pub async fn add_transfer_inner(
         },
         Txn {
             doc_id: to_doc,
-            currency_code: to_currency.to_string(),
+            currency_code: to_currency,
             occurred_at,
             merchant: to_merchant,
             category_code: TRANSFER_CATEGORY_CODE.to_string(),
-            account_code: to_account.into(),
+            account_code: to_account,
             amount: to_amount,
             tag: "tfr".into(),
             note: None,
@@ -2229,14 +2242,16 @@ pub async fn add_transfer(
 
         add_transfer_inner(
             pool,
-            &from_cur.code,
-            &from_account,
-            &to_cur.code,
-            &to_account,
-            from_minor,
-            to_minor,
-            Some(&note),
-            occurred,
+            AddTransferFields {
+                from_currency: from_cur.code,
+                from_account,
+                to_currency: to_cur.code,
+                to_account,
+                from_amount: from_minor,
+                to_amount: to_minor,
+                note: Some(note),
+                occurred_at: occurred,
+            },
         )
         .await
     }

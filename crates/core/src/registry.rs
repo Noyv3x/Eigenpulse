@@ -33,7 +33,7 @@ impl ModuleRegistry {
     }
 
     pub fn open_api_router(&self, state: AppState) -> axum::Router<AppState> {
-        let mut r = axum::Router::new();
+        let mut r = axum::Router::<AppState>::new();
         for m in self.iter() {
             let sub = m.open_api(state.clone());
             r = r.nest(&format!("/{}", m.code().to_ascii_lowercase()), sub);
@@ -46,29 +46,25 @@ impl ModuleRegistry {
 /// by production startup.
 pub async fn run_module_migrations(pool: &SqlitePool, module: &dyn Module) -> anyhow::Result<()> {
     for (name, sql) in module.migrations() {
-        let already: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM _ep_module_migration WHERE module = ?1 AND name = ?2",
+        let mut tx = pool.begin().await?;
+        let claimed: Option<i64> = sqlx::query_scalar(
+            r#"
+            INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)
+            ON CONFLICT(module, name) DO NOTHING
+            RETURNING 1
+            "#,
         )
         .bind(module.code())
         .bind(*name)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        if already.is_some() {
+
+        if claimed.is_none() {
+            tx.commit().await?;
             continue;
         }
-        let mut tx = pool.begin().await?;
-        // Allow module migrations to embed multiple top-level statements.
-        for stmt in split_sql(sql) {
-            if stmt.trim().is_empty() {
-                continue;
-            }
-            sqlx::query(&stmt).execute(&mut *tx).await?;
-        }
-        sqlx::query("INSERT INTO _ep_module_migration(module, name) VALUES (?1, ?2)")
-            .bind(module.code())
-            .bind(*name)
-            .execute(&mut *tx)
-            .await?;
+
+        sqlx::raw_sql(sql).execute(&mut *tx).await?;
         tx.commit().await?;
         tracing::info!(
             module = module.code(),
@@ -79,177 +75,105 @@ pub async fn run_module_migrations(pool: &SqlitePool, module: &dyn Module) -> an
     Ok(())
 }
 
-/// Split a SQLite migration script into top-level statements.
-///
-/// Semicolons inside string literals, quoted identifiers, and comments are
-/// preserved. This is intentionally small and SQLite-focused; it exists so the
-/// production registry and focused module tests apply migrations the same way.
-pub fn split_sql(sql: &str) -> Vec<String> {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum State {
-        Normal,
-        SingleQuoted,
-        DoubleQuoted,
-        BacktickQuoted,
-        BracketQuoted,
-        LineComment,
-        BlockComment,
-    }
-
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut chars = sql.chars().peekable();
-    let mut state = State::Normal;
-
-    while let Some(ch) = chars.next() {
-        match state {
-            State::Normal => match ch {
-                ';' => {
-                    let stmt = buf.trim();
-                    if !stmt.is_empty() {
-                        out.push(stmt.to_string());
-                    }
-                    buf.clear();
-                }
-                '\'' => {
-                    state = State::SingleQuoted;
-                    buf.push(ch);
-                }
-                '"' => {
-                    state = State::DoubleQuoted;
-                    buf.push(ch);
-                }
-                '`' => {
-                    state = State::BacktickQuoted;
-                    buf.push(ch);
-                }
-                '[' => {
-                    state = State::BracketQuoted;
-                    buf.push(ch);
-                }
-                '-' if chars.peek() == Some(&'-') => {
-                    state = State::LineComment;
-                    buf.push(ch);
-                    if let Some(next) = chars.next() {
-                        buf.push(next);
-                    }
-                }
-                '/' if chars.peek() == Some(&'*') => {
-                    state = State::BlockComment;
-                    buf.push(ch);
-                    if let Some(next) = chars.next() {
-                        buf.push(next);
-                    }
-                }
-                _ => buf.push(ch),
-            },
-            State::SingleQuoted => {
-                buf.push(ch);
-                if ch == '\'' {
-                    if chars.peek() == Some(&'\'') {
-                        if let Some(next) = chars.next() {
-                            buf.push(next);
-                        }
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::DoubleQuoted => {
-                buf.push(ch);
-                if ch == '"' {
-                    if chars.peek() == Some(&'"') {
-                        if let Some(next) = chars.next() {
-                            buf.push(next);
-                        }
-                    } else {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::BacktickQuoted => {
-                buf.push(ch);
-                if ch == '`' {
-                    state = State::Normal;
-                }
-            }
-            State::BracketQuoted => {
-                buf.push(ch);
-                if ch == ']' {
-                    state = State::Normal;
-                }
-            }
-            State::LineComment => {
-                buf.push(ch);
-                if ch == '\n' {
-                    state = State::Normal;
-                }
-            }
-            State::BlockComment => {
-                buf.push(ch);
-                if ch == '*' && chars.peek() == Some(&'/') {
-                    if let Some(next) = chars.next() {
-                        buf.push(next);
-                    }
-                    state = State::Normal;
-                }
-            }
-        }
-    }
-
-    let stmt = buf.trim();
-    if !stmt.is_empty() {
-        out.push(stmt.to_string());
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn split_sql_splits_top_level_semicolons() {
-        assert_eq!(
-            split_sql("CREATE TABLE a(id INTEGER); INSERT INTO a VALUES (1);"),
-            vec!["CREATE TABLE a(id INTEGER)", "INSERT INTO a VALUES (1)"]
-        );
+    struct TestModule {
+        code: &'static str,
+        migrations: &'static [(&'static str, &'static str)],
     }
 
-    #[test]
-    fn split_sql_ignores_semicolons_inside_string_literals() {
-        assert_eq!(
-            split_sql("INSERT INTO a VALUES ('one;two', 'it''s ok; still string'); SELECT 1;"),
-            vec![
-                "INSERT INTO a VALUES ('one;two', 'it''s ok; still string')",
-                "SELECT 1"
-            ]
-        );
+    impl Module for TestModule {
+        fn code(&self) -> &'static str {
+            self.code
+        }
+
+        fn migrations(&self) -> &'static [(&'static str, &'static str)] {
+            self.migrations
+        }
     }
 
-    #[test]
-    fn split_sql_ignores_semicolons_inside_comments() {
-        assert_eq!(
-            split_sql(
-                "-- seed; comment\nINSERT INTO a VALUES (1); /* note; still comment */ SELECT 2;"
-            ),
-            vec![
-                "-- seed; comment\nINSERT INTO a VALUES (1)",
-                "/* note; still comment */ SELECT 2"
-            ]
-        );
+    async fn pool_with_ledger() -> anyhow::Result<SqlitePool> {
+        let pool = SqlitePool::connect("sqlite::memory:").await?;
+        sqlx::query(
+            "CREATE TABLE _ep_module_migration (
+                module TEXT NOT NULL,
+                name TEXT NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (module, name)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+        Ok(pool)
     }
 
-    #[test]
-    fn split_sql_ignores_semicolons_inside_quoted_identifiers() {
-        assert_eq!(
-            split_sql(r#"CREATE TABLE "semi;colon"([x;y] TEXT, `z;w` TEXT);"#),
-            vec![r#"CREATE TABLE "semi;colon"([x;y] TEXT, `z;w` TEXT)"#]
-        );
+    #[tokio::test]
+    async fn run_module_migrations_executes_raw_sql_and_is_idempotent() -> anyhow::Result<()> {
+        const MIGRATIONS: &[(&str, &str)] = &[(
+            "001_trigger",
+            r#"
+            CREATE TABLE raw_parent(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE raw_log(value TEXT NOT NULL);
+            CREATE TRIGGER raw_parent_ai AFTER INSERT ON raw_parent
+            BEGIN
+                INSERT INTO raw_log(value) VALUES (new.value || ';logged');
+            END;
+            INSERT INTO raw_parent(value) VALUES ('one;two');
+            "#,
+        )];
+        let module = TestModule {
+            code: "TST",
+            migrations: MIGRATIONS,
+        };
+        let pool = pool_with_ledger().await?;
+
+        run_module_migrations(&pool, &module).await?;
+        run_module_migrations(&pool, &module).await?;
+
+        let log: String = sqlx::query_scalar("SELECT value FROM raw_log")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(log, "one;two;logged");
+        let parent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM raw_parent")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(parent_count, 1);
+        let ledger_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'TST'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(ledger_count, 1);
+        Ok(())
     }
 
-    #[test]
-    fn split_sql_skips_empty_statements() {
-        assert_eq!(split_sql(";; SELECT 1; ;"), vec!["SELECT 1"]);
+    #[tokio::test]
+    async fn failed_module_migration_rolls_back_ledger_claim() -> anyhow::Result<()> {
+        const MIGRATIONS: &[(&str, &str)] = &[(
+            "001_broken",
+            "CREATE TABLE before_fail(id INTEGER); THIS IS NOT SQL;",
+        )];
+        let module = TestModule {
+            code: "BAD",
+            migrations: MIGRATIONS,
+        };
+        let pool = pool_with_ledger().await?;
+
+        let result = run_module_migrations(&pool, &module).await;
+        assert!(result.is_err());
+
+        let ledger_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'BAD'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(ledger_count, 0);
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'before_fail'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(table_count, 0);
+        Ok(())
     }
 }

@@ -56,9 +56,7 @@ pub const TONES: &[&str] = &["green", "amber", "rose", "blue", "violet"];
 /// Code of the per-currency transfer category. Every currency owns one
 /// `fin_category` row with this code; `add_transfer_inner` files both legs of
 /// a transfer under it. Created automatically alongside each currency.
-// Referenced only from the `ssr`-gated server/api code; the hydrate build
-// compiles `model` without those users.
-#[allow(dead_code)]
+#[cfg(feature = "ssr")]
 pub const TRANSFER_CATEGORY_CODE: &str = "TFR";
 
 /// A currency — the top-level partition of the finance module. Accounts,

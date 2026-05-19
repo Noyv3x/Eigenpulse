@@ -30,13 +30,11 @@ pub struct TodayData {
 pub struct TodayItem {
     pub time: String,   // HH:MM
     pub module: String, // FIN / FIT / LRN / SYS
-    pub doc_id: String,
     pub summary: String,
     /// Signed minor-unit amount (finance rows only).
     pub amount: Option<i64>,
     /// Currency of the amount; `None` for non-finance rows.
     pub currency_code: Option<String>,
-    pub link_doc: Option<String>,
 }
 
 #[server(LoadToday, "/api/_internal/tdy", "Url", "load_today")]
@@ -87,11 +85,9 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
                 TodayItem {
                     time: fmt_ts_hm(Some(row.occurred_at)),
                     module: row.module,
-                    doc_id: row.doc_id,
                     summary: row.summary,
                     amount: row.amount.map(|a| a as i64),
                     currency_code: row.currency_code,
-                    link_doc: row.link_doc,
                 }
             })
             .collect();
@@ -209,15 +205,21 @@ fn render_today_item(
     it: TodayItem,
     cur_map: &std::collections::HashMap<String, (String, u8)>,
 ) -> impl IntoView {
-    let module_link = match it.module.as_str() {
+    let TodayItem {
+        time,
+        module,
+        summary,
+        amount,
+        currency_code,
+    } = it;
+    let module_link = match module.as_str() {
         "FIN" => "/finance",
         "FIT" => "/fitness",
         "LRN" => "/learning",
         _ => "/",
     };
-    let amount_text = it.amount.map(|a| {
-        let (sym, dec) = it
-            .currency_code
+    let amount_text = amount.map(|a| {
+        let (sym, dec) = currency_code
             .as_deref()
             .and_then(|c| cur_map.get(c))
             .cloned()
@@ -225,16 +227,14 @@ fn render_today_item(
         let sign = if a >= 0 { "+" } else { "−" };
         format!("{sign}{sym}{}", fmt_minor_compact(a.abs(), dec))
     });
-    let _ = it.doc_id;
-    let _ = it.link_doc;
     view! {
         <a class="today-item" href=module_link>
-            <span class="time mono">{it.time}</span>
+            <span class="time mono">{time}</span>
             <span class="mark"></span>
             <div>
                 <div class="text">
-                    <span class="text-module mono dim">{it.module.clone()}</span>
-                    {it.summary}
+                    <span class="text-module mono dim">{module}</span>
+                    {summary}
                     {amount_text.map(|a| view! { <span class="text-amount mono dim">{a}</span> })}
                 </div>
             </div>

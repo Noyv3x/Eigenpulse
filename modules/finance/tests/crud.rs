@@ -126,6 +126,24 @@ async fn seed_category(pool: &SqlitePool, code: &str, name: &str) -> anyhow::Res
     Ok(())
 }
 
+fn transfer_fields(
+    from_amount: i64,
+    to_amount: i64,
+    note: Option<&str>,
+    occurred_at: i64,
+) -> ep_finance::AddTransferFields {
+    ep_finance::AddTransferFields {
+        from_currency: "CNY".into(),
+        from_account: "ACC-FROM".into(),
+        to_currency: "CNY".into(),
+        to_account: "ACC-TO".into(),
+        from_amount,
+        to_amount,
+        note: note.map(str::to_string),
+        occurred_at,
+    }
+}
+
 /// Read back the current balance of an account in the `CNY` currency.
 /// Returns `None` if the row is absent (lets transfer-cascade tests assert
 /// "row didn't accidentally vanish"). The DB column is integer minor units;
@@ -1296,19 +1314,10 @@ async fn add_transfer_creates_pair_and_delete_cascades() {
     let occurred_at = 1_700_000_000_i64;
     // Same-currency transfer; amounts are minor units (¥300 = 30000) and each
     // leg carries its own amount now.
-    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        30_000,
-        30_000,
-        None,
-        occurred_at,
-    )
-    .await
-    .expect("transfer ok");
+    let (from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, transfer_fields(30_000, 30_000, None, occurred_at))
+            .await
+            .expect("transfer ok");
 
     // Two fin_txn rows + two symmetric `tfr-pair` link rows, balances move.
     assert_eq!(
@@ -1373,14 +1382,7 @@ async fn add_transfer_trims_optional_note() {
 
     let (from_txn, _to_txn) = ep_finance::add_transfer_inner(
         &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        2500,
-        2500,
-        Some("  monthly sweep  "),
-        1_700_000_000,
+        transfer_fields(2500, 2500, Some("  monthly sweep  "), 1_700_000_000),
     )
     .await
     .expect("transfer ok");
@@ -1396,14 +1398,7 @@ async fn add_transfer_trims_optional_note() {
 
     let (blank_from, _blank_to) = ep_finance::add_transfer_inner(
         &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        1000,
-        1000,
-        Some("   "),
-        1_700_000_001,
+        transfer_fields(1000, 1000, Some("   "), 1_700_000_001),
     )
     .await
     .expect("blank-note transfer ok");
@@ -1422,19 +1417,10 @@ async fn delete_to_leg_also_cascades() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (_from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        25_000,
-        25_000,
-        None,
-        1_700_000_000,
-    )
-    .await
-    .expect("transfer ok");
+    let (_from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, transfer_fields(25_000, 25_000, None, 1_700_000_000))
+            .await
+            .expect("transfer ok");
 
     let _ = ep_finance::delete_txn_inner(&pool, &to_txn.doc_id)
         .await
@@ -1471,11 +1457,9 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
     .await
     .unwrap();
     // Transfer ¥500 ACC-FROM → ACC-TO; from-leg is amount=-50000 tag='tfr'.
-    let _ = ep_finance::add_transfer_inner(
-        &pool, "CNY", "ACC-FROM", "CNY", "ACC-TO", 50_000, 50_000, None, now,
-    )
-    .await
-    .expect("transfer ok");
+    let _ = ep_finance::add_transfer_inner(&pool, transfer_fields(50_000, 50_000, None, now))
+        .await
+        .expect("transfer ok");
 
     // 1) Month expense — must equal 4000 (NOT 54000).
     let month_expense: i64 = sqlx::query_scalar(
@@ -1642,19 +1626,10 @@ async fn delete_rejects_orphan_tfr_pair_link() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        10_000,
-        10_000,
-        None,
-        1_700_000_000,
-    )
-    .await
-    .expect("transfer ok");
+    let (from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, transfer_fields(10_000, 10_000, None, 1_700_000_000))
+            .await
+            .expect("transfer ok");
     // Post-transfer state: ACC-FROM=900, ACC-TO=100, both rows + 2 tfr-pair
     // links.
 
@@ -1714,19 +1689,10 @@ async fn delete_walks_both_tfr_pair_directions() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
-        &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        10_000,
-        10_000,
-        None,
-        1_700_000_000,
-    )
-    .await
-    .expect("transfer ok");
+    let (from_txn, to_txn) =
+        ep_finance::add_transfer_inner(&pool, transfer_fields(10_000, 10_000, None, 1_700_000_000))
+            .await
+            .expect("transfer ok");
 
     // Drift: drop only the OUTGOING link from to-leg (the (to_doc→from_doc)
     // row), preserving the incoming (from_doc→to_doc) row. A naive lookup
@@ -1790,19 +1756,10 @@ async fn delete_rejects_when_multiple_distinct_tfr_partners() {
     seed_account(&pool, "ACC-TO", 0.0).await.unwrap();
     seed_category(&pool, "TFR", "Transfer").await.unwrap();
 
-    let (from_txn, _to_txn) = ep_finance::add_transfer_inner(
-        &pool,
-        "CNY",
-        "ACC-FROM",
-        "CNY",
-        "ACC-TO",
-        10_000,
-        10_000,
-        None,
-        1_700_000_000,
-    )
-    .await
-    .expect("transfer ok");
+    let (from_txn, _to_txn) =
+        ep_finance::add_transfer_inner(&pool, transfer_fields(10_000, 10_000, None, 1_700_000_000))
+            .await
+            .expect("transfer ok");
 
     // Inject corruption: a stray tfr-pair link from a bogus doc into the
     // from-leg. Now the bidirectional UNION lookup returns BOTH `to_doc`

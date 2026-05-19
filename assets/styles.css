@@ -885,20 +885,6 @@ body {
   padding: 1px 6px; background: var(--bg-2); border-radius: 99px; color: var(--ink-3);
 }
 
-/* Empty + placeholders */
-.placeholder-img {
-  background-image: repeating-linear-gradient(135deg, var(--bg-2) 0 8px, var(--surface-2) 8px 16px);
-  border: 1px dashed var(--border-strong);
-  border-radius: 8px;
-  display: grid; place-items: center;
-  color: var(--ink-4);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  min-height: 120px;
-}
-
 /* Focus ring */
 button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
@@ -1510,14 +1496,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outli
 /* Topbar breadcrumb — give the path a quieter weight               */
 /* ---------------------------------------------------------------- */
 .topbar-h1 { font-weight: 500; }
-
-/* ---------------------------------------------------------------- */
-/* .placeholder-img — legacy fallback, only used when not loading   */
-/* ---------------------------------------------------------------- */
-.placeholder-img {
-  /* Replaced by skeleton; keep a sane fallback */
-  animation: ep-fade-only 280ms var(--ease-out);
-}
 
 /* ---------------------------------------------------------------- */
 /* `today-item` selected-state nicety                               */

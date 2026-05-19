@@ -13,7 +13,7 @@ use leptos::server_fn::ServerFnError;
 use serde::{Deserialize, Serialize};
 
 pub fn open_api(_state: AppState) -> Router<AppState> {
-    Router::new()
+    Router::<AppState>::new()
         .route("/workout", get(list_workouts).post(post_workout))
         .route(
             "/workout/:doc_id",
@@ -142,44 +142,30 @@ async fn patch_workout(
         )));
     };
     let kind = input.kind.unwrap_or(cur.kind);
-    let program = patch_nullable_string(input.program, cur.program);
+    let program = ep_core::apply_nullable_patch_or_default(input.program, cur.program);
     let duration_m = input.duration_m.unwrap_or(cur.duration_m);
-    let load_text = patch_nullable_string(input.load_text, cur.load_text);
+    let load_text = ep_core::apply_nullable_patch_or_default(input.load_text, cur.load_text);
     let strain = input.strain.or(cur.strain).unwrap_or_default();
-    let rpe = patch_nullable_i64(input.rpe, cur.rpe);
-    let notes = patch_nullable_string(input.notes, cur.notes);
+    let rpe = ep_core::apply_nullable_patch(input.rpe, cur.rpe)
+        .map(|rpe| rpe.to_string())
+        .unwrap_or_default();
+    let notes = ep_core::apply_nullable_patch_or_default(input.notes, cur.notes);
     let occurred_on = input.occurred_on.unwrap_or_default();
-    let normalized = normalize_workout_input(
-        &occurred_on,
-        &kind,
-        &program,
+    let normalized = normalize_workout_input(&AddWorkoutFields {
+        occurred_on,
+        kind,
+        program,
         duration_m,
-        &load_text,
-        &strain,
-        &rpe,
-        &notes,
-    )
+        load_text,
+        strain,
+        rpe,
+        notes,
+    })
     .map_err(server_err_to_response)?;
-    update_workout_inner(&state.db, &doc_id, normalized, duration_m)
+    update_workout_inner(&state.db, &doc_id, normalized)
         .await
         .map_err(server_err_to_response)?;
     Ok(Json(WorkoutUpdated { doc_id }))
-}
-
-fn patch_nullable_string(input: Option<Option<String>>, current: Option<String>) -> String {
-    match input {
-        Some(Some(value)) => value,
-        Some(None) => String::new(),
-        None => current.unwrap_or_default(),
-    }
-}
-
-fn patch_nullable_i64(input: Option<Option<i64>>, current: Option<i64>) -> String {
-    match input {
-        Some(Some(value)) => value.to_string(),
-        Some(None) => String::new(),
-        None => current.map(|value| value.to_string()).unwrap_or_default(),
-    }
 }
 
 // Error mapping delegates to the shared implementation in `ep_i18n::api_error`.

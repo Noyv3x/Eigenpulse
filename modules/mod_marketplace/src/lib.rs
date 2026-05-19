@@ -17,6 +17,16 @@ mod ssr_module {
             &[]
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::MODULE;
+
+        #[test]
+        fn every_migration_file_is_registered() {
+            ep_core::assert_module_migrations_registered!(MODULE);
+        }
+    }
 }
 
 #[cfg(feature = "ssr")]

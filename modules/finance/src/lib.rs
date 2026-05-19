@@ -17,7 +17,8 @@ pub use server_fns::{
     create_currency_inner, delete_account_inner, delete_category_inner, delete_currency_inner,
     delete_txn_inner, list_currencies_inner, load_month_buckets_12, parse_occurred_at,
     resolve_currency, set_budget_inner, set_primary_currency_inner, update_account_inner,
-    update_category_inner, update_currency_inner, update_txn_inner, AddTxnFields, UpdateTxnFields,
+    update_category_inner, update_currency_inner, update_txn_inner, AddTransferFields,
+    AddTxnFields, UpdateTxnFields,
 };
 
 #[cfg(feature = "ssr")]

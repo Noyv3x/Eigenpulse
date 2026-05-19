@@ -115,7 +115,7 @@ The bus exposes itself to other crates as `dyn NotifyBusTrait` (defined in `crat
 ### IDs and the `seq` table
 
 Doc IDs come from `ep_core::next_doc_id(tx, module_code, shape)`:
-- `DocIdShape::YearSerial5` → `FIN-26092` (year + 5-digit running)
+- `DocIdShape::YearSerial5` → `FIN-26092` (`YY` + 3-digit running serial, 5 digits total)
 - `DocIdShape::TypeSerial4 { kind: "S" }` → `FIT-S-0412`
 
 The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` for atomic increment. **Always call inside a transaction** with the row insert so they commit together.

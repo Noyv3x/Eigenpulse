@@ -21,7 +21,7 @@ use ep_core::{AppState, ModuleRegistry};
 
 #[cfg(feature = "ssr")]
 pub fn router(state: AppState, registry: &ModuleRegistry) -> Router<AppState> {
-    Router::new()
+    Router::<AppState>::new()
         .route("/healthz", get(healthz::ok))
         .route("/whoami", get(whoami::handler))
         .route("/today", get(today::handler))

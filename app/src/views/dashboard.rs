@@ -32,9 +32,7 @@ pub struct DashboardData {
 pub struct ActivityRow {
     pub time: String,
     pub module: String,
-    pub doc_id: String,
     pub summary: String,
-    pub link_doc: Option<String>,
     /// Signed minor-unit amount (finance rows only).
     pub amount: Option<i64>,
     /// Currency of the amount; `None` for non-finance rows.
@@ -42,15 +40,7 @@ pub struct ActivityRow {
 }
 
 #[cfg(feature = "ssr")]
-type ActivityQueryRow = (
-    i64,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<f64>,
-    Option<String>,
-);
+type ActivityQueryRow = (i64, String, String, Option<f64>, Option<String>);
 
 #[server(LoadDashboard, "/api/_internal/dsh", "Url", "load_dashboard")]
 pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
@@ -102,7 +92,7 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
         )
         .fetch_one(pool);
         let rows_q = sqlx::query_as::<_, ActivityQueryRow>(
-            "SELECT occurred_at, module, doc_id, summary, link_doc, amount, currency_code
+            "SELECT occurred_at, module, summary, amount, currency_code
                FROM activity ORDER BY occurred_at DESC LIMIT 12",
         )
         .fetch_all(pool);
@@ -141,11 +131,9 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             .map(|r| ActivityRow {
                 time: fmt_ts_hm(Some(r.0)),
                 module: r.1,
-                doc_id: r.2,
-                summary: r.3,
-                link_doc: r.4,
-                amount: r.5.map(|a| a as i64),
-                currency_code: r.6,
+                summary: r.2,
+                amount: r.3.map(|a| a as i64),
+                currency_code: r.4,
             })
             .collect();
 
@@ -264,15 +252,22 @@ fn render_body(d: DashboardData) -> impl IntoView {
                             </thead>
                             <tbody>
                                 {recent.into_iter().map(|r| {
-                                    let tone = match r.module.as_str() {
+                                    let ActivityRow {
+                                        time,
+                                        module,
+                                        summary,
+                                        amount,
+                                        currency_code,
+                                    } = r;
+                                    let tone = match module.as_str() {
                                         "FIN" => ep_core::Tone::Amber,
                                         "FIT" => ep_core::Tone::Green,
                                         "LRN" => ep_core::Tone::Blue,
                                         _ => ep_core::Tone::None,
                                     };
-                                    let (amt_cls, amt_text) = match r.amount {
+                                    let (amt_cls, amt_text) = match amount {
                                         Some(v) => {
-                                            let (sym, dec) = r.currency_code.as_deref()
+                                            let (sym, dec) = currency_code.as_deref()
                                                 .and_then(|c| cur_map.get(c))
                                                 .cloned()
                                                 .unwrap_or_else(|| (String::new(), 2));
@@ -281,13 +276,11 @@ fn render_body(d: DashboardData) -> impl IntoView {
                                         }
                                         None => ("num dim", "—".to_string()),
                                     };
-                                    let _ = r.doc_id;
-                                    let _ = r.link_doc;
                                     view! {
                                         <tr>
-                                            <td class="mono dim">{r.time}</td>
-                                            <td><Tag tone=tone>{r.module.clone()}</Tag></td>
-                                            <td>{r.summary.clone()}</td>
+                                            <td class="mono dim">{time}</td>
+                                            <td><Tag tone=tone>{module}</Tag></td>
+                                            <td>{summary}</td>
                                             <td class=amt_cls>{amt_text}</td>
                                         </tr>
                                     }

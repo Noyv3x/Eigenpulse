@@ -75,6 +75,16 @@ struct FinanceUiState {
     filters: LedgerFilters,
 }
 
+struct TxnRowContext<'a> {
+    cat_lookup: &'a std::collections::HashMap<String, Category>,
+    cat_options: std::sync::Arc<Vec<Category>>,
+    acc_options: std::sync::Arc<Vec<Account>>,
+    delete: ServerAction<DeleteTxn>,
+    update_txn: ServerAction<UpdateTxn>,
+    decimals: u8,
+    symbol: String,
+}
+
 /// On the first time `action.value()` transitions to `Ok`, push a toast
 /// and, when supplied, close `modal_open`. Subsequent ticks for the same
 /// version (leptos resamples the value) are de-duplicated via a per-action
@@ -925,7 +935,15 @@ fn render_ledger_tab(
                                         && to_ts.map(|to| t.occurred_at <= to).unwrap_or(true)
                                     })
                                     .cloned()
-                                    .map(|t| render_txn_row(t, cat_lookup, cat_options.clone(), acc_options.clone(), delete, update_txn, decimals, row_symbol.clone()))
+                                    .map(|t| render_txn_row(t, TxnRowContext {
+                                        cat_lookup,
+                                        cat_options: cat_options.clone(),
+                                        acc_options: acc_options.clone(),
+                                        delete,
+                                        update_txn,
+                                        decimals,
+                                        symbol: row_symbol.clone(),
+                                    }))
                                     .collect_view()
                             }}
                         </tbody>
@@ -1069,20 +1087,7 @@ fn render_suggestions(items: Vec<crate::suggestions::Suggestion>) -> impl IntoVi
     .into_any()
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "row renderer threads shared lookups plus the scoped currency"
-)]
-fn render_txn_row(
-    t: Txn,
-    cat_lookup: &std::collections::HashMap<String, Category>,
-    cat_options: std::sync::Arc<Vec<Category>>,
-    acc_options: std::sync::Arc<Vec<Account>>,
-    delete: ServerAction<DeleteTxn>,
-    update_txn: ServerAction<UpdateTxn>,
-    decimals: u8,
-    symbol: String,
-) -> impl IntoView {
+fn render_txn_row(t: Txn, ctx: TxnRowContext<'_>) -> impl IntoView {
     let locale = use_locale();
     let date = fmt_ts_md(Some(t.occurred_at));
     let time_ = fmt_ts_hm(Some(t.occurred_at));
@@ -1097,23 +1102,26 @@ fn render_txn_row(
         _ => "txind exp",
     };
     let amount_text = if t.amount > 0 {
-        format!("+{}{}", symbol, fmt_minor(t.amount, decimals))
+        format!("+{}{}", ctx.symbol, fmt_minor(t.amount, ctx.decimals))
     } else {
-        format!("−{}{}", symbol, fmt_minor(t.amount.abs(), decimals))
+        format!("−{}{}", ctx.symbol, fmt_minor(t.amount.abs(), ctx.decimals))
     };
     let is_tfr = matches!(Tag::parse(&t.tag), Some(Tag::Tfr));
-    let cat_tone = cat_lookup
+    let cat_tone = ctx
+        .cat_lookup
         .get(&t.category_code)
         .map(|c| Tone::parse(&c.tone))
         .unwrap_or(Tone::None);
     // Resolve the human-readable name from the lookup; fall back to the
     // raw code only when the category was deleted but transactions still
     // reference it (the UI never shows the bare code by design).
-    let cat_label = cat_lookup
+    let cat_label = ctx
+        .cat_lookup
         .get(&t.category_code)
         .map(|c| c.name.clone())
         .unwrap_or_else(|| t.category_code.clone());
-    let account_label = acc_options
+    let account_label = ctx
+        .acc_options
         .iter()
         .find(|a| a.code == t.account_code)
         .map(|a| a.name.clone())
@@ -1139,7 +1147,7 @@ fn render_txn_row(
             <span class="dim mono"
                   style="font-size:10.5px"
                   title=ep_i18n::t(locale, "finance.title.tfr_not_editable")>"——"</span>
-            <RowDeleteAction action=delete value=doc_id.clone()
+            <RowDeleteAction action=ctx.delete value=doc_id.clone()
                              confirm=ep_i18n::t(locale, "finance.confirm.delete_transfer")/>
         }
         .into_any()
@@ -1149,7 +1157,7 @@ fn render_txn_row(
                     on:click=move |_| editing.set(true)>
                 {ep_i18n::t(locale, "finance.action.edit")}
             </button>
-            <RowDeleteAction action=delete value=doc_id.clone()
+            <RowDeleteAction action=ctx.delete value=doc_id.clone()
                              confirm=ep_i18n::t(locale, "finance.confirm.delete_txn")/>
         }
         .into_any()
@@ -1159,10 +1167,10 @@ fn render_txn_row(
         &t,
         editing,
         is_tfr,
-        cat_options,
-        acc_options,
-        update_txn,
-        decimals,
+        ctx.cat_options,
+        ctx.acc_options,
+        ctx.update_txn,
+        ctx.decimals,
     );
 
     view! {

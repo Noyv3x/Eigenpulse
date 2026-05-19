@@ -93,7 +93,8 @@ impl Notifier for DiscordNotifier {
             .post(&self.cfg.webhook_url)
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("discord request failed: {}", e.without_url()))?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "discord status {}: {}",

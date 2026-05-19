@@ -32,6 +32,7 @@ pub(crate) struct WorkoutInput {
     pub(crate) occurred_at: Option<i64>,
     pub(crate) kind: String,
     pub(crate) program: Option<String>,
+    pub(crate) duration_m: i64,
     pub(crate) load_text: Option<String>,
     pub(crate) strain: String,
     pub(crate) rpe: Option<i64>,
@@ -39,20 +40,12 @@ pub(crate) struct WorkoutInput {
 }
 
 #[cfg(feature = "ssr")]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn normalize_workout_input(
-    occurred_on: &str,
-    kind: &str,
-    program: &str,
-    duration_m: i64,
-    load_text: &str,
-    strain: &str,
-    rpe: &str,
-    notes: &str,
+    fields: &AddWorkoutFields,
 ) -> Result<WorkoutInput, ServerFnError> {
-    let occurred_at = normalize_occurred_on(occurred_on)?;
+    let occurred_at = normalize_occurred_on(&fields.occurred_on)?;
 
-    let kind = kind.trim();
+    let kind = fields.kind.trim();
     if kind.is_empty() {
         return Err(err("fitness.err.kind_required"));
     }
@@ -62,17 +55,17 @@ pub(crate) fn normalize_workout_input(
             MAX_WORKOUT_KIND_CHARS,
         ));
     }
-    if duration_m <= 0 {
+    if fields.duration_m <= 0 {
         return Err(err("fitness.err.duration_positive"));
     }
-    if duration_m > MAX_WORKOUT_DURATION_MINUTES {
+    if fields.duration_m > MAX_WORKOUT_DURATION_MINUTES {
         return Err(err_with(
             "fitness.err.duration_too_long",
             MAX_WORKOUT_DURATION_MINUTES,
         ));
     }
 
-    let program = ep_core::trim_to_option(program);
+    let program = ep_core::trim_to_option(&fields.program);
     if program
         .as_deref()
         .is_some_and(|program| program.chars().count() > MAX_WORKOUT_PROGRAM_CHARS)
@@ -83,7 +76,7 @@ pub(crate) fn normalize_workout_input(
         ));
     }
 
-    let load_text = ep_core::trim_to_option(load_text);
+    let load_text = ep_core::trim_to_option(&fields.load_text);
     if load_text
         .as_deref()
         .is_some_and(|load_text| load_text.chars().count() > MAX_WORKOUT_LOAD_TEXT_CHARS)
@@ -94,7 +87,7 @@ pub(crate) fn normalize_workout_input(
         ));
     }
 
-    let strain = strain.trim();
+    let strain = fields.strain.trim();
     let strain_kind = if strain.is_empty() {
         Strain::M
     } else {
@@ -104,7 +97,7 @@ pub(crate) fn normalize_workout_input(
         }
     };
 
-    let rpe = ep_core::trim_to_option(rpe)
+    let rpe = ep_core::trim_to_option(&fields.rpe)
         .map(|rpe| {
             rpe.parse::<i64>()
                 .ok()
@@ -113,7 +106,7 @@ pub(crate) fn normalize_workout_input(
         })
         .transpose()?;
 
-    let notes = ep_core::trim_to_option(notes);
+    let notes = ep_core::trim_to_option(&fields.notes);
     if notes
         .as_deref()
         .is_some_and(|notes| notes.chars().count() > MAX_WORKOUT_NOTES_CHARS)
@@ -128,6 +121,7 @@ pub(crate) fn normalize_workout_input(
         occurred_at,
         kind: kind.to_string(),
         program,
+        duration_m: fields.duration_m,
         load_text,
         strain: strain_kind.as_str().to_string(),
         rpe,
@@ -464,7 +458,10 @@ mod streak_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Leptos ActionForm fields map to server-fn parameters"
+)]
 #[server(AddWorkout, "/api/_internal/fit", "Url", "add_workout")]
 pub async fn add_workout(
     occurred_on: String,
@@ -506,16 +503,7 @@ pub async fn add_workout_inner(
     pool: &sqlx::SqlitePool,
     fields: AddWorkoutFields,
 ) -> Result<Workout, ServerFnError> {
-    let input = normalize_workout_input(
-        &fields.occurred_on,
-        &fields.kind,
-        &fields.program,
-        fields.duration_m,
-        &fields.load_text,
-        &fields.strain,
-        &fields.rpe,
-        &fields.notes,
-    )?;
+    let input = normalize_workout_input(&fields)?;
     let occurred = input.occurred_at.unwrap_or_else(ep_core::unix_now);
     let mut tx = pool.begin().await.map_err(server_err)?;
     let doc_id = ep_core::next_doc_id(
@@ -534,7 +522,7 @@ pub async fn add_workout_inner(
     .bind(occurred)
     .bind(&input.kind)
     .bind(&input.program)
-    .bind(fields.duration_m)
+    .bind(input.duration_m)
     .bind(&input.load_text)
     .bind(&input.strain)
     .bind(input.rpe)
@@ -559,7 +547,7 @@ pub async fn add_workout_inner(
         occurred_at: occurred,
         kind: input.kind,
         program: input.program,
-        duration_m: fields.duration_m,
+        duration_m: input.duration_m,
         load_text: input.load_text,
         strain: Some(input.strain),
         rpe: input.rpe,
@@ -567,7 +555,10 @@ pub async fn add_workout_inner(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Leptos ActionForm fields map to server-fn parameters"
+)]
 #[server(UpdateWorkout, "/api/_internal/fit", "Url", "update_workout")]
 pub async fn update_workout(
     doc_id: String,
@@ -584,18 +575,18 @@ pub async fn update_workout(
     {
         ep_auth::require_user_for_server_fn().await?;
         let doc_id = normalize_doc_id(&doc_id)?;
-        let input = normalize_workout_input(
-            &occurred_on,
-            &kind,
-            &program,
+        let input = normalize_workout_input(&AddWorkoutFields {
+            occurred_on,
+            kind,
+            program,
             duration_m,
-            &load_text,
-            &strain,
-            &rpe,
-            &notes,
-        )?;
+            load_text,
+            strain,
+            rpe,
+            notes,
+        })?;
         let st = ep_core::app_state_context()?;
-        update_workout_inner(&st.db, &doc_id, input, duration_m).await
+        update_workout_inner(&st.db, &doc_id, input).await
     }
     #[cfg(not(feature = "ssr"))]
     {
@@ -608,7 +599,6 @@ pub(crate) async fn update_workout_inner(
     pool: &sqlx::SqlitePool,
     doc_id: &str,
     input: WorkoutInput,
-    duration_m: i64,
 ) -> Result<Workout, ServerFnError> {
     let mut tx = pool.begin().await.map_err(server_err)?;
     let row: Option<Workout> = sqlx::query_as(
@@ -627,7 +617,7 @@ pub(crate) async fn update_workout_inner(
     .bind(input.occurred_at)
     .bind(&input.kind)
     .bind(&input.program)
-    .bind(duration_m)
+    .bind(input.duration_m)
     .bind(&input.load_text)
     .bind(&input.strain)
     .bind(input.rpe)
@@ -662,22 +652,36 @@ pub(crate) async fn update_workout_inner(
 mod tests {
     use super::*;
 
+    fn valid_fields() -> AddWorkoutFields {
+        AddWorkoutFields {
+            occurred_on: String::new(),
+            kind: "Run".into(),
+            program: String::new(),
+            duration_m: 30,
+            load_text: String::new(),
+            strain: "M".into(),
+            rpe: String::new(),
+            notes: String::new(),
+        }
+    }
+
     #[test]
     fn normalize_workout_input_trims_fields_and_defaults_blank_strain() {
-        let got = normalize_workout_input(
-            "",
-            "  Run  ",
-            "  Zone 2  ",
-            45,
-            "  5km  ",
-            "   ",
-            " 7 ",
-            " ok ",
-        )
-        .unwrap();
+        let fields = AddWorkoutFields {
+            occurred_on: String::new(),
+            kind: "  Run  ".into(),
+            program: "  Zone 2  ".into(),
+            duration_m: 45,
+            load_text: "  5km  ".into(),
+            strain: "   ".into(),
+            rpe: " 7 ".into(),
+            notes: " ok ".into(),
+        };
+        let got = normalize_workout_input(&fields).unwrap();
         assert_eq!(got.occurred_at, None);
         assert_eq!(got.kind, "Run");
         assert_eq!(got.program.as_deref(), Some("Zone 2"));
+        assert_eq!(got.duration_m, 45);
         assert_eq!(got.load_text.as_deref(), Some("5km"));
         assert_eq!(got.strain, "M");
         assert_eq!(got.rpe, Some(7));
@@ -686,9 +690,16 @@ mod tests {
 
     #[test]
     fn normalize_workout_input_keeps_valid_strain() {
-        let got = normalize_workout_input("", "Lift", "", 60, "", " H ", "", "").unwrap();
+        let fields = AddWorkoutFields {
+            kind: "Lift".into(),
+            duration_m: 60,
+            strain: " H ".into(),
+            ..valid_fields()
+        };
+        let got = normalize_workout_input(&fields).unwrap();
         assert_eq!(got.program, None);
         assert_eq!(got.load_text, None);
+        assert_eq!(got.duration_m, 60);
         assert_eq!(got.strain, "H");
         assert_eq!(got.rpe, None);
         assert_eq!(got.notes, None);
@@ -696,94 +707,84 @@ mod tests {
 
     #[test]
     fn normalize_workout_input_rejects_invalid_values() {
-        assert!(normalize_workout_input("", "   ", "", 30, "", "M", "", "").is_err());
-        assert!(normalize_workout_input("", "Run", "", 0, "", "M", "", "").is_err());
-        assert!(normalize_workout_input(
-            "",
-            "Run",
-            "",
-            MAX_WORKOUT_DURATION_MINUTES + 1,
-            "",
-            "M",
-            "",
-            ""
-        )
-        .is_err());
-        assert!(normalize_workout_input("", "Run", "", 30, "", "easy", "", "").is_err());
-        assert!(normalize_workout_input("", "Run", "", 30, "", "M", "0", "").is_err());
-        assert!(normalize_workout_input("", "Run", "", 30, "", "M", "11", "").is_err());
-        assert!(normalize_workout_input("", "Run", "", 30, "", "M", "hard", "").is_err());
+        let mut fields = valid_fields();
+        fields.kind = "   ".into();
+        assert!(normalize_workout_input(&fields).is_err());
+
+        let mut fields = valid_fields();
+        fields.duration_m = 0;
+        assert!(normalize_workout_input(&fields).is_err());
+
+        let mut fields = valid_fields();
+        fields.duration_m = MAX_WORKOUT_DURATION_MINUTES + 1;
+        assert!(normalize_workout_input(&fields).is_err());
+
+        let mut fields = valid_fields();
+        fields.strain = "easy".into();
+        assert!(normalize_workout_input(&fields).is_err());
+
+        for rpe in ["0", "11", "hard"] {
+            let mut fields = valid_fields();
+            fields.rpe = rpe.into();
+            assert!(normalize_workout_input(&fields).is_err());
+        }
     }
 
     #[test]
     fn normalize_workout_input_accepts_backdated_session_date() {
-        let got = normalize_workout_input("2026-05-08", "Run", "", 30, "", "M", "", "").unwrap();
+        let fields = AddWorkoutFields {
+            occurred_on: "2026-05-08".into(),
+            ..valid_fields()
+        };
+        let got = normalize_workout_input(&fields).unwrap();
         assert_eq!(got.occurred_at, Some(1_778_241_600));
-        assert!(normalize_workout_input("2026/05/08", "Run", "", 30, "", "M", "", "").is_err());
-        assert!(normalize_workout_input("2026-02-31", "Run", "", 30, "", "M", "", "").is_err());
+
+        for occurred_on in ["2026/05/08", "2026-02-31"] {
+            let fields = AddWorkoutFields {
+                occurred_on: occurred_on.into(),
+                ..valid_fields()
+            };
+            assert!(normalize_workout_input(&fields).is_err());
+        }
     }
 
     #[test]
     fn normalize_workout_input_enforces_text_lengths() {
-        let kind_err = normalize_workout_input(
-            "",
-            &"x".repeat(MAX_WORKOUT_KIND_CHARS + 1),
-            "",
-            30,
-            "",
-            "M",
-            "",
-            "",
-        )
-        .expect_err("long kind should fail");
+        let fields = AddWorkoutFields {
+            kind: "x".repeat(MAX_WORKOUT_KIND_CHARS + 1),
+            ..valid_fields()
+        };
+        let kind_err = normalize_workout_input(&fields).expect_err("long kind should fail");
         assert_eq!(
             ep_i18n::parse_err(&kind_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("fitness.err.kind_too_long", "64"))
         );
 
-        let program_err = normalize_workout_input(
-            "",
-            "Run",
-            &"x".repeat(MAX_WORKOUT_PROGRAM_CHARS + 1),
-            30,
-            "",
-            "M",
-            "",
-            "",
-        )
-        .expect_err("long program should fail");
+        let fields = AddWorkoutFields {
+            program: "x".repeat(MAX_WORKOUT_PROGRAM_CHARS + 1),
+            ..valid_fields()
+        };
+        let program_err = normalize_workout_input(&fields).expect_err("long program should fail");
         assert_eq!(
             ep_i18n::parse_err(&program_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("fitness.err.program_too_long", "128"))
         );
 
-        let load_err = normalize_workout_input(
-            "",
-            "Run",
-            "",
-            30,
-            &"x".repeat(MAX_WORKOUT_LOAD_TEXT_CHARS + 1),
-            "M",
-            "",
-            "",
-        )
-        .expect_err("long load text should fail");
+        let fields = AddWorkoutFields {
+            load_text: "x".repeat(MAX_WORKOUT_LOAD_TEXT_CHARS + 1),
+            ..valid_fields()
+        };
+        let load_err = normalize_workout_input(&fields).expect_err("long load text should fail");
         assert_eq!(
             ep_i18n::parse_err(&load_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("fitness.err.load_text_too_long", "128"))
         );
 
-        let notes_err = normalize_workout_input(
-            "",
-            "Run",
-            "",
-            30,
-            "",
-            "M",
-            "",
-            &"x".repeat(MAX_WORKOUT_NOTES_CHARS + 1),
-        )
-        .expect_err("long notes should fail");
+        let fields = AddWorkoutFields {
+            notes: "x".repeat(MAX_WORKOUT_NOTES_CHARS + 1),
+            ..valid_fields()
+        };
+        let notes_err = normalize_workout_input(&fields).expect_err("long notes should fail");
         assert_eq!(
             ep_i18n::parse_err(&notes_err).map(|(code, payload)| (code, payload.unwrap_or(""))),
             Some(("fitness.err.notes_too_long", "2000"))
@@ -942,10 +943,18 @@ mod tests {
         .await
         .unwrap();
 
-        let input =
-            normalize_workout_input("2026-05-08", "Lift", "PPL", 55, "10t", "H", "8", "good")
-                .unwrap();
-        let got = update_workout_inner(&pool, "FIT-S-0001", input, 55)
+        let fields = AddWorkoutFields {
+            occurred_on: "2026-05-08".into(),
+            kind: "Lift".into(),
+            program: "PPL".into(),
+            duration_m: 55,
+            load_text: "10t".into(),
+            strain: "H".into(),
+            rpe: "8".into(),
+            notes: "good".into(),
+        };
+        let input = normalize_workout_input(&fields).unwrap();
+        let got = update_workout_inner(&pool, "FIT-S-0001", input)
             .await
             .expect("update workout");
 

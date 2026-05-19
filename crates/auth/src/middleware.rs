@@ -29,7 +29,14 @@ fn is_public(uri: &Uri) -> bool {
     let path = uri.path();
     PUBLIC_PREFIXES
         .iter()
-        .any(|p| path == *p || path.starts_with(&format!("{p}/")))
+        .any(|prefix| path_matches_prefix(path, prefix))
+}
+
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 pub async fn require_session(

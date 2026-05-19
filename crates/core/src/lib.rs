@@ -92,6 +92,27 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
+/// Apply a nullable PATCH field to its current optional value.
+///
+/// `None` means the field was omitted and keeps `current`; `Some(None)` means
+/// explicit JSON `null` and clears the value; `Some(Some(value))` replaces it.
+pub fn apply_nullable_patch<T>(input: Option<Option<T>>, current: Option<T>) -> Option<T> {
+    match input {
+        Some(value) => value,
+        None => current,
+    }
+}
+
+/// Apply a nullable PATCH field, returning `T::default()` when the result is
+/// absent. This is useful for existing server-fn inputs that use blank strings
+/// as "no value".
+pub fn apply_nullable_patch_or_default<T: Default>(
+    input: Option<Option<T>>,
+    current: Option<T>,
+) -> T {
+    apply_nullable_patch(input, current).unwrap_or_default()
+}
+
 #[cfg(feature = "ssr")]
 pub fn app_state_context() -> Result<AppState, leptos::server_fn::ServerFnError> {
     leptos::prelude::use_context::<AppState>()
@@ -113,14 +134,46 @@ pub use notify_msg::{NotifyBusHandle, NotifyBusTrait, NotifyMessage};
 #[cfg(feature = "ssr")]
 pub use refs::{clear_doc_references, delete_doc_activity_and_references};
 #[cfg(feature = "ssr")]
-pub use registry::{run_module_migrations, split_sql, ModuleRegistry};
+pub use registry::{run_module_migrations, ModuleRegistry};
 #[cfg(feature = "ssr")]
 pub use state::AppState;
 
 #[cfg(test)]
 mod tests {
-    use super::server_err;
+    use super::{apply_nullable_patch, apply_nullable_patch_or_default, server_err};
     use leptos::server_fn::ServerFnError;
+
+    #[test]
+    fn apply_nullable_patch_preserves_clears_or_replaces() {
+        assert_eq!(
+            apply_nullable_patch(None, Some("old".to_string())),
+            Some("old".to_string())
+        );
+        assert_eq!(
+            apply_nullable_patch(Some(None), Some("old".to_string())),
+            None
+        );
+        assert_eq!(
+            apply_nullable_patch(Some(Some("new".to_string())), Some("old".to_string())),
+            Some("new".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_nullable_patch_or_default_converts_absent_to_default() {
+        assert_eq!(
+            apply_nullable_patch_or_default(None, Some("old".to_string())),
+            "old"
+        );
+        assert_eq!(
+            apply_nullable_patch_or_default(Some(None), Some("old".to_string())),
+            ""
+        );
+        assert_eq!(
+            apply_nullable_patch_or_default(Some(Some("new".to_string())), None),
+            "new"
+        );
+    }
 
     #[test]
     fn server_err_hides_internal_detail_on_ssr() {

@@ -138,17 +138,11 @@ mod tests {
 
     #[tokio::test]
     async fn api_json_rejection_uses_shared_error_shape() {
-        #[derive(Debug, serde::Deserialize)]
-        struct Input {
-            #[allow(dead_code)]
-            title: String,
-        }
-
         let req = Request::builder()
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from("{"))
             .expect("request");
-        let response = ApiJson::<Input>::from_request(req, &())
+        let response = ApiJson::<serde_json::Value>::from_request(req, &())
             .await
             .expect_err("malformed json should fail");
 
@@ -159,8 +153,8 @@ mod tests {
     async fn api_query_rejection_uses_shared_error_shape() {
         #[derive(Debug, serde::Deserialize)]
         struct Input {
-            #[allow(dead_code)]
-            period: String,
+            #[serde(rename = "period")]
+            _period: String,
         }
 
         let mut parts = Request::builder()

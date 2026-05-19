@@ -4,8 +4,8 @@ use crate::server_fns::{
     create_currency_inner, delete_account_inner, delete_category_inner, delete_currency_inner,
     dispatch_large_expense_notification, list_accounts_inner, list_currencies_inner,
     resolve_currency, set_budget_inner, set_primary_currency_inner, update_account_inner_with,
-    update_category_inner_with, update_currency_inner, update_txn_inner, AddTxnFields,
-    UpdateTxnFields,
+    update_category_inner_with, update_currency_inner, update_txn_inner, AddTransferFields,
+    AddTxnFields, UpdateTxnFields,
 };
 use axum::extract::{Path, State};
 use axum::response::Response;
@@ -20,7 +20,7 @@ pub fn open_api(_state: AppState) -> Router<AppState> {
     // axum 0.7 / matchit 0.7 uses `:param`; the `{param}` form is axum 0.8.
     // Accounts / categories / budgets are keyed per-currency, so their item
     // routes carry the currency segment too.
-    Router::new()
+    Router::<AppState>::new()
         .route("/currency", get(list_currency).post(post_currency))
         .route(
             "/currency/:code",
@@ -50,9 +50,10 @@ pub fn open_api(_state: AppState) -> Router<AppState> {
 /// Parse a wire amount string into minor units at `decimals` precision,
 /// mapping a bad shape to a 4xx response. The sign is preserved — callers
 /// that need a magnitude apply `.abs()`.
-// `Response` is the module-wide axum error type; boxing it here would only
-// complicate `?` at the call sites without buying anything real.
-#[allow(clippy::result_large_err)]
+#[allow(
+    clippy::result_large_err,
+    reason = "Response is the module-wide axum error type; boxing it would only complicate ? call sites"
+)]
 fn parse_api_amount(input: &str, decimals: u8) -> Result<i64, Response> {
     crate::server_fns::parse_signed_minor(input, decimals).map_err(server_err_to_response)
 }
@@ -343,11 +344,7 @@ async fn patch_txn(
         Some(s) => parse_api_amount(s, decimals)?.abs(),
         None => ca.abs(),
     };
-    let new_note: Option<String> = match input.note {
-        Some(Some(s)) => Some(s),
-        Some(None) => None,
-        None => cn,
-    };
+    let new_note = ep_core::apply_nullable_patch(input.note, cn);
     let fields = UpdateTxnFields {
         merchant: input.merchant.unwrap_or(cm),
         category_code: input.category_code.unwrap_or(cc),
@@ -404,17 +401,18 @@ async fn post_transfer(
         .map_err(server_err_to_response)?
         .unwrap_or_else(ep_core::unix_now);
 
-    let note = input.note.as_deref();
     let (from_txn, to_txn) = add_transfer_inner(
         &state.db,
-        &from_cur.code,
-        &input.from_account,
-        &to_cur.code,
-        &input.to_account,
-        from_amount,
-        to_amount,
-        note,
-        occurred,
+        AddTransferFields {
+            from_currency: from_cur.code,
+            from_account: input.from_account,
+            to_currency: to_cur.code,
+            to_account: input.to_account,
+            from_amount,
+            to_amount,
+            note: input.note,
+            occurred_at: occurred,
+        },
     )
     .await
     .map_err(server_err_to_response)?;

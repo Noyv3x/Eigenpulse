@@ -56,7 +56,12 @@ impl Notifier for TelegramNotifier {
             parse_mode: "Markdown",
             disable_web_page_preview: true,
         };
-        let resp = crate::http_client().post(&url).json(&body).send().await?;
+        let resp = crate::http_client()
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("telegram request failed: {}", e.without_url()))?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "telegram status {}: {}",

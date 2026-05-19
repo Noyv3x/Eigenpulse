@@ -96,9 +96,8 @@ pub fn provide_tweak_state(initial: TweakState) -> RwSignal<TweakState> {
                     let _ = storage.set_item("ep.tweaks", &serialized);
                 }
                 if let Some(doc) = win.document() {
-                    let cookie = format!(
-                        "ep_tweaks={serialized}; path=/; max-age=31536000; SameSite=Strict"
-                    );
+                    let cookie =
+                        format!("ep_tweaks={serialized}; Path=/; Max-Age=31536000; SameSite=Lax");
                     if let Ok(html_doc) = doc.clone().dyn_into::<web_sys::HtmlDocument>() {
                         let _ = html_doc.set_cookie(&cookie);
                     }
