@@ -41,6 +41,10 @@ mod ssr_module {
                     "002_multi_currency",
                     include_str!("../migrations/002_multi_currency.sql"),
                 ),
+                (
+                    "003_money_text",
+                    include_str!("../migrations/003_money_text.sql"),
+                ),
             ]
         }
 
@@ -79,7 +83,7 @@ mod ssr_module {
                     doc_id TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     status TEXT,
-                    amount INTEGER,
+                    amount TEXT,
                     currency_code TEXT,
                     link_doc TEXT
                 )",

@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
 
+fn amt(v: i64) -> ep_core::MinorAmount {
+    ep_core::MinorAmount::from(v)
+}
+
 fn server_fn_error_text_en(e: &leptos::server_fn::ServerFnError) -> String {
     let Some((code, payload)) = ep_i18n::parse_err(e) else {
         return e.to_string();
@@ -97,7 +101,7 @@ async fn make_test_pool() -> anyhow::Result<SqlitePool> {
 /// nothing — call-sites assert on `fetch_balance` post-state. `tone = ''`
 /// mirrors the seed defaults. Everything is scoped to the seeded `CNY`
 /// currency (decimals = 2), so the major-unit `f64` balance is stored as
-/// integer minor units (`x100`).
+/// exact minor units (`x100`) stored as canonical decimal text.
 async fn seed_account(pool: &SqlitePool, code: &str, balance: f64) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO fin_account (currency_code, code, name, type, tone, balance, archived) \
@@ -105,7 +109,7 @@ async fn seed_account(pool: &SqlitePool, code: &str, balance: f64) -> anyhow::Re
     )
     .bind(code)
     .bind(format!("Test {}", code))
-    .bind((balance * 100.0).round() as i64)
+    .bind(amt((balance * 100.0).round() as i64))
     .execute(pool)
     .await?;
     Ok(())
@@ -137,8 +141,8 @@ fn transfer_fields(
         from_account: "ACC-FROM".into(),
         to_currency: "CNY".into(),
         to_account: "ACC-TO".into(),
-        from_amount,
-        to_amount,
+        from_amount: amt(from_amount),
+        to_amount: amt(to_amount),
         note: note.map(str::to_string),
         occurred_at,
     }
@@ -146,16 +150,16 @@ fn transfer_fields(
 
 /// Read back the current balance of an account in the `CNY` currency.
 /// Returns `None` if the row is absent (lets transfer-cascade tests assert
-/// "row didn't accidentally vanish"). The DB column is integer minor units;
+/// "row didn't accidentally vanish"). The DB column is exact minor units;
 /// we scale back down to major-unit `f64` so assertions stay readable.
 async fn fetch_balance(pool: &SqlitePool, code: &str) -> anyhow::Result<Option<f64>> {
-    let bal: Option<i64> = sqlx::query_scalar(
+    let bal: Option<ep_core::MinorAmount> = sqlx::query_scalar(
         "SELECT balance FROM fin_account WHERE currency_code = 'CNY' AND code = ?1",
     )
     .bind(code)
     .fetch_optional(pool)
     .await?;
-    Ok(bal.map(|b| b as f64 / 100.0))
+    Ok(bal.map(|b| b.to_f64() / 100.0))
 }
 
 /// Count the number of `fin_txn` rows. Used to assert "deletion took
@@ -199,14 +203,13 @@ async fn pool_helper_applies_finance_migrations() {
     .expect("schema check");
     assert_eq!(row, (1, 1), "expected baseline CRUD columns to exist");
 
-    // Migrations should be ledger'd as applied — both the 001 baseline and
-    // the 002 multi-currency rebuild.
+    // Migrations should be ledger'd as applied.
     let n: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 2, "expected both finance migrations to be ledgered");
+    assert_eq!(n, 3, "expected all finance migrations to be ledgered");
 }
 
 /// Idempotency: running the migrations a second time should be a no-op,
@@ -218,13 +221,13 @@ async fn pool_helper_is_idempotent_on_double_apply() {
     ep_core::run_module_migrations(&pool, ep_finance::MODULE)
         .await
         .expect("second apply must be no-op");
-    // Still exactly the two finance ledger rows — no duplicates.
+    // Still exactly the finance ledger rows — no duplicates.
     let n: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM _ep_module_migration WHERE module = 'FIN'")
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 2);
+    assert_eq!(n, 3);
 }
 
 /// `seed_account` + `fetch_balance` round-trip. Cheap fixture-helper test
@@ -237,6 +240,79 @@ async fn fixture_helpers_round_trip() {
     assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(100.0));
     assert_eq!(fetch_balance(&pool, "ACC-MISSING").await.unwrap(), None);
     assert_eq!(count_txns(&pool).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn crypto_precision_round_trips_beyond_i64() {
+    let pool = make_test_pool().await.expect("pool");
+    let eth = ep_finance::create_currency_inner(
+        &pool,
+        "ETH".into(),
+        "ETH".into(),
+        "Ethereum".into(),
+        18,
+        10,
+    )
+    .await
+    .expect("eth currency");
+    assert_eq!(eth.decimals, 18);
+
+    ep_finance::create_category_inner(
+        &pool,
+        eth.code.clone(),
+        "GAS".into(),
+        "Gas".into(),
+        "".into(),
+        1,
+    )
+    .await
+    .expect("category");
+
+    let opening =
+        ep_core::parse_minor("12345.000000000000000001", eth.decimals).expect("opening amount");
+    let account = ep_finance::create_account_inner(
+        &pool,
+        eth.code.clone(),
+        "WALLET".into(),
+        "Wallet".into(),
+        "Investment".into(),
+        "violet".into(),
+        opening,
+    )
+    .await
+    .expect("account");
+    assert_eq!(account.balance, opening);
+    assert!(account.balance.as_i128() > i128::from(i64::MAX));
+
+    let income = ep_core::parse_minor("0.123456789012345678", eth.decimals).expect("income");
+    let txn = ep_finance::add_txn_inner(
+        &pool,
+        ep_finance::AddTxnFields {
+            currency_code: eth.code.clone(),
+            merchant: "staking reward".into(),
+            category_code: "GAS".into(),
+            account_code: "WALLET".into(),
+            amount: income,
+            tag: "inc".into(),
+            note: None,
+            linked_doc_id: None,
+            occurred_at: ep_core::unix_now(),
+        },
+    )
+    .await
+    .expect("txn");
+    assert_eq!(txn.amount, income);
+
+    let balance: ep_core::MinorAmount = sqlx::query_scalar(
+        "SELECT balance FROM fin_account WHERE currency_code = 'ETH' AND code = 'WALLET'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("balance");
+    assert_eq!(balance, opening + income);
+
+    let json = serde_json::to_value(&txn).expect("txn json");
+    assert_eq!(json["amount"], serde_json::json!(income.to_string()));
 }
 
 #[tokio::test]
@@ -387,7 +463,7 @@ async fn add_txn_inner_trims_and_persists_side_effects() {
             merchant: "  Coffee  ".into(),
             category_code: " EXP ".into(),
             account_code: " ACC-T ".into(),
-            amount: -1250,
+            amount: amt(-1250),
             tag: " exp ".into(),
             note: Some("  morning  ".into()),
             linked_doc_id: Some(" FIT-S-0001 ".into()),
@@ -430,7 +506,7 @@ async fn add_txn_inner_rejects_invalid_contract_before_insert() {
             merchant: "Coffee".into(),
             category_code: "EXP".into(),
             account_code: "ACC-T".into(),
-            amount: 1250,
+            amount: amt(1250),
             tag: "exp".into(),
             note: None,
             linked_doc_id: None,
@@ -451,7 +527,7 @@ async fn add_txn_inner_rejects_invalid_contract_before_insert() {
             merchant: "Move money".into(),
             category_code: "EXP".into(),
             account_code: "ACC-T".into(),
-            amount: -1250,
+            amount: amt(-1250),
             tag: "tfr".into(),
             note: None,
             linked_doc_id: None,
@@ -472,7 +548,7 @@ async fn add_txn_inner_rejects_invalid_contract_before_insert() {
             merchant: "Coffee".into(),
             category_code: "EXP".into(),
             account_code: "ACC-T".into(),
-            amount: -1250,
+            amount: amt(-1250),
             tag: "exp".into(),
             note: None,
             linked_doc_id: Some("../FIT-S-0001".into()),
@@ -646,7 +722,7 @@ async fn delete_txn_inner_clears_external_references_to_fin_doc() {
 async fn delete_unused_category_removes_budgets_too() {
     let pool = make_test_pool().await.expect("pool");
     seed_category(&pool, "CAT", "Category").await.unwrap();
-    ep_finance::set_budget_inner(&pool, "CNY", "2026-05", "CAT", 50_000)
+    ep_finance::set_budget_inner(&pool, "CNY", "2026-05", "CAT", amt(50_000))
         .await
         .expect("budget");
 
@@ -796,7 +872,7 @@ async fn finance_open_api_rejects_negative_category_sort_order() {
 async fn set_budget_rejects_unknown_category_before_insert() {
     let pool = make_test_pool().await.expect("pool");
 
-    let err = ep_finance::set_budget_inner(&pool, "CNY", "2026-05", "MISSING", 50_000)
+    let err = ep_finance::set_budget_inner(&pool, "CNY", "2026-05", "MISSING", amt(50_000))
         .await
         .expect_err("unknown category should be a domain error");
 
@@ -1083,7 +1159,7 @@ async fn parse_occurred_at_rejects_malformed_inputs() {
 
 /// Insert a fin_txn directly + nudge the account balance accordingly. Used
 /// by the update_txn tests as a "previous state" setup primitive. Scoped to
-/// `CNY`; the major-unit `f64` amount is stored as integer minor units.
+/// `CNY`; the major-unit `f64` amount is stored as exact minor units.
 async fn seed_txn_directly(
     pool: &SqlitePool,
     doc_id: &str,
@@ -1092,7 +1168,7 @@ async fn seed_txn_directly(
     amount: f64,
     tag: &str,
 ) -> anyhow::Result<()> {
-    let minor = (amount * 100.0).round() as i64;
+    let minor = amt((amount * 100.0).round() as i64);
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, currency_code, occurred_at, merchant, category_code,
@@ -1106,13 +1182,17 @@ async fn seed_txn_directly(
     .bind(tag)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
-        "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = 'CNY' AND code = ?2",
+    let current: ep_core::MinorAmount = sqlx::query_scalar(
+        "SELECT balance FROM fin_account WHERE currency_code = 'CNY' AND code = ?1",
     )
-    .bind(minor)
     .bind(account_code)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
+    sqlx::query("UPDATE fin_account SET balance = ?1 WHERE currency_code = 'CNY' AND code = ?2")
+        .bind(current + minor)
+        .bind(account_code)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1136,7 +1216,7 @@ async fn update_txn_balance_delta_same_account() {
             merchant: "edited".into(),
             category_code: "EXP".into(),
             account_code: "ACC-T".into(),
-            amount: 5000,
+            amount: amt(5000),
             note: None,
             occurred_at_input: String::new(),
         },
@@ -1171,7 +1251,7 @@ async fn update_txn_cross_account() {
             merchant: "moved".into(),
             category_code: "EXP".into(),
             account_code: "ACC-B".into(),
-            amount: 10_000,
+            amount: amt(10_000),
             note: None,
             occurred_at_input: String::new(),
         },
@@ -1207,7 +1287,7 @@ async fn update_txn_trims_identifiers_and_optional_note() {
             merchant: "  trimmed merchant  ".into(),
             category_code: " EXP ".into(),
             account_code: " ACC-T ".into(),
-            amount: 2500,
+            amount: amt(2500),
             note: Some("  reviewed  ".into()),
             occurred_at_input: String::new(),
         },
@@ -1273,7 +1353,7 @@ async fn update_txn_clears_existing_cross_module_reference() {
             merchant: "edited".into(),
             category_code: "EXP".into(),
             account_code: "ACC-T".into(),
-            amount: 8000,
+            amount: amt(8000),
             note: None,
             occurred_at_input: String::new(),
         },
@@ -1450,9 +1530,10 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
     sqlx::query(
         "INSERT INTO fin_txn (doc_id, currency_code, occurred_at, merchant, category_code,
                               account_code, amount, tag, note, linked_doc_id)
-         VALUES ('FIN-T-EXP', 'CNY', ?1, 'coffee', 'F&B', 'ACC-FROM', -4000, 'exp', NULL, NULL)",
+         VALUES ('FIN-T-EXP', 'CNY', ?1, 'coffee', 'F&B', 'ACC-FROM', ?2, 'exp', NULL, NULL)",
     )
     .bind(now)
+    .bind(amt(-4000))
     .execute(&pool)
     .await
     .unwrap();
@@ -1462,64 +1543,79 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
         .expect("transfer ok");
 
     // 1) Month expense — must equal 4000 (NOT 54000).
-    let month_expense: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(-amount), 0) FROM fin_txn
+    let month_expense: ep_core::MinorAmount = sqlx::query_scalar::<_, ep_core::MinorAmount>(
+        "SELECT amount FROM fin_txn
           WHERE tag = 'exp'
             AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
-    .unwrap();
+    .unwrap()
+    .into_iter()
+    .map(|a| a.abs())
+    .sum();
     assert_eq!(
-        month_expense, 4000,
+        month_expense,
+        amt(4000),
         "month expense should be 4000 (not 54000 — transfer not counted)"
     );
 
     // 2) Category share — TFR must NOT appear; F&B must show 4000.
-    let cat_rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT category_code, SUM(-amount) FROM fin_txn
+    let cat_amounts: Vec<(String, ep_core::MinorAmount)> = sqlx::query_as(
+        "SELECT category_code, amount FROM fin_txn
           WHERE tag = 'exp'
-            AND occurred_at >= unixepoch('now','localtime','start of month','utc')
-          GROUP BY category_code",
+            AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
+    let mut cat_rows: std::collections::HashMap<String, ep_core::MinorAmount> =
+        std::collections::HashMap::new();
+    for (category, amount) in cat_amounts {
+        *cat_rows.entry(category).or_default() += amount.abs();
+    }
     assert!(
-        !cat_rows.iter().any(|(c, _)| c == "TFR"),
+        !cat_rows.contains_key("TFR"),
         "TFR must not appear in category share; rows = {cat_rows:?}"
     );
     let fb = cat_rows
-        .iter()
-        .find(|(c, _)| c == "F&B")
-        .map(|(_, v)| *v)
-        .unwrap_or(0);
-    assert_eq!(fb, 4000, "F&B share should be 4000");
+        .get("F&B")
+        .copied()
+        .unwrap_or(ep_core::MinorAmount::ZERO);
+    assert_eq!(fb, amt(4000), "F&B share should be 4000");
 
     // 3) 90-day rolling — also 4000, drives `avg_expense_3m` / emergency_months.
-    let expense_90d: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(-amount), 0) FROM fin_txn
+    let expense_90d: ep_core::MinorAmount = sqlx::query_scalar::<_, ep_core::MinorAmount>(
+        "SELECT amount FROM fin_txn
           WHERE tag = 'exp'
             AND occurred_at >= unixepoch('now','localtime','-90 days','utc')",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
-    .unwrap();
-    assert_eq!(expense_90d, 4000, "90-day expense should be 4000");
+    .unwrap()
+    .into_iter()
+    .map(|a| a.abs())
+    .sum();
+    assert_eq!(expense_90d, amt(4000), "90-day expense should be 4000");
 
     // 4) Week net — should be -4000 (income 0 + true exp -4000), NOT -54000.
-    let week_net: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(
-            SUM(CASE WHEN tag = 'inc' AND amount > 0 THEN amount
-                     WHEN tag = 'exp' AND amount < 0 THEN amount
-                     ELSE 0 END), 0)
+    let week_rows: Vec<(ep_core::MinorAmount, String)> = sqlx::query_as(
+        "SELECT amount, tag
            FROM fin_txn
           WHERE occurred_at >= unixepoch('now','localtime','-7 days','utc')",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(week_net, -4000, "week net should be -4000");
+    let week_net: ep_core::MinorAmount = week_rows
+        .into_iter()
+        .map(|(amount, tag)| match tag.as_str() {
+            "inc" if amount.is_positive() => amount,
+            "exp" if amount.is_negative() => amount,
+            _ => ep_core::MinorAmount::ZERO,
+        })
+        .sum();
+    assert_eq!(week_net, amt(-4000), "week net should be -4000");
 
     // 5) Shared 12-month trend helper — reports and finance page both use
     // this path, so it must keep the same transfer-exclusion invariant.
@@ -1536,11 +1632,13 @@ async fn transfer_rows_do_not_pollute_expense_aggregates() {
         .find(|m| m.period == current_period)
         .expect("current month bucket");
     assert_eq!(
-        current.expense, 4000,
+        current.expense,
+        amt(4000),
         "month bucket expense should be 4000, got {current:?}"
     );
     assert_eq!(
-        current.net, -4000,
+        current.net,
+        amt(-4000),
         "month bucket net should be -4000, got {current:?}"
     );
 }
@@ -1835,7 +1933,7 @@ async fn update_category_renames_code_and_cascades_to_txns_and_budgets() {
             merchant: "Diner".into(),
             category_code: "FOOD".into(),
             account_code: "ACC-1".into(),
-            amount: -4200,
+            amount: amt(-4200),
             tag: "exp".into(),
             note: None,
             linked_doc_id: None,
@@ -1844,7 +1942,7 @@ async fn update_category_renames_code_and_cascades_to_txns_and_budgets() {
     )
     .await
     .expect("add txn");
-    ep_finance::set_budget_inner(&pool, "CNY", "2026-05", "FOOD", 100_000)
+    ep_finance::set_budget_inner(&pool, "CNY", "2026-05", "FOOD", amt(100_000))
         .await
         .expect("set budget");
 
@@ -1901,7 +1999,7 @@ async fn update_account_renames_code_and_cascades_to_txns() {
         "Cash Wallet".into(),
         "Cash".into(),
         String::new(),
-        50_000,
+        amt(50_000),
     )
     .await
     .expect("create account");
@@ -1914,7 +2012,7 @@ async fn update_account_renames_code_and_cascades_to_txns() {
             merchant: "Lunch".into(),
             category_code: "FOOD".into(),
             account_code: "CASH-WALLET".into(),
-            amount: -1200,
+            amount: amt(-1200),
             tag: "exp".into(),
             note: None,
             linked_doc_id: None,

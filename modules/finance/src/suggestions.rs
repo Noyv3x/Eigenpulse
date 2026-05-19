@@ -7,11 +7,11 @@
 //! Anything more contextual (statistical anomaly detection, multi-month
 //! seasonality, etc.) belongs in a separate analytics module, not here.
 //!
-//! All amounts in `LedgerData` are integer minor units of `LedgerData.currency`;
+//! All amounts in `LedgerData` are exact minor units of `LedgerData.currency`;
 //! the rules format with that currency's symbol and precision.
 
 use crate::server_fns::LedgerData;
-use ep_core::IconKind;
+use ep_core::{IconKind, MinorAmount};
 use ep_i18n::{tf, Locale};
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +41,8 @@ pub fn compute_suggestions(d: &LedgerData, locale: Locale) -> Vec<Suggestion> {
     let decimals = d.currency.decimals;
     let symbol = d.currency.symbol.as_str();
     // Compact, symbol-prefixed money string in the scoped currency.
-    let money = |minor: i64| format!("{symbol}{}", ep_core::fmt_minor_compact(minor, decimals));
+    let money =
+        |minor: MinorAmount| format!("{symbol}{}", ep_core::fmt_minor_compact(minor, decimals));
 
     // Rule 1 — budgets approaching overage. Pick the worst (highest
     // used/amount ratio) so the card stays scoped; if multiple categories
@@ -50,21 +51,23 @@ pub fn compute_suggestions(d: &LedgerData, locale: Locale) -> Vec<Suggestion> {
     if let Some(worst) = d
         .budgets
         .iter()
-        .filter(|b| b.amount > 0 && b.used as f64 / b.amount as f64 > BUDGET_OVERAGE_THRESHOLD)
+        .filter(|b| {
+            b.amount.is_positive() && b.used.to_f64() / b.amount.to_f64() > BUDGET_OVERAGE_THRESHOLD
+        })
         .max_by(|a, b| {
-            (a.used as f64 / a.amount as f64)
-                .partial_cmp(&(b.used as f64 / b.amount as f64))
+            (a.used.to_f64() / a.amount.to_f64())
+                .partial_cmp(&(b.used.to_f64() / b.amount.to_f64()))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
     {
-        let pct = (worst.used as f64 / worst.amount as f64 * 100.0).round() as u32;
+        let pct = (worst.used.to_f64() / worst.amount.to_f64() * 100.0).round() as u32;
         let cat_name = d
             .categories
             .iter()
             .find(|c| c.code == worst.category_code)
             .map(|c| c.name.clone())
             .unwrap_or_else(|| worst.category_code.clone());
-        let remaining = money((worst.amount - worst.used).max(0));
+        let remaining = money((worst.amount - worst.used).max(MinorAmount::ZERO));
         let pct = pct.to_string();
         out.push(Suggestion {
             icon: IconKind::Sparkle,
@@ -94,7 +97,9 @@ pub fn compute_suggestions(d: &LedgerData, locale: Locale) -> Vec<Suggestion> {
         .filter(|a| a.r#type == "Savings" && a.balance > floor_minor)
         .max_by(|a, b| a.balance.cmp(&b.balance))
     {
-        let dca_amount = money((savings.balance as f64 * SURPLUS_DCA_RATIO).round() as i64);
+        let dca_amount = money(MinorAmount::new(
+            (savings.balance.to_f64() * SURPLUS_DCA_RATIO).round() as i128,
+        ));
         let balance = money(savings.balance);
         out.push(Suggestion {
             icon: IconKind::Coin,
@@ -132,7 +137,11 @@ mod tests {
         }
     }
 
-    // Amounts are integer minor units (CNY at 2 decimals → ×100).
+    fn amt(v: i64) -> MinorAmount {
+        MinorAmount::from(v)
+    }
+
+    // Amounts are exact minor units (CNY at 2 decimals -> x100).
     fn fixture_data() -> LedgerData {
         LedgerData {
             currency: cny(),
@@ -144,7 +153,7 @@ mod tests {
                     name: "Main Checking".into(),
                     r#type: "Checking".into(),
                     tone: "blue".into(),
-                    balance: 500_000,
+                    balance: amt(500_000),
                     archived: false,
                     created_at: 0,
                 },
@@ -154,7 +163,7 @@ mod tests {
                     name: "Savings".into(),
                     r#type: "Savings".into(),
                     tone: "green".into(),
-                    balance: 2_280_000,
+                    balance: amt(2_280_000),
                     archived: false,
                     created_at: 0,
                 },
@@ -187,47 +196,47 @@ mod tests {
                 merchant: "Keep Gym".into(),
                 category_code: "HLT".into(),
                 account_code: "ACC-01".into(),
-                amount: -29_800,
+                amount: amt(-29_800),
                 tag: "exp".into(),
                 note: None,
                 linked_doc_id: None,
             }],
             category_summary: vec![],
             month: MonthSummary {
-                income: 0,
-                expense: 0,
-                savings: 0,
-                balance: 0,
-                balance_delta: 0,
-                budget_total: 0,
+                income: MinorAmount::ZERO,
+                expense: MinorAmount::ZERO,
+                savings: MinorAmount::ZERO,
+                balance: MinorAmount::ZERO,
+                balance_delta: MinorAmount::ZERO,
+                budget_total: MinorAmount::ZERO,
                 savings_rate: 0.0,
                 emergency_months: 0.0,
-                liquid_balance: 0,
+                liquid_balance: MinorAmount::ZERO,
                 days_elapsed: 1,
-                avg_expense_3m: 0,
+                avg_expense_3m: MinorAmount::ZERO,
                 total_txn_count: 0,
                 period: "2026-05".into(),
             },
             budgets: vec![
                 BudgetEntry {
                     category_code: "F&B".into(),
-                    amount: 320_000,
-                    used: 290_000,
+                    amount: amt(320_000),
+                    used: amt(290_000),
                 }, // 90% — over threshold
                 BudgetEntry {
                     category_code: "HLT".into(),
-                    amount: 120_000,
-                    used: 60_000,
+                    amount: amt(120_000),
+                    used: amt(60_000),
                 }, // 50% — fine
             ],
             account_stats: vec![
                 AccountStats {
                     last_seen_at: None,
-                    history_14d: vec![0; 14],
+                    history_14d: vec![MinorAmount::ZERO; 14],
                 },
                 AccountStats {
                     last_seen_at: None,
-                    history_14d: vec![0; 14],
+                    history_14d: vec![MinorAmount::ZERO; 14],
                 },
             ],
             months_12: Vec::new(),
@@ -267,10 +276,10 @@ mod tests {
         let mut d = fixture_data();
         // budgets all under threshold
         for b in &mut d.budgets {
-            b.used = 0;
+            b.used = MinorAmount::ZERO;
         }
         // savings under the floor (¥5,000 < ¥10,000)
-        d.accounts[1].balance = 500_000;
+        d.accounts[1].balance = amt(500_000);
         let s = compute_suggestions(&d, Locale::En);
         assert!(
             s.is_empty(),

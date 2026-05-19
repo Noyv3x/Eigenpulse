@@ -35,7 +35,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_migrations_keep_activity_amount_as_integer_minor_units() {
+    async fn core_migrations_keep_activity_amount_as_text_minor_units() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("pool");
@@ -48,6 +48,6 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("amount column");
-        assert_eq!(column_type, "INTEGER");
+        assert_eq!(column_type, "TEXT");
     }
 }

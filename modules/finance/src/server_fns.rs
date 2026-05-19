@@ -26,10 +26,10 @@ pub(crate) const MAX_CURRENCY_CODE_CHARS: usize = 8;
 pub(crate) const MAX_CURRENCY_SYMBOL_CHARS: usize = 8;
 #[cfg(feature = "ssr")]
 pub(crate) const MAX_CURRENCY_NAME_CHARS: usize = 32;
-/// Upper bound on a currency's minor-unit precision. 8 covers satoshi-style
-/// assets; `10^8` stays comfortably inside `i64` for any realistic balance.
+/// Upper bound on a currency's minor-unit precision. 18 covers ETH / many
+/// token ledgers; amounts are stored as exact decimal TEXT and held in i128.
 #[cfg(feature = "ssr")]
-pub(crate) const MAX_CURRENCY_DECIMALS: u8 = 8;
+pub(crate) const MAX_CURRENCY_DECIMALS: u8 = 18;
 
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
@@ -49,7 +49,7 @@ pub struct AddTxnFields {
     pub merchant: String,
     pub category_code: String,
     pub account_code: String,
-    pub amount: i64,
+    pub amount: ep_core::MinorAmount,
     pub tag: String,
     pub note: Option<String>,
     pub linked_doc_id: Option<String>,
@@ -145,7 +145,10 @@ pub(crate) fn normalize_budget_period(period: &str) -> Result<String, ServerFnEr
 /// API callers (PAT path) pass pre-signed exp/inc amounts. Pairs with
 /// [`parse_positive_minor`] for the form path.
 #[cfg(feature = "ssr")]
-pub(crate) fn parse_signed_minor(input: &str, decimals: u8) -> Result<i64, ServerFnError> {
+pub(crate) fn parse_signed_minor(
+    input: &str,
+    decimals: u8,
+) -> Result<ep_core::MinorAmount, ServerFnError> {
     ep_core::parse_minor(input, decimals)
         .ok_or_else(|| ep_i18n::err_with("finance.err.amount_invalid", input.trim()))
 }
@@ -153,9 +156,9 @@ pub(crate) fn parse_signed_minor(input: &str, decimals: u8) -> Result<i64, Serve
 /// As [`parse_signed_minor`] but additionally rejects non-positive values —
 /// every amount the UI's `<ActionForm>` submits is a positive magnitude.
 #[cfg(feature = "ssr")]
-fn parse_positive_minor(input: &str, decimals: u8) -> Result<i64, ServerFnError> {
+fn parse_positive_minor(input: &str, decimals: u8) -> Result<ep_core::MinorAmount, ServerFnError> {
     let amount = parse_signed_minor(input, decimals)?;
-    if amount <= 0 {
+    if !amount.is_positive() {
         return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
     }
     Ok(amount)
@@ -174,6 +177,40 @@ fn split_currency_ref(value: &str) -> Result<(String, String), ServerFnError> {
         return Err(ep_i18n::err_with("finance.err.account_ref_invalid", value));
     }
     Ok((currency.to_string(), code.to_string()))
+}
+
+#[cfg(feature = "ssr")]
+async fn adjust_account_balance(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    currency_code: &str,
+    account_code: &str,
+    delta: ep_core::MinorAmount,
+) -> Result<(), ServerFnError> {
+    let current: Option<ep_core::MinorAmount> = sqlx::query_scalar(
+        "SELECT balance FROM fin_account WHERE currency_code = ?1 AND code = ?2",
+    )
+    .bind(currency_code)
+    .bind(account_code)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(server_err)?;
+    let Some(current) = current else {
+        return Err(ep_i18n::err_with(
+            "finance.err.account_not_found",
+            account_code,
+        ));
+    };
+    let next = current
+        .checked_add(delta)
+        .ok_or_else(|| server_err("finance amount overflow"))?;
+    sqlx::query("UPDATE fin_account SET balance = ?1 WHERE currency_code = ?2 AND code = ?3")
+        .bind(next)
+        .bind(currency_code)
+        .bind(account_code)
+        .execute(&mut **tx)
+        .await
+        .map_err(server_err)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +715,13 @@ mod tests {
         assert!(validate_currency_input("USD", "", "x", 2, 0).is_err()); // empty symbol
         assert!(validate_currency_input("USD", "$", "", 2, 0).is_err()); // empty name
         assert!(validate_currency_input("USD", "$", "x", -1, 0).is_err()); // decimals < 0
-        assert!(validate_currency_input("USD", "$", "x", 9, 0).is_err()); // decimals > max
+        assert_eq!(
+            validate_currency_input("ETH", "ETH", "Ethereum", 18, 0)
+                .unwrap()
+                .3,
+            18
+        );
+        assert!(validate_currency_input("USD", "$", "x", 19, 0).is_err()); // decimals > max
         assert!(validate_currency_input("USD", "$", "x", 2, -1).is_err()); // sort < 0
     }
 
@@ -789,15 +832,14 @@ pub async fn load_month_buckets_12(
     pool: &sqlx::SqlitePool,
     currency_code: &str,
 ) -> sqlx::Result<Vec<MonthBucket>> {
-    type MonthRow = (String, i64, i64);
-    let months_q = sqlx::query_as::<_, MonthRow>(
+    type MonthTxnRow = (String, ep_core::MinorAmount, String);
+    let months_q = sqlx::query_as::<_, MonthTxnRow>(
         "SELECT strftime('%Y-%m', occurred_at, 'unixepoch', 'localtime') AS period,
-                COALESCE(SUM(CASE WHEN tag='inc' AND amount > 0 THEN amount ELSE 0 END), 0) AS income,
-                COALESCE(SUM(CASE WHEN tag='exp' AND amount < 0 THEN -amount ELSE 0 END), 0) AS expense
+                amount,
+                tag
            FROM fin_txn
           WHERE currency_code = ?1
             AND occurred_at >= unixepoch('now','localtime','start of month','-11 months','utc')
-          GROUP BY period
           ORDER BY period ASC",
     )
     .bind(currency_code)
@@ -820,16 +862,29 @@ pub async fn load_month_buckets_12(
 }
 
 #[cfg(feature = "ssr")]
-fn month_buckets_from_rows(frame: Vec<String>, rows: Vec<(String, i64, i64)>) -> Vec<MonthBucket> {
-    let mut by_period: std::collections::HashMap<String, (i64, i64)> =
-        std::collections::HashMap::new();
-    for (period, income, expense) in rows {
-        by_period.insert(period, (income, expense));
+fn month_buckets_from_rows(
+    frame: Vec<String>,
+    rows: Vec<(String, ep_core::MinorAmount, String)>,
+) -> Vec<MonthBucket> {
+    let mut by_period: std::collections::HashMap<
+        String,
+        (ep_core::MinorAmount, ep_core::MinorAmount),
+    > = std::collections::HashMap::new();
+    for (period, amount, tag) in rows {
+        let (income, expense) = by_period.entry(period).or_default();
+        match tag.as_str() {
+            "inc" if amount.is_positive() => *income += amount,
+            "exp" if amount.is_negative() => *expense += amount.abs(),
+            _ => {}
+        }
     }
     frame
         .into_iter()
         .map(|period| {
-            let (income, expense) = by_period.get(&period).copied().unwrap_or((0, 0));
+            let (income, expense) = by_period
+                .get(&period)
+                .copied()
+                .unwrap_or((ep_core::MinorAmount::ZERO, ep_core::MinorAmount::ZERO));
             MonthBucket {
                 period,
                 income,
@@ -852,11 +907,6 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
         // it. An empty / stale code resolves to the primary currency.
         let currency = resolve_currency(pool, &currency_code).await?;
         let cc = currency.code.clone();
-
-        // Full-row SELECTs decode straight into the model structs via
-        // `sqlx::FromRow`; only the derived/aggregate queries below still need
-        // ad-hoc tuple rows. Every query filters `currency_code = ?1`.
-        type SumRow = (String, i64);
 
         let accounts_q = sqlx::query_as::<_, Account>(
             "SELECT currency_code, code, name, type, tone, balance, archived, created_at
@@ -882,81 +932,51 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
         // is amount<0, which would otherwise pollute expense / category /
         // budget / 90d / 12-month / weekly net totals. tfr is internal
         // money movement, not spending.
-        let cat_sum_q = sqlx::query_as::<_, SumRow>(
-            "SELECT category_code, SUM(-amount)
+        type MtdTxnRow = (String, ep_core::MinorAmount, String);
+        let mtd_txns_q = sqlx::query_as::<_, MtdTxnRow>(
+            "SELECT category_code, amount, tag
                FROM fin_txn
-              WHERE currency_code = ?1 AND tag = 'exp'
-                AND occurred_at >= unixepoch('now','localtime','start of month','utc')
-              GROUP BY category_code",
-        )
-        .bind(&cc)
-        .fetch_all(pool);
-        // COALESCE / CASE-ELSE defaults are integer `0` — amounts are i64
-        // minor units now, and an f64 `0.0` fallback would trip sqlx's
-        // integer decoder when SUM is NULL on an empty table.
-        let income_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM fin_txn
-              WHERE currency_code = ?1 AND amount > 0 AND tag = 'inc'
+              WHERE currency_code = ?1
                 AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
         )
         .bind(&cc)
-        .fetch_one(pool);
-        // MTD expense is just `sum(cat_sum_q.values())` — no need for a
-        // second aggregate. Derived after the try_join.
-        let budget_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM fin_budget
-              WHERE currency_code = ?1 AND period = strftime('%Y-%m','now','localtime')",
-        )
-        .bind(&cc)
-        .fetch_one(pool);
+        .fetch_all(pool);
         // Per-category budget vs MTD usage, used by the budget tab and
-        // `suggestions::compute_suggestions`. `?1` is the currency in both
-        // the outer query and the correlated subquery.
-        type BudgetRow = (String, i64, i64);
+        // `suggestions::compute_suggestions`; usage is joined in Rust because
+        // amount columns are exact TEXT and SQLite SUM would coerce them.
+        type BudgetRow = (String, ep_core::MinorAmount);
         let budgets_q = sqlx::query_as::<_, BudgetRow>(
-            "SELECT b.category_code, b.amount,
-                    COALESCE((SELECT SUM(-t.amount) FROM fin_txn t
-                               WHERE t.currency_code = ?1
-                                 AND t.category_code = b.category_code
-                                 AND t.tag = 'exp'
-                                 AND t.occurred_at >= unixepoch('now','localtime','start of month','utc')), 0) AS used
+            "SELECT b.category_code, b.amount
                FROM fin_budget b
               WHERE b.currency_code = ?1
                 AND b.period = strftime('%Y-%m','now','localtime')
-              ORDER BY b.category_code"
-        ).bind(&cc).fetch_all(pool);
+              ORDER BY b.category_code",
+        )
+        .bind(&cc)
+        .fetch_all(pool);
 
         // Last-7-day net (income - expense). Used by the banner's weekly badge
-        // and the suggestions card. Single round-trip via `CASE` so we don't
-        // need two scalar queries.
-        let week_net_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(
-                SUM(CASE WHEN tag = 'inc' AND amount > 0 THEN amount
-                         WHEN tag = 'exp' AND amount < 0 THEN amount
-                         ELSE 0 END), 0)
+        // and the suggestions card.
+        type TimedAmountRow = (ep_core::MinorAmount, String);
+        let week_net_q = sqlx::query_as::<_, TimedAmountRow>(
+            "SELECT amount, tag
                FROM fin_txn
               WHERE currency_code = ?1
                 AND occurred_at >= unixepoch('now','localtime','-7 days','utc')",
         )
         .bind(&cc)
-        .fetch_one(pool);
+        .fetch_all(pool);
 
         // 3-month rolling expense total, used for emergency-fund coverage and
         // the next-month-budget planner. 90-day window approximates 3 calendar
         // months without the awkward "what's my -3 month boundary" arithmetic.
-        let expense_90d_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(-amount), 0) FROM fin_txn
+        let expense_90d_q = sqlx::query_scalar::<_, ep_core::MinorAmount>(
+            "SELECT amount FROM fin_txn
               WHERE currency_code = ?1 AND tag = 'exp'
                 AND occurred_at >= unixepoch('now','localtime','-90 days','utc')",
         )
         .bind(&cc)
-        .fetch_one(pool);
-
-        // Liquid balance — the denominator for `emergency_months`.
-        let liquid_balance_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(CASE WHEN type IN ('Checking','Savings','Cash') THEN balance ELSE 0 END), 0)
-               FROM fin_account WHERE currency_code = ?1"
-        ).bind(&cc).fetch_one(pool);
+        .fetch_all(pool);
 
         // Total fin_txn count for the current month (independent of the
         // 50-row LIMIT on `txns_q`).
@@ -982,16 +1002,15 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
         // local calendar days (same load-bearing trick the lrn heatmap uses
         // — without it sub-day fractions push 02:00-vs-22:00 same-day rows
         // into different buckets).
-        type DailyHistoryRow = (String, i64, i64);
+        type DailyHistoryRow = (String, i64, ep_core::MinorAmount);
         let history_14d_q = sqlx::query_as::<_, DailyHistoryRow>(
             "SELECT account_code,
                     CAST(julianday('now','localtime','start of day')
                          - julianday(occurred_at,'unixepoch','localtime','start of day') AS INTEGER) AS days_ago,
-                    SUM(-amount)
+                    amount
                FROM fin_txn
               WHERE currency_code = ?1 AND tag = 'exp'
-                AND occurred_at >= unixepoch('now','localtime','-13 days','start of day','utc')
-              GROUP BY account_code, days_ago"
+                AND occurred_at >= unixepoch('now','localtime','-13 days','start of day','utc')"
         ).bind(&cc).fetch_all(pool);
 
         let months_12_q = load_month_buckets_12(pool, &cc);
@@ -1031,13 +1050,10 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
             accounts,
             categories,
             txns,
-            cat_rows,
-            income,
-            budget_total,
+            mtd_txn_rows,
             budget_rows,
-            week_net,
-            expense_90d,
-            liquid_balance,
+            week_net_rows,
+            expense_90d_rows,
             total_count,
             last_seen_rows,
             history_14d_rows,
@@ -1050,13 +1066,10 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
             accounts_q,
             categories_q,
             txns_q,
-            cat_sum_q,
-            income_q,
-            budget_q,
+            mtd_txns_q,
             budgets_q,
             week_net_q,
             expense_90d_q,
-            liquid_balance_q,
             total_count_q,
             last_seen_q,
             history_14d_q,
@@ -1068,11 +1081,20 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
         )
         .map_err(server_err)?;
 
-        // MTD expense magnitude is the sum of every category's MTD spend —
-        // same data as a dedicated `SUM(-amount)` aggregate without the
-        // round-trip.
-        let expense: i64 = cat_rows.iter().map(|(_, v)| *v).sum();
-        let category_summary = cat_rows
+        let mut income = ep_core::MinorAmount::ZERO;
+        let mut category_spend: std::collections::HashMap<String, ep_core::MinorAmount> =
+            std::collections::HashMap::new();
+        for (category_code, amount, tag) in &mtd_txn_rows {
+            match tag.as_str() {
+                "inc" if amount.is_positive() => income += *amount,
+                "exp" if amount.is_negative() => {
+                    *category_spend.entry(category_code.clone()).or_default() += amount.abs();
+                }
+                _ => {}
+            }
+        }
+        let expense: ep_core::MinorAmount = category_spend.values().copied().sum();
+        let category_summary = category_spend
             .into_iter()
             .map(|(code, value)| {
                 let cat = categories.iter().find(|c| c.code == code);
@@ -1081,8 +1103,8 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
                     name: cat.map(|c| c.name.clone()).unwrap_or_default(),
                     tone: cat.map(|c| c.tone.clone()).unwrap_or_default(),
                     value,
-                    pct: if expense > 0 {
-                        (value as f64 / expense as f64 * 1000.0).round() / 10.0
+                    pct: if expense.is_positive() {
+                        (value.to_f64() / expense.to_f64() * 1000.0).round() / 10.0
                     } else {
                         0.0
                     },
@@ -1090,14 +1112,31 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
             })
             .collect::<Vec<_>>();
 
-        let balance: i64 = accounts.iter().map(|a| a.balance).sum();
+        let balance: ep_core::MinorAmount = accounts.iter().map(|a| a.balance).sum();
+        let liquid_balance: ep_core::MinorAmount = accounts
+            .iter()
+            .filter(|a| matches!(a.r#type.as_str(), "Checking" | "Savings" | "Cash"))
+            .map(|a| a.balance)
+            .sum();
+
+        let budget_total: ep_core::MinorAmount =
+            budget_rows.iter().map(|(_, amount)| *amount).sum();
 
         let budgets: Vec<BudgetEntry> = budget_rows
             .into_iter()
-            .map(|(category_code, amount, used)| BudgetEntry {
-                category_code,
-                amount,
-                used,
+            .map(|(category_code, amount)| {
+                let used = mtd_txn_rows
+                    .iter()
+                    .filter(|(cat, amount, tag)| {
+                        cat == &category_code && tag == "exp" && amount.is_negative()
+                    })
+                    .map(|(_, amount, _)| amount.abs())
+                    .sum();
+                BudgetEntry {
+                    category_code,
+                    amount,
+                    used,
+                }
             })
             .collect();
 
@@ -1106,15 +1145,15 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
         // `'start of day'` on both sides of the SQL diff anchors days_ago
         // to 0..=13; index 0 is the oldest day, 13 is today. The clamp
         // is paranoia against a future SQL edit.
-        let mut history_map: std::collections::HashMap<String, Vec<i64>> =
+        let mut history_map: std::collections::HashMap<String, Vec<ep_core::MinorAmount>> =
             std::collections::HashMap::new();
         for (account_code, days_ago, magnitude) in history_14d_rows {
             let slot = history_map
                 .entry(account_code)
-                .or_insert_with(|| vec![0_i64; 14]);
+                .or_insert_with(|| vec![ep_core::MinorAmount::ZERO; 14]);
             let idx = (13 - days_ago.clamp(0, 13)) as usize;
             if let Some(cell) = slot.get_mut(idx) {
-                *cell += magnitude;
+                *cell += magnitude.abs();
             }
         }
         let account_stats: Vec<AccountStats> = accounts
@@ -1123,21 +1162,30 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
                 last_seen_at: last_seen_map.remove(&a.code),
                 history_14d: history_map
                     .remove(&a.code)
-                    .unwrap_or_else(|| vec![0_i64; 14]),
+                    .unwrap_or_else(|| vec![ep_core::MinorAmount::ZERO; 14]),
             })
             .collect();
 
         let (period, day_of_month) = ctx;
         let days_elapsed = (day_of_month as u32).max(1);
+        let expense_90d: ep_core::MinorAmount = expense_90d_rows.into_iter().map(|a| a.abs()).sum();
         let avg_expense_3m = expense_90d / 3;
-        let savings_rate = if income > 0 {
-            (((income - expense) as f64 / income as f64).clamp(0.0, 1.0)) as f32
+        let week_net: ep_core::MinorAmount = week_net_rows
+            .into_iter()
+            .map(|(amount, tag)| match tag.as_str() {
+                "inc" if amount.is_positive() => amount,
+                "exp" if amount.is_negative() => amount,
+                _ => ep_core::MinorAmount::ZERO,
+            })
+            .sum();
+        let savings_rate = if income.is_positive() {
+            (((income - expense).to_f64() / income.to_f64()).clamp(0.0, 1.0)) as f32
         } else {
             0.0
         };
         // Guard the divide-by-zero on a fresh DB; clamp keeps KPI sane.
-        let emergency_months = if avg_expense_3m > 0 {
-            (liquid_balance as f64 / avg_expense_3m as f64).clamp(0.0, 99.0) as f32
+        let emergency_months = if avg_expense_3m.is_positive() {
+            (liquid_balance.to_f64() / avg_expense_3m.to_f64()).clamp(0.0, 99.0) as f32
         } else {
             0.0
         };
@@ -1282,8 +1330,8 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
         return Err(ep_i18n::err("finance.err.tfr_requires_transfer"));
     }
     match tag_kind {
-        crate::model::Tag::Exp if fields.amount < 0 => {}
-        crate::model::Tag::Inc if fields.amount > 0 => {}
+        crate::model::Tag::Exp if fields.amount.is_negative() => {}
+        crate::model::Tag::Inc if fields.amount.is_positive() => {}
         _ => return Err(ep_i18n::err("finance.err.amount_sign_invalid")),
     }
 
@@ -1355,15 +1403,13 @@ pub async fn add_txn_inner(pool: &SqlitePool, fields: AddTxnFields) -> Result<Tx
     .await
     .map_err(server_err)?;
 
-    sqlx::query(
-        "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
+    adjust_account_balance(
+        &mut tx,
+        &currency_code,
+        &normalized.account_code,
+        fields.amount,
     )
-    .bind(fields.amount)
-    .bind(&currency_code)
-    .bind(&normalized.account_code)
-    .execute(&mut *tx)
-    .await
-    .map_err(server_err)?;
+    .await?;
 
     sqlx::query(
         "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, link_doc)
@@ -1443,27 +1489,20 @@ async fn delete_one_leg(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     doc_id: &str,
 ) -> Result<Option<(String, Option<String>)>, ServerFnError> {
-    let row: Option<(i64, String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT amount, currency_code, account_code, tag, linked_doc_id
+    let row: Option<(ep_core::MinorAmount, String, String, String, Option<String>)> =
+        sqlx::query_as(
+            "SELECT amount, currency_code, account_code, tag, linked_doc_id
            FROM fin_txn WHERE doc_id = ?1",
-    )
-    .bind(doc_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(server_err)?;
+        )
+        .bind(doc_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(server_err)?;
     let (amount, currency_code, account_code, tag, linked_doc_id) = match row {
         Some(r) => r,
         None => return Ok(None),
     };
-    sqlx::query(
-        "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
-    )
-    .bind(amount)
-    .bind(&currency_code)
-    .bind(&account_code)
-    .execute(&mut **tx)
-    .await
-    .map_err(server_err)?;
+    adjust_account_balance(tx, &currency_code, &account_code, -amount).await?;
     sqlx::query("DELETE FROM fin_txn WHERE doc_id = ?1")
         .bind(doc_id)
         .execute(&mut **tx)
@@ -1572,7 +1611,7 @@ pub async fn set_budget_inner(
     currency_code: &str,
     period: &str,
     category_code: &str,
-    amount: i64,
+    amount: ep_core::MinorAmount,
 ) -> Result<(), ServerFnError> {
     let currency_code = currency_code.trim();
     if currency_code.is_empty() {
@@ -1583,7 +1622,7 @@ pub async fn set_budget_inner(
     if category_code.is_empty() {
         return Err(ep_i18n::err("finance.err.category_code_required"));
     }
-    if amount > 0 {
+    if amount.is_positive() {
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM fin_category WHERE currency_code = ?1 AND code = ?2)",
         )
@@ -1599,7 +1638,7 @@ pub async fn set_budget_inner(
             ));
         }
     }
-    if amount <= 0 {
+    if !amount.is_positive() {
         sqlx::query(
             "DELETE FROM fin_budget WHERE currency_code = ?1 AND period = ?2 AND category_code = ?3",
         )
@@ -1647,7 +1686,7 @@ pub async fn set_budget(
         let currency = resolve_currency(pool, &currency_code).await?;
         // A blank amount means "remove" — treat it as 0 rather than erroring.
         let amount = if amount.trim().is_empty() {
-            0
+            ep_core::MinorAmount::ZERO
         } else {
             ep_core::parse_minor(&amount, currency.decimals)
                 .ok_or_else(|| ep_i18n::err_with("finance.err.amount_invalid", amount.trim()))?
@@ -1717,7 +1756,7 @@ pub struct UpdateTxnFields {
     pub merchant: String,
     pub category_code: String,
     pub account_code: String,
-    pub amount: i64,
+    pub amount: ep_core::MinorAmount,
     pub note: Option<String>,
     /// Wire form: empty → "keep existing", `"YYYY-MM-DD"` → that day 12:00
     /// local. Bad format → Args error.
@@ -1740,7 +1779,7 @@ pub async fn update_txn_inner(
         &fields.account_code,
         fields.note.as_deref(),
     )?;
-    if fields.amount <= 0 {
+    if !fields.amount.is_positive() {
         return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
     }
 
@@ -1749,7 +1788,7 @@ pub async fn update_txn_inner(
     // Read the existing row (and lock it implicitly under SQLite's deferred
     // tx). Capture old amount/currency/account/tag/occurred so we can both
     // refuse tfr edits and compute balance deltas.
-    type OldRow = (i64, String, String, String, i64);
+    type OldRow = (ep_core::MinorAmount, String, String, String, i64);
     let old: Option<OldRow> = sqlx::query_as(
         "SELECT amount, currency_code, account_code, tag, occurred_at
            FROM fin_txn WHERE doc_id = ?1",
@@ -1816,36 +1855,22 @@ pub async fn update_txn_inner(
     // running queries on the pool concurrently while a tx is open on it,
     // so do these sequentially.
     if old_account == normalized.account_code {
-        sqlx::query(
-            "UPDATE fin_account SET balance = balance + (?1 - ?2)
-              WHERE currency_code = ?3 AND code = ?4",
+        adjust_account_balance(
+            &mut tx,
+            &currency_code,
+            &normalized.account_code,
+            signed_amount - old_amount,
         )
-        .bind(signed_amount)
-        .bind(old_amount)
-        .bind(&currency_code)
-        .bind(&normalized.account_code)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
+        .await?;
     } else {
-        sqlx::query(
-            "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
+        adjust_account_balance(&mut tx, &currency_code, &old_account, -old_amount).await?;
+        adjust_account_balance(
+            &mut tx,
+            &currency_code,
+            &normalized.account_code,
+            signed_amount,
         )
-        .bind(old_amount)
-        .bind(&currency_code)
-        .bind(&old_account)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
-        sqlx::query(
-            "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
-        )
-        .bind(signed_amount)
-        .bind(&currency_code)
-        .bind(&normalized.account_code)
-        .execute(&mut *tx)
-        .await
-        .map_err(server_err)?;
+        .await?;
     }
 
     sqlx::query(
@@ -1977,8 +2002,8 @@ pub struct AddTransferFields {
     pub from_account: String,
     pub to_currency: String,
     pub to_account: String,
-    pub from_amount: i64,
-    pub to_amount: i64,
+    pub from_amount: ep_core::MinorAmount,
+    pub to_amount: ep_core::MinorAmount,
     pub note: Option<String>,
     pub occurred_at: i64,
 }
@@ -2023,7 +2048,7 @@ pub async fn add_transfer_inner(
     if from_currency == to_currency && from_account == to_account {
         return Err(ep_i18n::err("finance.err.transfer_accounts_same"));
     }
-    if from_amount <= 0 || to_amount <= 0 {
+    if !from_amount.is_positive() || !to_amount.is_positive() {
         return Err(ep_i18n::err("finance.err.amount_must_be_positive"));
     }
     let (from_ok, to_ok, from_tfr_ok, to_tfr_ok): (i64, i64, i64, i64) = tokio::try_join!(
@@ -2117,24 +2142,8 @@ pub async fn add_transfer_inner(
     .await
     .map_err(server_err)?;
 
-    sqlx::query(
-        "UPDATE fin_account SET balance = balance - ?1 WHERE currency_code = ?2 AND code = ?3",
-    )
-    .bind(from_amount)
-    .bind(&from_currency)
-    .bind(&from_account)
-    .execute(&mut *tx)
-    .await
-    .map_err(server_err)?;
-    sqlx::query(
-        "UPDATE fin_account SET balance = balance + ?1 WHERE currency_code = ?2 AND code = ?3",
-    )
-    .bind(to_amount)
-    .bind(&to_currency)
-    .bind(&to_account)
-    .execute(&mut *tx)
-    .await
-    .map_err(server_err)?;
+    adjust_account_balance(&mut tx, &from_currency, &from_account, -from_amount).await?;
+    adjust_account_balance(&mut tx, &to_currency, &to_account, to_amount).await?;
 
     sqlx::query(
         "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, link_doc)
@@ -2509,7 +2518,7 @@ pub async fn create_account_inner(
     name: String,
     r#type: String,
     tone: String,
-    opening_balance: i64,
+    opening_balance: ep_core::MinorAmount,
 ) -> Result<Account, ServerFnError> {
     // Callers (server-fn wrapper, PAT handler) already `resolve_currency`,
     // so `currency_code` is expected to be a real registry row; the composite
@@ -2732,7 +2741,7 @@ pub async fn create_account(
         // Opening balance is optional and may be negative (a credit card
         // starts in the red); a blank field means zero.
         let opening_balance = if opening_balance.trim().is_empty() {
-            0
+            ep_core::MinorAmount::ZERO
         } else {
             ep_core::parse_minor(&opening_balance, currency.decimals).ok_or_else(|| {
                 ep_i18n::err_with("finance.err.amount_invalid", opening_balance.trim())

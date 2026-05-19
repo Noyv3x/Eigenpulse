@@ -1,3 +1,5 @@
+use crate::MinorAmount;
+
 /// Insert thousands separators into a numeric string while preserving sign and decimal part.
 pub fn thousands_sep(s: &str) -> String {
     let (int_part, frac) = match s.split_once('.') {
@@ -34,20 +36,20 @@ pub fn fmt_int(v: f64) -> String {
 /// `fmt_minor(18_400, 0)` → `"18,400"`; `fmt_minor(-4_250, 2)` → `"-42.50"`;
 /// `fmt_minor(50_000_000, 8)` → `"0.50000000"`. Pure integer/string math —
 /// safe in wasm32 view code.
-pub fn fmt_minor(amount: i64, decimals: u8) -> String {
+pub fn fmt_minor(amount: impl Into<MinorAmount>, decimals: u8) -> String {
     thousands_sep(&fmt_minor_raw(amount, decimals))
 }
 
 /// Like [`fmt_minor`] but without thousands separators — suitable for the
 /// `value` of an `<input type="number">`. `fmt_minor_raw(123_456, 2)` →
 /// `"1234.56"`.
-pub fn fmt_minor_raw(amount: i64, decimals: u8) -> String {
+pub fn fmt_minor_raw(amount: impl Into<MinorAmount>, decimals: u8) -> String {
+    let amount = amount.into();
     if decimals == 0 {
         return amount.to_string();
     }
-    let neg = amount < 0;
-    // i128 + unsigned_abs dodges the i64::MIN overflow corner.
-    let mag = i128::from(amount).unsigned_abs();
+    let neg = amount.is_negative();
+    let mag = amount.abs().as_i128() as u128;
     let scale = 10u128.pow(u32::from(decimals));
     let int_part = mag / scale;
     let frac_part = mag % scale;
@@ -62,12 +64,13 @@ pub fn fmt_minor_raw(amount: i64, decimals: u8) -> String {
 /// half-up to the nearest major unit, with thousands separators. For compact
 /// KPI displays that intentionally drop the fractional part.
 /// `fmt_minor_compact(1_840_050, 2)` → `"18,401"`.
-pub fn fmt_minor_compact(amount: i64, decimals: u8) -> String {
+pub fn fmt_minor_compact(amount: impl Into<MinorAmount>, decimals: u8) -> String {
+    let amount = amount.into();
     if decimals == 0 {
         return thousands_sep(&amount.to_string());
     }
-    let neg = amount < 0;
-    let mag = i128::from(amount).unsigned_abs();
+    let neg = amount.is_negative();
+    let mag = amount.abs().as_i128() as u128;
     let scale = 10u128.pow(u32::from(decimals));
     let major = (mag + scale / 2) / scale;
     // `major != 0` keeps a rounded-to-zero negative from printing "-0".
@@ -83,8 +86,8 @@ pub fn fmt_minor_compact(amount: i64, decimals: u8) -> String {
 /// precision. Accepts an optional leading `-`, ASCII digits, and an optional
 /// `.` fraction; fractional digits beyond `decimals` are rounded half-up.
 /// Thousands separators, exponents, and other shapes return `None`, as does
-/// an `i64` overflow. Pure math — safe in wasm32 view code.
-pub fn parse_minor(s: &str, decimals: u8) -> Option<i64> {
+/// an `i128` overflow. Pure math — safe in wasm32 view code.
+pub fn parse_minor(s: &str, decimals: u8) -> Option<MinorAmount> {
     let s = s.trim();
     let (neg, body) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -127,7 +130,11 @@ pub fn parse_minor(s: &str, decimals: u8) -> Option<i64> {
     };
     let total = int_part.checked_mul(scale)?.checked_add(frac_value)?;
     let total = if neg { -total } else { total };
-    i64::try_from(total).ok()
+    if total == i128::MIN {
+        None
+    } else {
+        Some(MinorAmount::new(total))
+    }
 }
 
 /// Format an `Option<unix_seconds>` as `YYYY-MM-DD`. Returns `—` for `None` or
@@ -157,10 +164,9 @@ pub fn fmt_ts_ymd(ts: Option<i64>) -> String {
 }
 
 /// Scale a major-unit amount (e.g. `500` yuan) into minor units (`50_000`
-/// at 2 decimals). Saturating multiplication keeps the threshold meaningful
-/// even at the upper end of `MAX_CURRENCY_DECIMALS = 8`.
-pub fn major_to_minor(major: i64, decimals: u8) -> i64 {
-    major.saturating_mul(10_i64.pow(u32::from(decimals)))
+/// at 2 decimals).
+pub fn major_to_minor(major: i64, decimals: u8) -> MinorAmount {
+    MinorAmount::new(i128::from(major) * 10_i128.pow(u32::from(decimals)))
 }
 
 /// The `step` / smallest-positive value for an `<input type="number">` money
@@ -322,8 +328,11 @@ mod tests {
         assert_eq!(fmt_minor(-7, 0), "-7");
         // High-precision currency (e.g. BTC at 8 places).
         assert_eq!(fmt_minor(150_000_000, 8), "1.50000000");
-        // i64::MIN must not panic (i128 + unsigned_abs path).
-        assert!(fmt_minor(i64::MIN, 2).starts_with('-'));
+        // 18-decimal crypto-style assets are formatted without floating point.
+        assert_eq!(
+            fmt_minor(MinorAmount::new(1_234_567_890_123_456_789), 18),
+            "1.234567890123456789"
+        );
     }
 
     #[test]
@@ -346,18 +355,21 @@ mod tests {
 
     #[test]
     fn parse_minor_scales_rounds_and_rejects_bad_shapes() {
-        assert_eq!(parse_minor("42", 2), Some(4_200));
-        assert_eq!(parse_minor("42.5", 2), Some(4_250));
-        assert_eq!(parse_minor("-42.50", 2), Some(-4_250));
-        assert_eq!(parse_minor(" 0 ", 2), Some(0));
+        assert_eq!(parse_minor("42", 2), Some(MinorAmount::from(4_200)));
+        assert_eq!(parse_minor("42.5", 2), Some(MinorAmount::from(4_250)));
+        assert_eq!(parse_minor("-42.50", 2), Some(MinorAmount::from(-4_250)));
+        assert_eq!(parse_minor(" 0 ", 2), Some(MinorAmount::ZERO));
         // Excess fractional digits round half-up; carry propagates.
-        assert_eq!(parse_minor("0.567", 2), Some(57));
-        assert_eq!(parse_minor("1.999", 2), Some(200));
+        assert_eq!(parse_minor("0.567", 2), Some(MinorAmount::from(57)));
+        assert_eq!(parse_minor("1.999", 2), Some(MinorAmount::from(200)));
         // 0-decimal currency rounds the whole fraction away.
-        assert_eq!(parse_minor("42.5", 0), Some(43));
-        assert_eq!(parse_minor("42.4", 0), Some(42));
-        // 8-decimal currency.
-        assert_eq!(parse_minor("1.5", 8), Some(150_000_000));
+        assert_eq!(parse_minor("42.5", 0), Some(MinorAmount::from(43)));
+        assert_eq!(parse_minor("42.4", 0), Some(MinorAmount::from(42)));
+        // 18-decimal crypto currency, beyond i64::MAX.
+        assert_eq!(
+            parse_minor("12345.000000000000000001", 18),
+            Some(MinorAmount::new(12_345_000_000_000_000_000_001))
+        );
         // Bad shapes: thousands separators, exponents, blanks, double dots.
         for bad in ["", "-", "1,234.56", "1e3", "abc", "4..2", "4.2.1", "."] {
             assert_eq!(parse_minor(bad, 2), None, "bad={bad}");

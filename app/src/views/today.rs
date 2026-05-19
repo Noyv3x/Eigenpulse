@@ -1,4 +1,4 @@
-use ep_core::{fmt_minor_compact, IconKind};
+use ep_core::{fmt_minor_compact, IconKind, MinorAmount};
 use ep_finance::Currency;
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{Card, Direction, EmptyState, Kpi, PageHead, SkeletonCard, SkeletonKpi};
@@ -19,7 +19,7 @@ pub struct TodayData {
     pub items: Vec<TodayItem>,
     pub event_count: u32,
     /// Today's expense magnitude in the primary currency's minor units.
-    pub fin_expense: i64,
+    pub fin_expense: MinorAmount,
     pub fit_count: u32,
     pub lrn_count: u32,
     /// Every currency, so the timeline can format each row's amount.
@@ -32,7 +32,7 @@ pub struct TodayItem {
     pub module: String, // FIN / FIT / LRN / SYS
     pub summary: String,
     /// Signed minor-unit amount (finance rows only).
-    pub amount: Option<i64>,
+    pub amount: Option<MinorAmount>,
     /// Currency of the amount; `None` for non-finance rows.
     pub currency_code: Option<String>,
 }
@@ -64,7 +64,7 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
             tokio::try_join!(primary_fut, today_fut, currencies_fut)?;
 
         let event_count = today.rows.len() as u32;
-        let mut fin_expense: i64 = 0;
+        let mut fin_expense = MinorAmount::ZERO;
         let mut fit_count: u32 = 0;
         let mut lrn_count: u32 = 0;
         let items: Vec<TodayItem> = today
@@ -74,7 +74,7 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
                 match row.module.as_str() {
                     // Only the primary currency feeds the cross-module KPI.
                     "FIN" if row.currency_code.as_deref() == Some(primary.code.as_str()) => {
-                        if let Some(a) = row.amount.filter(|a| *a < 0) {
+                        if let Some(a) = row.amount.filter(|a| a.is_negative()) {
                             fin_expense += -a;
                         }
                     }
@@ -142,7 +142,7 @@ fn render_today(d: TodayData) -> impl IntoView {
     let fin_value = format!(
         "{}{}",
         primary_symbol,
-        fmt_minor_compact(d.fin_expense.max(0), primary_decimals)
+        fmt_minor_compact(d.fin_expense.max(MinorAmount::ZERO), primary_decimals)
     );
     let fit_value = format!("{}", d.fit_count);
     let lrn_value = format!("{}", d.lrn_count);

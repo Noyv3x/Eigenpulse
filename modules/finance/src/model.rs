@@ -1,3 +1,4 @@
+use ep_core::MinorAmount;
 use serde::{Deserialize, Serialize};
 
 /// Wire form for a transaction's `tag` column. The DB column stays TEXT
@@ -71,8 +72,8 @@ pub struct Currency {
     pub symbol: String,
     pub name: String,
     /// Minor-unit precision: how many fractional digits this currency keeps —
-    /// `2` for yuan/dollar cents, `0` for yen, `8` for satoshi-style assets.
-    /// Validated to `0..=8` on every write.
+    /// `2` for yuan/dollar cents, `0` for yen, `8` for BTC, `18` for ETH and
+    /// many ERC-20 style assets. Validated to `0..=18` on every write.
     pub decimals: u8,
     pub is_primary: bool,
     pub sort_order: i64,
@@ -93,8 +94,8 @@ pub struct Account {
     #[cfg_attr(feature = "ssr", sqlx(rename = "type"))]
     pub r#type: String,
     pub tone: String,
-    /// Balance in `currency_code`'s minor units (e.g. cents).
-    pub balance: i64,
+    /// Balance in `currency_code`'s minor units (e.g. cents or wei).
+    pub balance: MinorAmount,
     pub archived: bool,
     pub created_at: i64,
 }
@@ -134,7 +135,7 @@ pub struct Txn {
     pub account_code: String,
     /// Signed amount in `currency_code`'s minor units; `tag` carries the
     /// expense / income / transfer direction.
-    pub amount: i64,
+    pub amount: MinorAmount,
     pub tag: String,
     pub note: Option<String>,
     pub linked_doc_id: Option<String>,
@@ -144,10 +145,10 @@ pub struct Txn {
 pub struct BudgetEntry {
     pub category_code: String,
     /// Budgeted amount in the currency's minor units.
-    pub amount: i64,
+    pub amount: MinorAmount,
     /// Magnitude of expenses in this category for the budget's period
     /// (matched on `period = 'YYYY-MM'`), in the currency's minor units.
-    pub used: i64,
+    pub used: MinorAmount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,33 +157,33 @@ pub struct CategorySummary {
     pub name: String,
     pub tone: String,
     /// Spend magnitude in the currency's minor units.
-    pub value: i64,
+    pub value: MinorAmount,
     pub pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonthSummary {
     /// All amounts are in the scoped currency's minor units.
-    pub income: i64,
-    pub expense: i64,
+    pub income: MinorAmount,
+    pub expense: MinorAmount,
     /// `income - expense` for the current month.
-    pub savings: i64,
+    pub savings: MinorAmount,
     /// Sum of every account's current balance.
-    pub balance: i64,
+    pub balance: MinorAmount,
     /// Net (`income - expense`) over the last 7 days. Signed.
-    pub balance_delta: i64,
-    pub budget_total: i64,
+    pub balance_delta: MinorAmount,
+    pub budget_total: MinorAmount,
     /// `(income - expense) / income`, clamped to [0, 1]. Zero when income is 0.
     pub savings_rate: f32,
     /// Liquid balance divided by the 3-month rolling average expense, capped
     /// to 99 to keep KPI rendering sane on fresh installs (zero expense → ∞).
     pub emergency_months: f32,
     /// Sum of `Checking | Savings | Cash` account balances.
-    pub liquid_balance: i64,
+    pub liquid_balance: MinorAmount,
     /// Days elapsed in the current month, in user-local time. Always ≥ 1.
     pub days_elapsed: u32,
     /// 3-month rolling average expense magnitude.
-    pub avg_expense_3m: i64,
+    pub avg_expense_3m: MinorAmount,
     /// Total fin_txn rows in the current month. Distinct from
     /// `LedgerData.txns.len()` which is capped at 50 for the list view.
     pub total_txn_count: i64,
@@ -199,7 +200,7 @@ pub struct AccountStats {
     /// 14-day expense magnitude per day, oldest → newest, in the currency's
     /// minor units. Always 14 entries (zero-padded for days with no spend) so
     /// ChartBars renders a consistent width across accounts.
-    pub history_14d: Vec<i64>,
+    pub history_14d: Vec<MinorAmount>,
 }
 
 /// One bar of the 12-month trend (oldest → newest). `net = income - expense`.
@@ -207,7 +208,7 @@ pub struct AccountStats {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MonthBucket {
     pub period: String,
-    pub income: i64,
-    pub expense: i64,
-    pub net: i64,
+    pub income: MinorAmount,
+    pub expense: MinorAmount,
+    pub net: MinorAmount,
 }

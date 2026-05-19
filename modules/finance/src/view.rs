@@ -4,7 +4,8 @@ use crate::model::{
 use crate::server_fns::*;
 use ep_core::{
     amount_step, fmt_minor, fmt_minor_compact, fmt_minor_raw, fmt_ts_date, fmt_ts_hm, fmt_ts_md,
-    fmt_ts_ymd, major_to_minor, parse_ymd, unix_to_ymdhm, ymd_to_unix_midnight, IconKind, Tone,
+    fmt_ts_ymd, major_to_minor, parse_ymd, unix_to_ymdhm, ymd_to_unix_midnight, IconKind,
+    MinorAmount, Tone,
 };
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
@@ -321,8 +322,8 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
     let decimals = data.currency.decimals;
     let symbol = data.currency.symbol.clone();
     let m = &data.month;
-    let bud_pct = if m.budget_total > 0 {
-        (m.expense as f64 / m.budget_total as f64 * 100.0).round() as u32
+    let bud_pct = if m.budget_total.is_positive() {
+        (m.expense.to_f64() / m.budget_total.to_f64() * 100.0).round() as u32
     } else {
         0
     };
@@ -333,10 +334,10 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
     };
     // Daily spend / 3-month-rolling daily spend, used for the FIN-K02 trend.
     // All figures are minor units; the threshold scales with the currency.
-    let daily_now = m.expense as f64 / m.days_elapsed.max(1) as f64;
-    let daily_3m = m.avg_expense_3m as f64 / 30.0;
+    let daily_now = m.expense / i128::from(m.days_elapsed.max(1));
+    let daily_3m = m.avg_expense_3m / 30;
     let daily_delta = daily_now - daily_3m;
-    let dir_eps = 0.5 * 10f64.powi(i32::from(decimals));
+    let dir_eps = MinorAmount::new(10_i128.pow(u32::from(decimals)) / 2);
     let daily_dir = if daily_delta < -dir_eps {
         Direction::Up
     }
@@ -371,18 +372,15 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
     let banner = render_banner(&data);
     // Pre-compute attribute strings — the `view!` macro rejects bare if/else
     // in attribute-value position.
-    let daily_delta_text = if daily_3m > 0.0 {
-        let sign = if daily_delta >= 0.0 { "+" } else { "−" };
+    let daily_delta_text = if daily_3m.is_positive() {
+        let sign = if daily_delta >= 0 { "+" } else { "−" };
         tf(
             locale,
             "finance.kpi.spend_vs_avg",
             &[
                 ("sign", sign),
                 ("symbol", &symbol),
-                (
-                    "amount",
-                    &fmt_minor_compact(daily_delta.abs() as i64, decimals),
-                ),
+                ("amount", &fmt_minor_compact(daily_delta.abs(), decimals)),
             ],
         )
     } else {
@@ -430,11 +428,7 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
         fmt_minor_compact(m.budget_total, decimals),
         s = symbol
     );
-    let kpi_daily = format!(
-        "{}{}",
-        symbol,
-        fmt_minor_compact(daily_now as i64, decimals)
-    );
+    let kpi_daily = format!("{}{}", symbol, fmt_minor_compact(daily_now, decimals));
     let kpis = view! {
         <div class="kpi-grid">
             <Kpi code="FIN-K01" label=t(locale, "finance.kpi.budget") value=format!("{}", bud_pct) unit="%".to_string()
@@ -1338,8 +1332,8 @@ fn render_budget_row(
         .get(&b.category_code)
         .cloned()
         .unwrap_or_else(|| (b.category_code.clone(), String::new()));
-    let pct_f = if b.amount > 0 {
-        b.used as f64 / b.amount as f64 * 100.0
+    let pct_f = if b.amount.is_positive() {
+        b.used.to_f64() / b.amount.to_f64() * 100.0
     } else {
         0.0
     };
@@ -1760,8 +1754,8 @@ fn render_account_card(
     let card_sub = a.r#type.clone();
     let balance_text = format!("{}{}", symbol, fmt_minor(a.balance, decimals));
     let delete_ref = format!("{}/{}", a.currency_code, a.code);
-    // ChartBars takes f64 heights; the per-day spend is minor-unit i64.
-    let history: Vec<f64> = s.history_14d.iter().map(|&v| v as f64).collect();
+    // ChartBars takes f64 heights; accounting amounts stay exact elsewhere.
+    let history: Vec<f64> = s.history_14d.iter().map(|v| v.to_f64()).collect();
     let confirm_msg = tf(
         locale,
         "finance.account.confirm_delete",
@@ -2045,7 +2039,7 @@ fn render_currencies(
                             </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_decimals")}</span>
-                                <input name="decimals" type="number" min="0" max="8" value="2" required
+                                <input name="decimals" type="number" min="0" max="18" value="2" required
                                        style=INPUT_STYLE_MONO/>
                             </label>
                         </div>
@@ -2152,7 +2146,7 @@ fn render_currency_row(
                             </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.currency_decimals")}</span>
-                                <input name="decimals" type="number" min="0" max="8" value=decimals_value style=INPUT_STYLE_MONO/>
+                                <input name="decimals" type="number" min="0" max="18" value=decimals_value style=INPUT_STYLE_MONO/>
                                 <span class="mono dim" style="font-size:10px">{t(locale, "finance.currency.decimals_hint")}</span>
                             </label>
                             <div class="hstack" style="gap:8px;align-items:center">
@@ -2189,13 +2183,13 @@ fn render_reports(d: &LedgerData) -> impl IntoView {
         .iter()
         .map(|m| m.period.split('-').nth(1).unwrap_or("?").to_string())
         .collect();
-    let income_data: Vec<f64> = months.iter().map(|m| m.income as f64).collect();
-    let expense_data: Vec<f64> = months.iter().map(|m| m.expense as f64).collect();
+    let income_data: Vec<f64> = months.iter().map(|m| m.income.to_f64()).collect();
+    let expense_data: Vec<f64> = months.iter().map(|m| m.expense.to_f64()).collect();
     let last = months.last().cloned().unwrap_or(MonthBucket {
         period: d.month.period.clone(),
-        income: 0,
-        expense: 0,
-        net: 0,
+        income: MinorAmount::ZERO,
+        expense: MinorAmount::ZERO,
+        net: MinorAmount::ZERO,
     });
     let net_strip = render_net_strip(&months, decimals);
 
@@ -2260,10 +2254,10 @@ pub fn render_net_strip(months: &[MonthBucket], decimals: u8) -> impl IntoView {
 /// `(css color var, sign prefix, formatted absolute value)` for one month's
 /// net (minor units). Surplus uses `--primary-ink` (the design system has no
 /// `--green-*` — sage green lives under `--primary-*`; see `.tag.green`).
-fn net_cell_parts(net: i64, decimals: u8) -> (&'static str, &'static str, String) {
-    if net > 0 {
+fn net_cell_parts(net: MinorAmount, decimals: u8) -> (&'static str, &'static str, String) {
+    if net.is_positive() {
         ("var(--primary-ink)", "+", fmt_minor_compact(net, decimals))
-    } else if net < 0 {
+    } else if net.is_negative() {
         (
             "var(--rose-ink)",
             "−",
@@ -2312,7 +2306,7 @@ fn render_category_share_card(d: &LedgerData) -> impl IntoView {
     let decimals = d.currency.decimals;
     let symbol = d.currency.symbol.clone();
     let cats = d.category_summary.clone();
-    let total: i64 = cats.iter().map(|c| c.value).sum::<i64>().abs();
+    let total: MinorAmount = cats.iter().map(|c| c.value).sum::<MinorAmount>().abs();
     view! {
         <Card title=t(locale, "finance.reports.category_title") code="FIN-RPT-02"
               sub=tf(locale, "finance.reports.category_sub", &[("symbol", &symbol), ("total", &fmt_minor_compact(total, decimals))])>
@@ -2329,7 +2323,7 @@ fn render_category_share_card(d: &LedgerData) -> impl IntoView {
 /// 3 calendar months of activity. Returns `(name, code, amount_minor)` for
 /// every category that had any expense in the window, rounded to a tidy grid.
 /// Empty when there's no 3-month history yet (fresh install).
-fn next_month_plan(d: &LedgerData) -> Vec<(String, String, i64)> {
+fn next_month_plan(d: &LedgerData) -> Vec<(String, String, MinorAmount)> {
     use std::collections::HashMap;
     // Bucket months_12's last 3 months: months_12 is oldest → newest, so the
     // tail-3 is the recent quarter.
@@ -2347,15 +2341,16 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, i64)> {
     let projected_factor = (31.0 / elapsed).min(2.5);
     // 50 major units, expressed in the currency's minor units.
     let grid = major_to_minor(50, d.currency.decimals);
-    let grid_f = grid as f64;
-    let mut by_code: HashMap<String, (String, i64)> = HashMap::new();
+    let grid_f = grid.to_f64();
+    let mut by_code: HashMap<String, (String, MinorAmount)> = HashMap::new();
     for c in &d.category_summary {
-        let projected = c.value as f64 * projected_factor;
+        let projected = c.value.to_f64() * projected_factor;
         // Round to nearest grid step, with a floor of one step to avoid noise.
-        let suggested = ((projected / grid_f).round() * grid_f).max(grid_f) as i64;
+        let suggested =
+            MinorAmount::new(((projected / grid_f).round() * grid_f).max(grid_f) as i128);
         by_code.insert(c.code.clone(), (c.name.clone(), suggested));
     }
-    let mut out: Vec<(String, String, i64)> = by_code
+    let mut out: Vec<(String, String, MinorAmount)> = by_code
         .into_iter()
         .map(|(code, (name, suggested))| (name, code, suggested))
         .collect();
@@ -2517,7 +2512,7 @@ mod tests {
             merchant: "a,b".into(),
             category_code: "F&B".into(),
             account_code: "ACC-01".into(),
-            amount: -1_230,
+            amount: MinorAmount::from(-1_230),
             tag: "exp".into(),
             note: Some("x\"y".into()),
             linked_doc_id: None,
@@ -2550,6 +2545,7 @@ mod tests {
         assert_eq!(amount_step(1), "0.1");
         assert_eq!(amount_step(2), "0.01");
         assert_eq!(amount_step(8), "0.00000001");
+        assert_eq!(amount_step(18), "0.000000000000000001");
     }
 
     #[test]
@@ -2576,7 +2572,7 @@ mod tests {
     #[test]
     fn net_cell_surplus_uses_primary_ink_and_plus_sign() {
         // 123_456 minor units at 2 decimals → 1,234.56 → compact "1,235".
-        let (color, sign, val) = net_cell_parts(123_456, 2);
+        let (color, sign, val) = net_cell_parts(MinorAmount::from(123_456), 2);
         assert_eq!(color, "var(--primary-ink)");
         assert_eq!(sign, "+");
         assert_eq!(val, "1,235");
@@ -2584,7 +2580,7 @@ mod tests {
 
     #[test]
     fn net_cell_deficit_uses_rose_ink_and_minus_sign() {
-        let (color, sign, val) = net_cell_parts(-123_456, 2);
+        let (color, sign, val) = net_cell_parts(MinorAmount::from(-123_456), 2);
         assert_eq!(color, "var(--rose-ink)");
         assert_eq!(sign, "−"); // U+2212 minus, not ASCII '-'
         assert_eq!(val, "1,235");
@@ -2592,7 +2588,7 @@ mod tests {
 
     #[test]
     fn net_cell_zero_renders_dim_no_sign() {
-        let (color, sign, val) = net_cell_parts(0, 2);
+        let (color, sign, val) = net_cell_parts(MinorAmount::ZERO, 2);
         assert_eq!(color, "var(--ink-4)");
         assert_eq!(sign, "");
         assert_eq!(val, "0");

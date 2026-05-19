@@ -54,7 +54,7 @@ pub fn open_api(_state: AppState) -> Router<AppState> {
     clippy::result_large_err,
     reason = "Response is the module-wide axum error type; boxing it would only complicate ? call sites"
 )]
-fn parse_api_amount(input: &str, decimals: u8) -> Result<i64, Response> {
+fn parse_api_amount(input: &str, decimals: u8) -> Result<ep_core::MinorAmount, Response> {
     crate::server_fns::parse_signed_minor(input, decimals).map_err(server_err_to_response)
 }
 
@@ -322,7 +322,14 @@ async fn patch_txn(
     let doc_id = crate::server_fns::normalize_doc_id(&doc_id).map_err(server_err_to_response)?;
     // JOIN to fin_currency for the precision; one round-trip carries both
     // the current row fields and the decimals needed to parse `input.amount`.
-    type Row = (u8, String, String, String, i64, Option<String>);
+    type Row = (
+        u8,
+        String,
+        String,
+        String,
+        ep_core::MinorAmount,
+        Option<String>,
+    );
     let cur: Option<Row> = sqlx::query_as(
         "SELECT c.decimals, t.merchant, t.category_code, t.account_code, t.amount, t.note
            FROM fin_txn t
@@ -476,7 +483,7 @@ async fn post_account(
         .map_err(server_err_to_response)?;
     let opening_balance = match input.opening_balance.as_deref() {
         Some(s) if !s.trim().is_empty() => parse_api_amount(s, currency.decimals)?,
-        _ => 0,
+        _ => ep_core::MinorAmount::ZERO,
     };
     let acc = create_account_inner(
         &state.db,
@@ -726,7 +733,7 @@ struct BudgetRow {
     period: String,
     category_code: String,
     /// Budgeted amount in the currency's minor units.
-    amount: i64,
+    amount: ep_core::MinorAmount,
 }
 
 async fn list_budget(
@@ -775,7 +782,7 @@ async fn post_budget(
         .map_err(server_err_to_response)?;
     let category_code = input.category_code.trim().to_string();
     let amount = if input.amount.trim().is_empty() {
-        0
+        ep_core::MinorAmount::ZERO
     } else {
         parse_api_amount(&input.amount, currency.decimals)?
     };

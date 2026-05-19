@@ -19,7 +19,8 @@ pub struct TodayItemDto {
     pub text: String,
     pub doc_ref: String,
     /// Signed finance minor units. Pair with `currency_code` for precision.
-    pub amount: Option<i64>,
+    /// Serialized as a string to preserve crypto-scale values.
+    pub amount: Option<ep_core::MinorAmount>,
     pub currency_code: Option<String>,
     pub link_doc: Option<String>,
 }
@@ -72,7 +73,7 @@ mod tests {
             module: "FIN".into(),
             doc_id: "FIN-26001".into(),
             summary: "coffee".into(),
-            amount: Some(-1850),
+            amount: Some(ep_core::MinorAmount::from(-1850)),
             currency_code: Some("CNY".into()),
             status: None,
             link_doc: Some("FIT-26001".into()),
@@ -84,7 +85,7 @@ mod tests {
         assert_eq!(item.summary, "coffee");
         assert_eq!(item.text, "FIN · coffee");
         assert_eq!(item.doc_ref, "FIN-26001");
-        assert_eq!(item.amount, Some(-1850));
+        assert_eq!(item.amount, Some(ep_core::MinorAmount::from(-1850)));
         assert_eq!(item.currency_code.as_deref(), Some("CNY"));
         assert_eq!(item.link_doc.as_deref(), Some("FIT-26001"));
     }
@@ -100,7 +101,7 @@ mod tests {
                 module TEXT NOT NULL,
                 doc_id TEXT NOT NULL,
                 summary TEXT NOT NULL,
-                amount INTEGER,
+                amount TEXT,
                 currency_code TEXT,
                 status TEXT,
                 link_doc TEXT
@@ -111,7 +112,7 @@ mod tests {
         .expect("schema");
         sqlx::query(
             "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, status, link_doc)
-             VALUES (unixepoch('now'), 'FIN', 'FIN-26001', 'coffee', -1850, 'CNY', NULL, 'FIT-26001')",
+             VALUES (unixepoch('now'), 'FIN', 'FIN-26001', 'coffee', '-1850', 'CNY', NULL, 'FIT-26001')",
         )
         .execute(&db)
         .await
@@ -134,7 +135,7 @@ mod tests {
         assert_eq!(item.summary, "coffee");
         assert_eq!(item.text, "FIN · coffee");
         assert_eq!(item.doc_ref, "FIN-26001");
-        assert_eq!(item.amount, Some(-1850));
+        assert_eq!(item.amount, Some(ep_core::MinorAmount::from(-1850)));
         assert_eq!(item.currency_code.as_deref(), Some("CNY"));
         assert_eq!(item.link_doc.as_deref(), Some("FIT-26001"));
     }

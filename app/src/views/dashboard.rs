@@ -1,4 +1,4 @@
-use ep_core::{fmt_minor_compact, IconKind};
+use ep_core::{fmt_minor_compact, IconKind, MinorAmount};
 // `fmt_ts_hm` is consumed only inside the `#[cfg(feature = "ssr")]` body of
 // `load_dashboard`; importing it at module scope would warn on the wasm32
 // hydrate target where the body is replaced by an `ssr-only` stub.
@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DashboardData {
     /// Finance figures are scoped to the primary currency, in its minor units.
-    pub savings: i64,
+    pub savings: MinorAmount,
     pub budget_pct: u32,
-    pub budget_remain: i64,
+    pub budget_remain: MinorAmount,
     pub today_events: u32,
     pub weekly_workouts: u32,
     pub weekly_learning: u32,
@@ -34,13 +34,13 @@ pub struct ActivityRow {
     pub module: String,
     pub summary: String,
     /// Signed minor-unit amount (finance rows only).
-    pub amount: Option<i64>,
+    pub amount: Option<MinorAmount>,
     /// Currency of the amount; `None` for non-finance rows.
     pub currency_code: Option<String>,
 }
 
 #[cfg(feature = "ssr")]
-type ActivityQueryRow = (i64, String, String, Option<i64>, Option<String>);
+type ActivityQueryRow = (i64, String, String, Option<MinorAmount>, Option<String>);
 
 #[server(LoadDashboard, "/api/_internal/dsh", "Url", "load_dashboard")]
 pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
@@ -53,28 +53,22 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
         // only — there is no conversion, so summing across currencies would
         // be meaningless.
         let primary = ep_finance::resolve_currency(pool, "").await?;
-        // Eight independent read-only queries — fan out via tokio::try_join!
+        // Independent read-only queries — fan out via tokio::try_join!
         // so the request pays one slowest-query latency instead of eight.
-        let income_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM fin_txn
-              WHERE currency_code = ?1 AND amount > 0 AND tag='inc'
+        type AmountTagRow = (MinorAmount, String);
+        let month_txns_q = sqlx::query_as::<_, AmountTagRow>(
+            "SELECT amount, tag FROM fin_txn
+              WHERE currency_code = ?1
                 AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
         )
         .bind(&primary.code)
-        .fetch_one(pool);
-        let expense_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(-amount), 0) FROM fin_txn
-              WHERE currency_code = ?1 AND tag = 'exp'
-                AND occurred_at >= unixepoch('now','localtime','start of month','utc')",
-        )
-        .bind(&primary.code)
-        .fetch_one(pool);
-        let budget_total_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(SUM(amount), 0) FROM fin_budget
+        .fetch_all(pool);
+        let budget_rows_q = sqlx::query_scalar::<_, MinorAmount>(
+            "SELECT amount FROM fin_budget
               WHERE currency_code = ?1 AND period = strftime('%Y-%m','now','localtime')",
         )
         .bind(&primary.code)
-        .fetch_one(pool);
+        .fetch_all(pool);
         let today_events_q = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM activity
               WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')",
@@ -98,18 +92,16 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
         .fetch_all(pool);
         let currencies_q = ep_finance::list_currencies_inner(pool);
         let (
-            income,
-            expense,
-            budget_total,
+            month_txns,
+            budget_rows,
             today_events,
             weekly_workouts,
             weekly_learning,
             rows,
             currencies,
         ) = tokio::try_join!(
-            income_q,
-            expense_q,
-            budget_total_q,
+            month_txns_q,
+            budget_rows_q,
             today_events_q,
             weekly_workouts_q,
             weekly_learning_q,
@@ -117,13 +109,24 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             currencies_q,
         )
         .map_err(server_err)?;
+        let income: MinorAmount = month_txns
+            .iter()
+            .filter(|(amount, tag)| tag == "inc" && amount.is_positive())
+            .map(|(amount, _)| *amount)
+            .sum();
+        let expense: MinorAmount = month_txns
+            .iter()
+            .filter(|(amount, tag)| tag == "exp" && amount.is_negative())
+            .map(|(amount, _)| amount.abs())
+            .sum();
+        let budget_total: MinorAmount = budget_rows.into_iter().sum();
         let savings = income - expense;
-        let budget_pct = if budget_total > 0 {
-            (expense as f64 / budget_total as f64 * 100.0).round() as u32
+        let budget_pct = if budget_total.is_positive() {
+            (expense.to_f64() / budget_total.to_f64() * 100.0).round() as u32
         } else {
             0
         };
-        let budget_remain = (budget_total - expense).max(0);
+        let budget_remain = (budget_total - expense).max(MinorAmount::ZERO);
         let recent = rows
             .into_iter()
             .map(|r| ActivityRow {

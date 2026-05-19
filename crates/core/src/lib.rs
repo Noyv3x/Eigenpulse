@@ -6,6 +6,7 @@
 
 mod escape;
 mod fmt;
+mod money;
 mod nav;
 mod severity;
 mod text;
@@ -36,6 +37,7 @@ pub use fmt::{
     fmt_ts_md, fmt_ts_minute, fmt_ts_ymd, major_to_minor, parse_minor, parse_ymd, thousands_sep,
     unix_to_ymdhm, ymd_to_unix_midnight,
 };
+pub use money::{MinorAmount, ParseMinorAmountError};
 pub use nav::{IconKind, NavSection};
 pub use severity::Severity;
 pub use text::{
