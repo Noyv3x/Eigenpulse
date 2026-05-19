@@ -40,7 +40,7 @@ pub struct ActivityRow {
 }
 
 #[cfg(feature = "ssr")]
-type ActivityQueryRow = (i64, String, String, Option<f64>, Option<String>);
+type ActivityQueryRow = (i64, String, String, Option<i64>, Option<String>);
 
 #[server(LoadDashboard, "/api/_internal/dsh", "Url", "load_dashboard")]
 pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
@@ -124,15 +124,13 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
             0
         };
         let budget_remain = (budget_total - expense).max(0);
-        // `activity.amount` keeps REAL affinity but only ever holds whole
-        // minor-unit integers — exact within f64's integer range.
         let recent = rows
             .into_iter()
             .map(|r| ActivityRow {
                 time: fmt_ts_hm(Some(r.0)),
                 module: r.1,
                 summary: r.2,
-                amount: r.3.map(|a| a as i64),
+                amount: r.3,
                 currency_code: r.4,
             })
             .collect();

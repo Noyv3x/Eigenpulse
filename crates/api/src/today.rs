@@ -18,7 +18,9 @@ pub struct TodayItemDto {
     pub summary: String,
     pub text: String,
     pub doc_ref: String,
-    pub amount: Option<f64>,
+    /// Signed finance minor units. Pair with `currency_code` for precision.
+    pub amount: Option<i64>,
+    pub currency_code: Option<String>,
     pub link_doc: Option<String>,
 }
 
@@ -49,6 +51,7 @@ fn activity_row_to_item(row: TodayActivityRow) -> TodayItemDto {
         summary: row.summary,
         doc_ref: row.doc_id,
         amount: row.amount,
+        currency_code: row.currency_code,
         link_doc: row.link_doc,
     }
 }
@@ -69,7 +72,8 @@ mod tests {
             module: "FIN".into(),
             doc_id: "FIN-26001".into(),
             summary: "coffee".into(),
-            amount: Some(-18.5),
+            amount: Some(-1850),
+            currency_code: Some("CNY".into()),
             status: None,
             link_doc: Some("FIT-26001".into()),
         });
@@ -80,7 +84,8 @@ mod tests {
         assert_eq!(item.summary, "coffee");
         assert_eq!(item.text, "FIN · coffee");
         assert_eq!(item.doc_ref, "FIN-26001");
-        assert_eq!(item.amount, Some(-18.5));
+        assert_eq!(item.amount, Some(-1850));
+        assert_eq!(item.currency_code.as_deref(), Some("CNY"));
         assert_eq!(item.link_doc.as_deref(), Some("FIT-26001"));
     }
 
@@ -95,7 +100,8 @@ mod tests {
                 module TEXT NOT NULL,
                 doc_id TEXT NOT NULL,
                 summary TEXT NOT NULL,
-                amount REAL,
+                amount INTEGER,
+                currency_code TEXT,
                 status TEXT,
                 link_doc TEXT
             )",
@@ -104,8 +110,8 @@ mod tests {
         .await
         .expect("schema");
         sqlx::query(
-            "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, status, link_doc)
-             VALUES (unixepoch('now'), 'FIN', 'FIN-26001', 'coffee', -18.5, NULL, 'FIT-26001')",
+            "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, currency_code, status, link_doc)
+             VALUES (unixepoch('now'), 'FIN', 'FIN-26001', 'coffee', -1850, 'CNY', NULL, 'FIT-26001')",
         )
         .execute(&db)
         .await
@@ -128,7 +134,8 @@ mod tests {
         assert_eq!(item.summary, "coffee");
         assert_eq!(item.text, "FIN · coffee");
         assert_eq!(item.doc_ref, "FIN-26001");
-        assert_eq!(item.amount, Some(-18.5));
+        assert_eq!(item.amount, Some(-1850));
+        assert_eq!(item.currency_code.as_deref(), Some("CNY"));
         assert_eq!(item.link_doc.as_deref(), Some("FIT-26001"));
     }
 

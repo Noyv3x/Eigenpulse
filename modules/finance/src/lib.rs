@@ -79,7 +79,7 @@ mod ssr_module {
                     doc_id TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     status TEXT,
-                    amount REAL,
+                    amount INTEGER,
                     currency_code TEXT,
                     link_doc TEXT
                 )",

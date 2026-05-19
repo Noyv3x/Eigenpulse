@@ -15,17 +15,15 @@ pub struct TodayActivity {
 /// Mirrors the `activity` table column-for-column so `sqlx::FromRow` can
 /// decode a row straight into it — no hand-written tuple mapping.
 ///
-/// `amount` stays `f64` even though finance now writes integer minor units:
-/// the `activity` column keeps REAL affinity, and every value finance writes
-/// is a whole number well within `f64`'s exact-integer range. Consumers cast
-/// to `i64` and format with `currency_code`'s precision.
+/// Finance activity amounts are signed integer minor units, matching
+/// `fin_txn.amount`; non-finance activity rows keep `amount = NULL`.
 #[derive(Clone, Debug, PartialEq, sqlx::FromRow)]
 pub struct TodayActivityRow {
     pub occurred_at: i64,
     pub module: String,
     pub doc_id: String,
     pub summary: String,
-    pub amount: Option<f64>,
+    pub amount: Option<i64>,
     /// Currency of the source transaction (finance rows only); `None` for
     /// non-finance modules and for finance rows with no monetary amount.
     pub currency_code: Option<String>,
@@ -82,7 +80,7 @@ mod tests {
                 module TEXT NOT NULL,
                 doc_id TEXT NOT NULL,
                 summary TEXT NOT NULL,
-                amount REAL,
+                amount INTEGER,
                 currency_code TEXT,
                 status TEXT,
                 link_doc TEXT
@@ -100,8 +98,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, status, link_doc)
              VALUES
-                (unixepoch('now') - 20, 'FIN', 'FIN-1', 'summary', -1.0, NULL, NULL),
-                (unixepoch('now') - 10, 'FIN', 'FIT-1', 'summary', -1.0, NULL, NULL)",
+                (unixepoch('now') - 20, 'FIN', 'FIN-1', 'summary', -100, NULL, NULL),
+                (unixepoch('now') - 10, 'FIN', 'FIT-1', 'summary', -100, NULL, NULL)",
         )
         .execute(&pool)
         .await

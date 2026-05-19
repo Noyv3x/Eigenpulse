@@ -74,8 +74,8 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
                 match row.module.as_str() {
                     // Only the primary currency feeds the cross-module KPI.
                     "FIN" if row.currency_code.as_deref() == Some(primary.code.as_str()) => {
-                        if let Some(a) = row.amount.filter(|a| *a < 0.0) {
-                            fin_expense += (-a) as i64;
+                        if let Some(a) = row.amount.filter(|a| *a < 0) {
+                            fin_expense += -a;
                         }
                     }
                     "FIT" => fit_count += 1,
@@ -86,7 +86,7 @@ pub async fn load_today() -> Result<TodayData, ServerFnError> {
                     time: fmt_ts_hm(Some(row.occurred_at)),
                     module: row.module,
                     summary: row.summary,
-                    amount: row.amount.map(|a| a as i64),
+                    amount: row.amount,
                     currency_code: row.currency_code,
                 }
             })

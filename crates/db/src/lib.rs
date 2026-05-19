@@ -33,4 +33,21 @@ mod tests {
             assert_eq!(exists, 1, "missing index {name}");
         }
     }
+
+    #[tokio::test]
+    async fn core_migrations_keep_activity_amount_as_integer_minor_units() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("pool");
+
+        CORE_MIGRATOR.run(&pool).await.expect("core migrations");
+
+        let column_type: String = sqlx::query_scalar(
+            "SELECT type FROM pragma_table_info('activity') WHERE name = 'amount'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("amount column");
+        assert_eq!(column_type, "INTEGER");
+    }
 }
