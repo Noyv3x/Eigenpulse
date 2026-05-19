@@ -595,7 +595,7 @@ async fn list_category(
     // The reserved TFR category is module plumbing — never offered through
     // the public API.
     let cats = sqlx::query_as::<_, Category>(
-        "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+        "SELECT currency_code, code, name, icon, tone, sort_order, archived, created_at
            FROM fin_category
           WHERE currency_code = ?1 AND code <> ?2
           ORDER BY sort_order ASC, code ASC",
@@ -614,6 +614,8 @@ struct CreateCategoryInput {
     pub currency_code: String,
     pub code: String,
     pub name: String,
+    #[serde(default)]
+    pub icon: String,
     pub tone: String,
     pub sort_order: i64,
 }
@@ -638,6 +640,7 @@ async fn post_category(
         currency.code,
         input.code,
         input.name,
+        input.icon,
         input.tone,
         input.sort_order,
     )
@@ -652,6 +655,7 @@ async fn post_category(
 #[derive(Debug, Deserialize)]
 struct PatchCategoryInput {
     pub name: Option<String>,
+    pub icon: Option<String>,
     pub tone: Option<String>,
     pub sort_order: Option<i64>,
 }
@@ -665,16 +669,16 @@ async fn patch_category(
     require_scope(&pat, ep_core::SCOPE_FIN_WRITE)?;
     let currency_code = currency_code.trim().to_string();
     let code = code.trim().to_string();
-    type Row = (String, String, i64);
+    type Row = (String, String, String, i64);
     let cur: Option<Row> = sqlx::query_as(
-        "SELECT name, tone, sort_order FROM fin_category WHERE currency_code = ?1 AND code = ?2",
+        "SELECT name, icon, tone, sort_order FROM fin_category WHERE currency_code = ?1 AND code = ?2",
     )
     .bind(&currency_code)
     .bind(&code)
     .fetch_optional(&state.db)
     .await
     .map_err(db_err_response)?;
-    let Some((cur_name, cur_tone, cur_sort)) = cur else {
+    let Some((cur_name, cur_icon, cur_tone, cur_sort)) = cur else {
         return Err(server_err_to_response(ep_i18n::err_with(
             "finance.err.category_not_found",
             &code,
@@ -685,6 +689,7 @@ async fn patch_category(
         currency_code,
         code,
         input.name.unwrap_or(cur_name),
+        input.icon.unwrap_or(cur_icon),
         input.tone.unwrap_or(cur_tone),
         input.sort_order.unwrap_or(cur_sort),
         false,

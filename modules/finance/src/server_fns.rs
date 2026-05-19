@@ -18,6 +18,7 @@ pub(crate) const MAX_ACCOUNT_NAME_CHARS: usize = 64;
 #[cfg(feature = "ssr")]
 pub(crate) const MAX_CATEGORY_CODE_CHARS: usize = 8;
 pub(crate) const MAX_CATEGORY_NAME_CHARS: usize = 32;
+pub(crate) const MAX_CATEGORY_ICON_CHARS: usize = 16;
 #[cfg(feature = "ssr")]
 pub(crate) const MIN_CURRENCY_CODE_CHARS: usize = 2;
 #[cfg(feature = "ssr")]
@@ -694,18 +695,37 @@ mod tests {
     fn validate_category_input_enforces_shared_field_limits() {
         // Empty code is now allowed — the helper auto-generates one later.
         assert_eq!(
-            validate_category_input("", "Food", "").unwrap(),
-            ("".to_string(), "Food".to_string(), "".to_string())
+            validate_category_input("", "Food", "🍜", "").unwrap(),
+            (
+                "".to_string(),
+                "Food".to_string(),
+                "🍜".to_string(),
+                "".to_string()
+            )
         );
         assert!(
-            validate_category_input(&"A".repeat(MAX_CATEGORY_CODE_CHARS + 1), "Food", "").is_err()
+            validate_category_input(&"A".repeat(MAX_CATEGORY_CODE_CHARS + 1), "Food", "", "")
+                .is_err()
         );
         assert!(
-            validate_category_input("FOOD", &"x".repeat(MAX_CATEGORY_NAME_CHARS + 1), "").is_err()
+            validate_category_input("FOOD", &"x".repeat(MAX_CATEGORY_NAME_CHARS + 1), "", "")
+                .is_err()
         );
+        assert!(validate_category_input(
+            "FOOD",
+            "Food",
+            &"x".repeat(MAX_CATEGORY_ICON_CHARS + 1),
+            ""
+        )
+        .is_err());
         assert_eq!(
-            validate_category_input(" F&B ", " Food ", "amber").unwrap(),
-            ("F&B".to_string(), "Food".to_string(), "amber".to_string())
+            validate_category_input(" F&B ", " Food ", " 🍜 ", "amber").unwrap(),
+            (
+                "F&B".to_string(),
+                "Food".to_string(),
+                "🍜".to_string(),
+                "amber".to_string()
+            )
         );
     }
 
@@ -942,7 +962,7 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
         // The auto `TFR` category is internal plumbing — never offered as a
         // ledger category, so it stays out of this list.
         let categories_q = sqlx::query_as::<_, Category>(
-            "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+            "SELECT currency_code, code, name, icon, tone, sort_order, archived, created_at
                FROM fin_category WHERE currency_code = ?1 AND code <> ?2 ORDER BY sort_order",
         )
         .bind(&cc)
@@ -1126,6 +1146,7 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
                 CategorySummary {
                     code: code.clone(),
                     name: cat.map(|c| c.name.clone()).unwrap_or_default(),
+                    icon: cat.map(|c| c.icon.clone()).unwrap_or_default(),
                     tone: cat.map(|c| c.tone.clone()).unwrap_or_default(),
                     value,
                     pct: if expense.is_positive() {
@@ -2871,10 +2892,12 @@ pub async fn delete_account(account_ref: String) -> Result<(), ServerFnError> {
 fn validate_category_input(
     code: &str,
     name: &str,
+    icon: &str,
     tone: &str,
-) -> Result<(String, String, String), ServerFnError> {
+) -> Result<(String, String, String, String), ServerFnError> {
     let code = code.trim().to_string();
     let name = name.trim().to_string();
+    let icon = icon.trim().to_string();
     let tone = tone.trim().to_string();
     // Inline char-class check (no regex dep). Accepts `&` for seed code
     // F&B and ASCII digits so the `CATN` fallback codes generated for
@@ -2892,13 +2915,19 @@ fn validate_category_input(
     if name.is_empty() || name.chars().count() > MAX_CATEGORY_NAME_CHARS {
         return Err(ep_i18n::err("finance.err.category_name_format"));
     }
+    if icon.chars().count() > MAX_CATEGORY_ICON_CHARS {
+        return Err(ep_i18n::err_with(
+            "finance.err.category_icon_format",
+            MAX_CATEGORY_ICON_CHARS,
+        ));
+    }
     if !tone.is_empty() && !TONES.contains(&tone.as_str()) {
         return Err(ep_i18n::err_with(
             "finance.err.tone_invalid",
             format!("{TONES:?}"),
         ));
     }
-    Ok((code, name, tone))
+    Ok((code, name, icon, tone))
 }
 
 #[cfg(feature = "ssr")]
@@ -2925,6 +2954,7 @@ pub async fn create_category_inner(
     currency_code: String,
     code: String,
     name: String,
+    icon: String,
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
@@ -2934,7 +2964,7 @@ pub async fn create_category_inner(
     if currency_code.is_empty() {
         return Err(ep_i18n::err("finance.err.no_currency"));
     }
-    let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    let (code, name, icon, tone) = validate_category_input(&code, &name, &icon, &tone)?;
     if !code.is_empty() {
         reject_reserved_category(&code)?;
     }
@@ -2946,12 +2976,13 @@ pub async fn create_category_inner(
     };
     let sort_order = validate_category_sort_order(sort_order)?;
     let res = sqlx::query(
-        "INSERT INTO fin_category (currency_code, code, name, tone, sort_order, archived, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, unixepoch())",
+        "INSERT INTO fin_category (currency_code, code, name, icon, tone, sort_order, archived, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, unixepoch())",
     )
     .bind(&currency_code)
     .bind(&code)
     .bind(&name)
+    .bind(&icon)
     .bind(&tone)
     .bind(sort_order)
     .execute(pool)
@@ -2963,7 +2994,7 @@ pub async fn create_category_inner(
         return Err(server_err(e));
     }
     sqlx::query_as::<_, Category>(
-        "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+        "SELECT currency_code, code, name, icon, tone, sort_order, archived, created_at
            FROM fin_category WHERE currency_code = ?1 AND code = ?2",
     )
     .bind(&currency_code)
@@ -2979,6 +3010,7 @@ pub async fn update_category_inner(
     currency_code: String,
     code: String,
     name: String,
+    icon: String,
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
@@ -2987,6 +3019,7 @@ pub async fn update_category_inner(
         currency_code,
         code,
         name,
+        icon,
         tone,
         sort_order,
         /* rename_code */ true,
@@ -3002,6 +3035,7 @@ pub async fn update_category_inner_with(
     currency_code: String,
     code: String,
     name: String,
+    icon: String,
     tone: String,
     sort_order: i64,
     rename_code: bool,
@@ -3010,7 +3044,7 @@ pub async fn update_category_inner_with(
     if currency_code.is_empty() {
         return Err(ep_i18n::err("finance.err.no_currency"));
     }
-    let (code, name, tone) = validate_category_input(&code, &name, &tone)?;
+    let (code, name, icon, tone) = validate_category_input(&code, &name, &icon, &tone)?;
     if code.is_empty() {
         return Err(ep_i18n::err("finance.err.category_code_format"));
     }
@@ -3040,11 +3074,12 @@ pub async fn update_category_inner_with(
     };
     let res = if new_code != code {
         let res = sqlx::query(
-            "UPDATE fin_category SET code = ?1, name = ?2, tone = ?3, sort_order = ?4
-              WHERE currency_code = ?5 AND code = ?6",
+            "UPDATE fin_category SET code = ?1, name = ?2, icon = ?3, tone = ?4, sort_order = ?5
+              WHERE currency_code = ?6 AND code = ?7",
         )
         .bind(&new_code)
         .bind(&name)
+        .bind(&icon)
         .bind(&tone)
         .bind(sort_order)
         .bind(&currency_code)
@@ -3076,10 +3111,11 @@ pub async fn update_category_inner_with(
         res
     } else {
         sqlx::query(
-            "UPDATE fin_category SET name = ?1, tone = ?2, sort_order = ?3
-              WHERE currency_code = ?4 AND code = ?5",
+            "UPDATE fin_category SET name = ?1, icon = ?2, tone = ?3, sort_order = ?4
+              WHERE currency_code = ?5 AND code = ?6",
         )
         .bind(&name)
+        .bind(&icon)
         .bind(&tone)
         .bind(sort_order)
         .bind(&currency_code)
@@ -3093,7 +3129,7 @@ pub async fn update_category_inner_with(
     }
     tx.commit().await.map_err(server_err)?;
     sqlx::query_as::<_, Category>(
-        "SELECT currency_code, code, name, tone, sort_order, archived, created_at
+        "SELECT currency_code, code, name, icon, tone, sort_order, archived, created_at
            FROM fin_category WHERE currency_code = ?1 AND code = ?2",
     )
     .bind(&currency_code)
@@ -3155,6 +3191,7 @@ pub async fn create_category(
     currency_code: String,
     code: String,
     name: String,
+    icon: String,
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
@@ -3165,11 +3202,11 @@ pub async fn create_category(
         // Wrappers always resolve so the empty / unknown → primary fallback
         // lives in one place and `create_category_inner` can trust its input.
         let currency = resolve_currency(&state.db, &currency_code).await?;
-        create_category_inner(&state.db, currency.code, code, name, tone, sort_order).await
+        create_category_inner(&state.db, currency.code, code, name, icon, tone, sort_order).await
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let _ = (currency_code, code, name, tone, sort_order);
+        let _ = (currency_code, code, name, icon, tone, sort_order);
         Err(ep_core::server_err("ssr-only"))
     }
 }
@@ -3179,6 +3216,7 @@ pub async fn update_category(
     currency_code: String,
     code: String,
     name: String,
+    icon: String,
     tone: String,
     sort_order: i64,
 ) -> Result<Category, ServerFnError> {
@@ -3186,11 +3224,11 @@ pub async fn update_category(
     {
         ep_auth::require_user_for_server_fn().await?;
         let state = ep_core::app_state_context()?;
-        update_category_inner(&state.db, currency_code, code, name, tone, sort_order).await
+        update_category_inner(&state.db, currency_code, code, name, icon, tone, sort_order).await
     }
     #[cfg(not(feature = "ssr"))]
     {
-        let _ = (currency_code, code, name, tone, sort_order);
+        let _ = (currency_code, code, name, icon, tone, sort_order);
         Err(ep_core::server_err("ssr-only"))
     }
 }

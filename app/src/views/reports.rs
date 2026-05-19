@@ -40,6 +40,15 @@ pub struct ReportAccount {
     pub pct: u32,
 }
 
+fn category_summary_label(c: &CategorySummary) -> String {
+    let icon = c.icon.trim();
+    if icon.is_empty() {
+        c.name.clone()
+    } else {
+        format!("{icon} {}", c.name)
+    }
+}
+
 #[server(LoadReports, "/api/_internal/rpt", "Url", "load_reports")]
 pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
     #[cfg(feature = "ssr")]
@@ -63,9 +72,9 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         .bind(&cc)
         .fetch_all(pool);
 
-        type CatMetaRow = (String, String, String);
+        type CatMetaRow = (String, String, String, String);
         let cat_meta_q = sqlx::query_as::<_, CatMetaRow>(
-            "SELECT code, name, tone FROM fin_category WHERE currency_code = ?1",
+            "SELECT code, name, icon, tone FROM fin_category WHERE currency_code = ?1",
         )
         .bind(&cc)
         .fetch_all(pool);
@@ -104,11 +113,12 @@ pub async fn load_reports() -> Result<ReportsData, ServerFnError> {
         let mut category_30d: Vec<CategorySummary> = cat_totals
             .into_iter()
             .map(|(code, value)| {
-                let meta = cat_meta.iter().find(|(c, _, _)| *c == code);
+                let meta = cat_meta.iter().find(|(c, _, _, _)| *c == code);
                 CategorySummary {
                     code: code.clone(),
                     name: meta.map(|m| m.1.clone()).unwrap_or_default(),
-                    tone: meta.map(|m| m.2.clone()).unwrap_or_default(),
+                    icon: meta.map(|m| m.2.clone()).unwrap_or_default(),
+                    tone: meta.map(|m| m.3.clone()).unwrap_or_default(),
                     value,
                     pct: if cat_total.is_positive() {
                         (value.to_f64() / cat_total.to_f64() * 1000.0).round() / 10.0
@@ -337,11 +347,12 @@ fn render_category_share(d: &ReportsData) -> impl IntoView {
                             // finance expense-mix card uses, see modules/finance/src/view.rs).
                             let pct = (c.pct * 3.0).min(100.0);
                             let value = format!("{}{}", symbol, fmt_minor_compact(c.value, decimals));
+                            let label = category_summary_label(&c);
                             let _ = c.code;
                             view! {
                                 <div>
                                     <div class="cat-row-head">
-                                        <div><span>{c.name.clone()}</span></div>
+                                        <div><span>{label}</span></div>
                                         <div class="mono cat-row-value">
                                             {value}
                                             <span class="dim">{format!(" · {}%", c.pct)}</span>

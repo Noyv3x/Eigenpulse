@@ -193,15 +193,16 @@ async fn pool_helper_applies_finance_migrations() {
     // These columns used to be added by a follow-up migration and now live in
     // the squashed baseline; if the baseline is incomplete, the SELECT fails
     // with "no such column".
-    let row: (i64, i64) = sqlx::query_as(
+    let row: (i64, i64, i64) = sqlx::query_as(
         "SELECT \
             (SELECT COUNT(*) FROM pragma_table_info('fin_account') WHERE name = 'created_at'), \
-            (SELECT COUNT(*) FROM pragma_table_info('fin_category') WHERE name = 'archived')",
+            (SELECT COUNT(*) FROM pragma_table_info('fin_category') WHERE name = 'archived'), \
+            (SELECT COUNT(*) FROM pragma_table_info('fin_category') WHERE name = 'icon')",
     )
     .fetch_one(&pool)
     .await
     .expect("schema check");
-    assert_eq!(row, (1, 1), "expected baseline CRUD columns to exist");
+    assert_eq!(row, (1, 1, 1), "expected finance schema columns to exist");
 
     // Migrations should be ledger'd as applied.
     let n: i64 =
@@ -209,7 +210,7 @@ async fn pool_helper_applies_finance_migrations() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 4, "expected all finance migrations to be ledgered");
+    assert_eq!(n, 5, "expected all finance migrations to be ledgered");
 }
 
 /// Idempotency: running the migrations a second time should be a no-op,
@@ -227,7 +228,7 @@ async fn pool_helper_is_idempotent_on_double_apply() {
             .fetch_one(&pool)
             .await
             .expect("ledger");
-    assert_eq!(n, 4);
+    assert_eq!(n, 5);
 }
 
 #[tokio::test]
@@ -286,6 +287,38 @@ async fn fixture_helpers_round_trip() {
 }
 
 #[tokio::test]
+async fn category_icon_round_trips_and_updates() {
+    let pool = make_test_pool().await.expect("pool");
+    let cat = ep_finance::create_category_inner(
+        &pool,
+        "CNY".into(),
+        String::new(),
+        "Coffee".into(),
+        "☕️".into(),
+        "amber".into(),
+        7,
+    )
+    .await
+    .expect("create category");
+    assert_eq!(cat.icon, "☕️");
+
+    let updated = ep_finance::update_category_inner(
+        &pool,
+        "CNY".into(),
+        cat.code,
+        "Coffee".into(),
+        "🍵".into(),
+        "green".into(),
+        8,
+    )
+    .await
+    .expect("update category");
+    assert_eq!(updated.icon, "🍵");
+    assert_eq!(updated.tone, "green");
+    assert_eq!(updated.sort_order, 8);
+}
+
+#[tokio::test]
 async fn crypto_precision_round_trips_beyond_i64() {
     let pool = make_test_pool().await.expect("pool");
     let eth = ep_finance::create_currency_inner(
@@ -305,6 +338,7 @@ async fn crypto_precision_round_trips_beyond_i64() {
         eth.code.clone(),
         "GAS".into(),
         "Gas".into(),
+        "⛽".into(),
         "".into(),
         1,
     )
@@ -1962,6 +1996,7 @@ async fn update_category_renames_code_and_cascades_to_txns_and_budgets() {
         String::new(),
         "Food".into(),
         String::new(),
+        String::new(),
         0,
     )
     .await
@@ -1995,6 +2030,7 @@ async fn update_category_renames_code_and_cascades_to_txns_and_budgets() {
         "CNY".into(),
         "FOOD".into(),
         "Dining".into(),
+        String::new(),
         String::new(),
         0,
     )
@@ -2094,6 +2130,7 @@ async fn update_category_keeps_code_when_slug_unchanged() {
         String::new(),
         "Food".into(),
         String::new(),
+        String::new(),
         0,
     )
     .await
@@ -2107,6 +2144,7 @@ async fn update_category_keeps_code_when_slug_unchanged() {
         "CNY".into(),
         "FOOD".into(),
         "Food".into(),
+        String::new(),
         "amber".into(),
         2,
     )
@@ -2128,6 +2166,7 @@ async fn update_category_falls_back_to_numbered_when_slug_taken() {
         String::new(),
         "Food".into(),
         String::new(),
+        String::new(),
         0,
     )
     .await
@@ -2139,6 +2178,7 @@ async fn update_category_falls_back_to_numbered_when_slug_taken() {
         "CNY".into(),
         String::new(),
         "Dining".into(),
+        String::new(),
         String::new(),
         0,
     )
@@ -2153,6 +2193,7 @@ async fn update_category_falls_back_to_numbered_when_slug_taken() {
         "CNY".into(),
         "DINING".into(),
         "Food".into(),
+        String::new(),
         String::new(),
         0,
     )
@@ -2184,6 +2225,7 @@ async fn update_category_rotates_fallback_code_when_name_changes_in_non_ascii() 
         String::new(),
         "餐饮".into(),
         String::new(),
+        String::new(),
         0,
     )
     .await
@@ -2199,6 +2241,7 @@ async fn update_category_rotates_fallback_code_when_name_changes_in_non_ascii() 
         "CNY".into(),
         first.code.clone(),
         "饮食".into(),
+        String::new(),
         String::new(),
         0,
     )
@@ -2228,6 +2271,7 @@ async fn update_category_keeps_manual_code_when_name_unchanged() {
         "CNY".into(),
         "MYCAT".into(),
         "Food".into(),
+        String::new(),
         "amber".into(),
         5,
     )

@@ -587,6 +587,23 @@ fn currency_caption(c: &Currency) -> String {
     }
 }
 
+fn category_label(icon: &str, name: &str) -> String {
+    let icon = icon.trim();
+    if icon.is_empty() {
+        name.to_string()
+    } else {
+        format!("{icon} {name}")
+    }
+}
+
+fn category_display(c: &Category) -> String {
+    category_label(&c.icon, &c.name)
+}
+
+fn category_summary_display(c: &crate::model::CategorySummary) -> String {
+    category_label(&c.icon, &c.name)
+}
+
 fn render_txn_modal(
     add: ServerAction<AddTxn>,
     add_transfer: ServerAction<AddTransfer>,
@@ -698,7 +715,8 @@ fn render_new_txn_form(add: ServerAction<AddTxn>, data: &LedgerData) -> impl Int
                     <select name="category_code" required style=INPUT_STYLE>
                         {categories.into_iter().enumerate().map(|(i, c)| {
                             let code = c.code.clone();
-                            view! { <option value=code selected={i == 0}>{c.name.clone()}</option> }
+                            let label = category_display(&c);
+                            view! { <option value=code selected={i == 0}>{label}</option> }
                         }).collect_view()}
                     </select>
                 </label>
@@ -889,8 +907,8 @@ fn render_ledger_tab(
                             <option value="">{t(locale, "finance.filter.all_categories")}</option>
                             {cat_options.iter().map(|c| {
                                 let code = c.code.clone();
-                                let name = c.name.clone();
-                                view! { <option value=code>{name}</option> }
+                                let label = category_display(c);
+                                view! { <option value=code>{label}</option> }
                             }).collect_view()}
                         </select>
                         <input type="date"
@@ -1122,7 +1140,7 @@ fn render_txn_row(t: Txn, ctx: TxnRowContext<'_>) -> impl IntoView {
     let cat_label = ctx
         .cat_lookup
         .get(&t.category_code)
-        .map(|c| c.name.clone())
+        .map(category_display)
         .unwrap_or_else(|| t.category_code.clone());
     let account_label = ctx
         .acc_options
@@ -1279,7 +1297,8 @@ fn render_txn_edit_form(
                                                     {form_cat_opts.iter().map(|c| {
                                                         let selected = c.code == form_category.as_str();
                                                         let code = c.code.clone();
-                                                        view! { <option value=code selected=selected>{c.name.clone()}</option> }
+                                                        let label = category_display(c);
+                                                        view! { <option value=code selected=selected>{label}</option> }
                                                     }).collect_view()}
                                                 </select>
                                             </label>
@@ -1427,7 +1446,7 @@ fn render_budget(
     let cat_lookup: std::collections::HashMap<String, (String, String)> = d
         .categories
         .iter()
-        .map(|c| (c.code.clone(), (c.name.clone(), c.tone.clone())))
+        .map(|c| (c.code.clone(), (category_display(c), c.tone.clone())))
         .collect();
     let budgets = d.budgets.clone();
     let budgets_count = budgets.len();
@@ -1523,7 +1542,7 @@ fn render_budget(
                                             let amount = format!("{}{}", unbudgeted_symbol, fmt_minor_compact(c.value, decimals));
                                             view! {
                                                 <div style="display:flex;justify-content:space-between;font-size:12.5px;padding:4px 0">
-                                                    <span>{c.name.clone()}</span>
+                                                    <span>{category_summary_display(&c)}</span>
                                                     <span class="mono">{amount}</span>
                                                 </div>
                                             }
@@ -1553,8 +1572,8 @@ fn render_budget(
                                 <select name="category_code" style=INPUT_STYLE>
                                     {categories_for_form.into_iter().map(|c| {
                                         let code = c.code.clone();
-                                        let name = c.name.clone();
-                                        view! { <option value=code>{name}</option> }
+                                        let label = category_display(&c);
+                                        view! { <option value=code>{label}</option> }
                                     }).collect_view()}
                                 </select>
                             </label>
@@ -1864,43 +1883,68 @@ fn render_categories(
                     <Icon kind=IconKind::Plus size=14/>{t(locale, "finance.category.new")}
                 </button>
             </div>
-            {move || if open.get() {
-                // Per-render clone — the `<ActionForm>` children closure moves
-                // what it captures; the outer reactive closure stays `FnMut`.
-                let currency_code = currency_code.clone();
-                view! {
-                    <ActionForm action=create_category attr:class="vstack" attr:style="gap:10px;padding:14px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
-                        <input type="hidden" name="currency_code" value=currency_code.clone()/>
-                        <input type="hidden" name="code" value=""/>
-                        <input type="hidden" name="tone" value=""/>
-                        <input type="hidden" name="sort_order" value=next_sort.to_string()/>
-                        <div style="display:grid;grid-template-columns:1fr;gap:10px">
-                            <label class="vstack" style="gap:4px">
-                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
-                                <input name="name" required autofocus
-                                       maxlength=MAX_CATEGORY_NAME_CHARS.to_string()
-                                       placeholder=t(locale, "finance.placeholder.category_name")
-                                       style=INPUT_STYLE/>
-                            </label>
+            <div class="fin-modal-slot">
+                {move || if open.get() {
+                    // Per-render clone — the `<ActionForm>` children closure moves
+                    // what it captures; the outer reactive closure stays `FnMut`.
+                    let currency_code = currency_code.clone();
+                    view! {
+                        <div class="fin-modal-backdrop">
+                            <div class="fin-modal" role="dialog" aria-modal="true">
+                                <div class="fin-modal-head">
+                                    <div>
+                                        <div class="card-title">{t(locale, "finance.category.new")}</div>
+                                        <p class="card-sub">{t(locale, "finance.category.manager.sub")}</p>
+                                    </div>
+                                    <button class="btn ghost sm" type="button"
+                                            aria-label=t(locale, "finance.action.cancel")
+                                            on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
+                                </div>
+                                <div class="fin-modal-body">
+                                    <ActionForm action=create_category attr:class="vstack" attr:style="gap:12px">
+                                        <input type="hidden" name="currency_code" value=currency_code.clone()/>
+                                        <input type="hidden" name="code" value=""/>
+                                        <input type="hidden" name="tone" value=""/>
+                                        <input type="hidden" name="sort_order" value=next_sort.to_string()/>
+                                        <div style="display:grid;grid-template-columns:96px 1fr;gap:10px">
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.icon")}</span>
+                                                <input name="icon" autofocus
+                                                       maxlength=MAX_CATEGORY_ICON_CHARS.to_string()
+                                                       placeholder=t(locale, "finance.placeholder.category_icon")
+                                                       style=INPUT_STYLE/>
+                                            </label>
+                                            <label class="vstack" style="gap:4px">
+                                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
+                                                <input name="name" required
+                                                       maxlength=MAX_CATEGORY_NAME_CHARS.to_string()
+                                                       placeholder=t(locale, "finance.placeholder.category_name")
+                                                       style=INPUT_STYLE/>
+                                            </label>
+                                        </div>
+                                        <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                                            <ErrorSlot action=create_category style="flex:1"/>
+                                            <button class="btn ghost" type="button"
+                                                    on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
+                                            <button class="btn primary" type="submit">
+                                                <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
+                                            </button>
+                                        </div>
+                                    </ActionForm>
+                                </div>
+                            </div>
                         </div>
-                        <div class="hstack" style="gap:10px;align-items:center;justify-content:flex-end;flex-wrap:wrap">
-                            <ErrorSlot action=create_category style="flex:1"/>
-                            <button class="btn ghost" type="button"
-                                    on:click=move |_| open.set(false)>{t(locale, "finance.action.cancel")}</button>
-                            <button class="btn primary" type="submit">
-                                <Icon kind=IconKind::Check size=14/>{t(locale, "finance.action.create")}
-                            </button>
-                        </div>
-                    </ActionForm>
-                }.into_any()
-            } else {
-                view! { <span></span> }.into_any()
-            }}
+                    }.into_any()
+                } else {
+                    view! { <span></span> }.into_any()
+                }}
+            </div>
 
             <div class="scroll-x" style="margin-top:14px">
                 <table class="tbl">
                     <thead>
                         <tr>
+                            <th style="width:56px">{t(locale, "finance.field.icon")}</th>
                             <th>{t(locale, "finance.field.name")}</th>
                             <th style="width:80px">{t(locale, "finance.field.tone")}</th>
                             <th class="num" style="width:64px">{t(locale, "finance.field.used")}</th>
@@ -1936,9 +1980,15 @@ fn render_category_row(
     let currency_code = c.currency_code.clone();
     let code = c.code.clone();
     let name = c.name.clone();
+    let icon = c.icon.clone();
     let tone_str = c.tone.clone();
     let sort_order_str = c.sort_order.to_string();
     let display_name = c.name.clone();
+    let display_icon = if c.icon.trim().is_empty() {
+        "—".to_string()
+    } else {
+        c.icon.clone()
+    };
     let delete_ref = format!("{}/{}", c.currency_code, c.code);
     let display_tone_label = if c.tone.is_empty() {
         "—".to_string()
@@ -1947,6 +1997,7 @@ fn render_category_row(
     };
     view! {
         <tr>
+            <td style="font-size:17px">{display_icon}</td>
             <td>{display_name}</td>
             <td>
                 <UiTag tone=tone_enum>{display_tone_label}</UiTag>
@@ -1962,6 +2013,12 @@ fn render_category_row(
                             <input type="hidden" name="currency_code" value=currency_code/>
                             <input type="hidden" name="code" value=code.clone()/>
                             <input type="hidden" name="sort_order" value=sort_order_str/>
+                            <label class="vstack" style="gap:4px">
+                                <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.icon")}</span>
+                                <input name="icon" maxlength=MAX_CATEGORY_ICON_CHARS.to_string() value=icon
+                                       placeholder=t(locale, "finance.placeholder.category_icon")
+                                       style=INPUT_STYLE/>
+                            </label>
                             <label class="vstack" style="gap:4px">
                                 <span class="mono dim" style=FIELD_LABEL>{t(locale, "finance.field.name")}</span>
                                 <input name="name" required maxlength=MAX_CATEGORY_NAME_CHARS.to_string() value=name
@@ -2293,10 +2350,11 @@ fn render_category_share_rows(
             let bar_color = Tone::parse(&c.tone).css_var();
             let pct = (c.pct * 3.0).min(100.0);
             let value = format!("{}{}", symbol, fmt_minor_compact(c.value, decimals));
+            let label = category_summary_display(&c);
             view! {
                 <div>
                     <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
-                        <div style="font-size:12.5px">{c.name.clone()}</div>
+                        <div style="font-size:12.5px">{label}</div>
                         <div class="mono" style="font-size:12px">{value} <span class="dim">{format!("· {}%", c.pct)}</span></div>
                     </div>
                     <div class="bar"><span style=format!("width:{:.1}%;background:{}", pct, bar_color)></span></div>
@@ -2358,7 +2416,7 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, MinorAmount)> {
         // Round to nearest grid step, with a floor of one step to avoid noise.
         let suggested =
             MinorAmount::new(((projected / grid_f).round() * grid_f).max(grid_f) as i128);
-        by_code.insert(c.code.clone(), (c.name.clone(), suggested));
+        by_code.insert(c.code.clone(), (category_summary_display(c), suggested));
     }
     let mut out: Vec<(String, String, MinorAmount)> = by_code
         .into_iter()

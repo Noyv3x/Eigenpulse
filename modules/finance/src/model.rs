@@ -119,6 +119,8 @@ pub struct Category {
     pub currency_code: String,
     pub code: String,
     pub name: String,
+    /// Optional emoji shown alongside the category name.
+    pub icon: String,
     pub tone: String,
     pub sort_order: i64,
     pub archived: bool,
@@ -156,6 +158,7 @@ pub struct BudgetEntry {
 pub struct CategorySummary {
     pub code: String,
     pub name: String,
+    pub icon: String,
     pub tone: String,
     /// Spend magnitude in the currency's minor units.
     pub value: MinorAmount,

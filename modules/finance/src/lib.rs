@@ -49,6 +49,10 @@ mod ssr_module {
                     "004_currency_remark",
                     include_str!("../migrations/004_currency_remark.sql"),
                 ),
+                (
+                    "005_category_icon",
+                    include_str!("../migrations/005_category_icon.sql"),
+                ),
             ]
         }
 
