@@ -47,6 +47,22 @@ where
     let cancel_label = ep_i18n::t(locale, "ui.row_action.cancel_label").to_string();
     let confirm_label = ep_i18n::t(locale, "ui.row_action.confirm_label").to_string();
     let open = RwSignal::new(false);
+    // Close the dialog once the action has actually fired — NOT from the
+    // submit button's own `on:click`. Flipping `open` in the submit handler
+    // tears the `<ActionForm>` out of the DOM during the click event, before
+    // the browser dispatches the submit, so the POST is silently dropped
+    // ("Form submission canceled because the form is not connected") and the
+    // just-disposed reactive closure panics. Watching the version closes the
+    // dialog on completion instead. Mirrors the create-form pattern in
+    // finance's `render_account_manager`.
+    let last_version = RwSignal::new(0usize);
+    Effect::new(move |_| {
+        let v = action.version().get();
+        if v != 0 && v != last_version.get_untracked() {
+            open.set(false);
+            last_version.set(v);
+        }
+    });
     let value_for_form = value.clone();
     let field_for_form = field.clone();
     let confirm_for_dialog = confirm_msg.clone();
@@ -82,8 +98,7 @@ where
                                 <input type="hidden" name=field_inner value=value_inner/>
                                 <button class="btn ghost" type="button"
                                         on:click=move |_| open.set(false)>{cancel_label}</button>
-                                <button class="btn primary danger-action" type="submit"
-                                        on:click=move |_| open.set(false)>{confirm_label}</button>
+                                <button class="btn primary danger-action" type="submit">{confirm_label}</button>
                             </ActionForm>
                         </div>
                     </div>
