@@ -1781,6 +1781,8 @@ fn render_account_card(
     let tone_str = a.tone.clone();
     let card_title = a.name.clone();
     let card_sub = a.r#type.clone();
+    let type_slug = type_str.to_lowercase();
+    let card_class = format!("account-card type-{}", type_slug);
     let balance_text = format!("{}{}", symbol, fmt_minor(a.balance, decimals));
     let delete_ref = format!("{}/{}", a.currency_code, a.code);
     // ChartBars takes f64 heights; accounting amounts stay exact elsewhere.
@@ -1791,7 +1793,7 @@ fn render_account_card(
         &[("name", &a.name)],
     );
     view! {
-        <Card title=card_title sub=card_sub>
+        <Card title=card_title sub=card_sub class=card_class>
             <div class="mono" style="font-size:24px;font-weight:600;letter-spacing:-0.02em">
                 {balance_text}
             </div>
