@@ -55,11 +55,11 @@ cargo test -p ep-db --lib --features ssr --no-default-features --locked
 cargo test -p ep-finance --features ssr --no-default-features --test crud --locked
 
 # Smoke test requires a built Leptos site first.
-cargo leptos build --release && ./scripts/leptos-postbuild.sh
+cargo leptos build --release
 cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
 ```
 
-There are unit tests and a small smoke suite now. CI runs `cargo fmt --check`, workspace/SSR/hydrate checks, no-default leaf-crate checks, clippy with `-D warnings`, selected `--lib` tests, a full `cargo leptos build --release` followed by `scripts/leptos-postbuild.sh`, the `app/tests/smoke.rs` harness, and a Docker health probe. `modules/finance/tests/crud.rs` is a focused SQLite integration suite and should be run when touching finance CRUD/server helpers.
+There are unit tests and a small smoke suite now. CI runs `cargo fmt --check`, workspace/SSR/hydrate checks, no-default leaf-crate checks, clippy with `-D warnings`, selected `--lib` tests, a full `cargo leptos build --release` plus the `app/tests/smoke.rs` harness, and a Docker health probe. `modules/finance/tests/crud.rs` is a focused SQLite integration suite and should be run when touching finance CRUD/server helpers.
 
 ## Architecture — the parts that span files
 
@@ -135,7 +135,7 @@ The generator uses `INSERT … ON CONFLICT DO UPDATE … RETURNING last_value` f
 - `EP_ADMIN_PASSWORD` is read **only** when `app_user` is empty (first boot). After bootstrap the row stays; the env var has no further effect. To rotate, use `/settings/security` (purges all sessions) or the recovery CLI `cargo run -p ep-auth --features ssr --example reset_password`.
 - `cargo-leptos` is installed and invoked in the build stage; the runtime stage only contains the `eigenpulse` binary + `target/site/`.
 - The Dockerfile installs `wasm-opt-shim.sh` as `/usr/local/cargo/bin/wasm-opt-version_{123,129}/wasm-opt`. cargo-leptos 0.3.6 always tries to run wasm-opt and its bundled downloader has no usable aarch64 path for multi-arch builds; Debian `binaryen` is also too old for current Rust WASM features. The shim no-ops wasm-opt after Rust's own `-Oz` pass.
-- **`scripts/leptos-postbuild.sh` is mandatory after every `cargo leptos build`**: cargo-leptos 0.3.6 publishes the wasm artifact as `<name>.wasm` while wasm-bindgen's `.js` loader and Leptos's `<HydrationScripts/>` both fetch `<name>_bg.wasm`. The script `cp`s the file under both names; without it every page silently degrades to its SSR snapshot (no Tweaks toggle, no ActionForm refetch, no SSE counter). The Dockerfile invokes it automatically; `cargo leptos watch` users have to re-run it after each rebuild (cargo-leptos has no post-build hook in 0.3.6).
+- **No postbuild step is needed for hydration.** The wasm filename the hydration loader fetches is chosen by Leptos's `<HydrationScripts/>` (`wasm_output_name`) and has differed across versions — the current Leptos loads `<name>.wasm` (exactly what cargo-leptos 0.3.6 publishes), while older Leptos and wasm-bindgen's default path use `<name>_bg.wasm`. A former `scripts/leptos-postbuild.sh` copied the artifact under both names, but forgetting it after a `cargo leptos watch` rebuild silently degraded every page to its SSR snapshot (no Tweaks toggle, no ActionForm refetch, no SSE counter). That footgun is now closed at the HTTP layer: the `/pkg` route in `app/src/main.rs` is `ServeDir::fallback(ServeFile::new("<site>/pkg/<output-name>.wasm"))`, which serves the real `.wasm` whenever the `_bg.wasm` name 404s (keeping `200` + `application/wasm`). The bundle resolves under either naming with no copy step — verified by hydrating with `eigenpulse_bg.wasm` deleted, and guarded by `app/tests/smoke.rs`'s `/pkg/eigenpulse_bg.wasm` request.
 - **Wrap inline `{move || option.map(view!)}` in a stable wrapper element** when the conditional view sits next to an `<ActionForm>` (or any sibling that mutates DOM during hydrate). tachys 0.1.9's text-node walker panics with `failed_to_cast_text_node` if the placeholder neighbour shifts. See `app/src/views/settings/{notifications,security}.rs` for `<span class="error-slot">…</span>` and `<div class="new-token-slot">…</div>` examples; the wrapper itself never moves, so the walker keeps its anchor.
 
 ## Secret hygiene in server fns

@@ -36,12 +36,10 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 RUN cargo chef cook --release --target wasm32-unknown-unknown --recipe-path recipe.json
 COPY . .
-# Build + reconcile the wasm filename mismatch (cargo-leptos publishes
-# `<name>.wasm`, but both the wasm-bindgen JS loader and Leptos's
-# HydrationScripts preload `<name>_bg.wasm`). See scripts/leptos-postbuild.sh
-# for the full rationale.
-RUN cargo leptos build --release \
- && /app/scripts/leptos-postbuild.sh /app/target/site/pkg eigenpulse
+# The SSR binary serves `/pkg/<name>_bg.wasm` from `<name>.wasm` via a
+# ServeDir fallback (app/src/main.rs), so the hydration bundle resolves
+# whatever name the loader requests — no postbuild copy step needed.
+RUN cargo leptos build --release
 # Pre-create an empty data directory we can copy into the runtime stage
 # with nonroot ownership (distroless has no shell to mkdir/chown at runtime).
 RUN mkdir -p /data-empty

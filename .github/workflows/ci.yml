@@ -62,7 +62,6 @@ jobs:
         run: |
           node --check assets/sw.js
           node --check assets/theme-init.js
-          sh -n scripts/leptos-postbuild.sh
           sh -n wasm-opt-shim.sh
           printf 'wasm' > /tmp/ep-test.wasm
           sh wasm-opt-shim.sh -Oz /tmp/ep-test.wasm -o /tmp/ep-test-out.wasm
@@ -71,14 +70,6 @@ jobs:
             echo "wasm-opt-shim unexpectedly accepted a missing input"
             exit 1
           fi
-          ep_pkg="$(mktemp -d)"
-          if sh scripts/leptos-postbuild.sh "$ep_pkg" eigenpulse; then
-            echo "leptos-postbuild unexpectedly accepted a missing wasm"
-            exit 1
-          fi
-          printf 'wasm' > "$ep_pkg/eigenpulse.wasm"
-          sh scripts/leptos-postbuild.sh "$ep_pkg" eigenpulse
-          cmp "$ep_pkg/eigenpulse.wasm" "$ep_pkg/eigenpulse_bg.wasm"
           bash -n examples/shortcuts/test.sh
           python3 -m json.tool examples/shortcuts/quick-expense.json > /dev/null
           python3 -m json.tool examples/shortcuts/quick-notify.json > /dev/null
@@ -132,11 +123,10 @@ jobs:
       - name: cargo test finance CRUD integration
         run: cargo test -p ep-finance --features ssr --no-default-features --test crud --locked
 
-  # End-to-end smoke against the SSR binary. Builds full leptos site
-  # (SSR binary + wasm hydrate bundle), runs leptos-postbuild to stage
-  # the `_bg.wasm` alias the in-browser hydrate loader expects, then
-  # the smoke test spawns the binary, verifies the alias is served, and
-  # walks login -> dashboard -> PAT 401 paths.
+  # End-to-end smoke against the SSR binary. Builds the full leptos site
+  # (SSR binary + wasm hydrate bundle), then the smoke test spawns the
+  # binary, verifies the `/pkg/<name>_bg.wasm` alias is served (by the
+  # ServeDir fallback in main.rs), and walks login -> dashboard -> PAT 401.
   smoke:
     name: cargo leptos build + smoke test
     runs-on: ubuntu-latest
@@ -154,8 +144,6 @@ jobs:
         run: cargo install cargo-leptos --locked --version 0.3.6
       - name: Cargo Leptos build (release)
         run: cargo leptos build --release
-      - name: Stage wasm aliases
-        run: ./scripts/leptos-postbuild.sh
       - name: Smoke test
         run: cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
 

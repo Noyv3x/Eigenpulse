@@ -79,20 +79,16 @@ export EP_ADMIN_PASSWORD='dev-password'
 # EP_SECRET is optional; if omitted, the app reads or creates data/secret.key.
 
 cargo leptos watch          # http://127.0.0.1:3000
-# After every cargo-leptos build (including each watch rebuild), run:
-./scripts/leptos-postbuild.sh
-# See note below — without this, hydration silently 404s the wasm bundle.
 ```
 
 > 首次启动会用 `EP_ADMIN_PASSWORD` 创建 OWNER 账户。该变量缺失则进程拒绝启动。
 
-> **WASM 命名补丁**：cargo-leptos 0.3.6 把 wasm 在 site 目录里重命名为
-> `eigenpulse.wasm`，但 wasm-bindgen 的 `.js` loader 与 Leptos 的
-> `<HydrationScripts/>` 都引用 `eigenpulse_bg.wasm`。三方不一致让
-> hydration 在浏览器 404 静默失败（页面降级为纯 SSR，Tweaks/SSE/ActionForm
-> refetch 全失效）。`scripts/leptos-postbuild.sh` 把 wasm 复制成两份；
-> Dockerfile 已自动调用此脚本，本地 `cargo leptos build/watch` 之后需
-> 手动跑一次（cargo-leptos 0.3.6 没 post-build hook）。
+> **WASM 命名说明**：cargo-leptos 0.3.6 产出 `eigenpulse.wasm`，当前 Leptos
+> 的 `<HydrationScripts/>` 正好加载 `eigenpulse.wasm`。部分版本的加载器（以及
+> wasm-bindgen 默认）会改用 `eigenpulse_bg.wasm`，为此服务器在
+> `app/src/main.rs` 的 `/pkg` 路由加了 `ServeDir::fallback`：当 `_bg.wasm`
+> 不存在时回退到 `eigenpulse.wasm`（保持 `200` + `application/wasm`）。于是
+> 无论加载器请求哪个名字都能解析，**无需任何 postbuild 拷贝步骤**。
 
 ### Docker（NAS）
 

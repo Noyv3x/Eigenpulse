@@ -1,7 +1,7 @@
 //! End-to-end smoke test against the SSR binary.
 //!
 //! Run with:
-//! `cargo leptos build --release && ./scripts/leptos-postbuild.sh && cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked -- --nocapture`
+//! `cargo leptos build --release && cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked -- --nocapture`
 //!
 //! Requires: `cargo leptos build --release` has produced `target/site/`
 //! beforehand (the binary needs the static site root). The test spawns the
@@ -176,9 +176,10 @@ fn full_flow() {
         "binary healthcheck should pass against running server"
     );
 
-    // Hydration artifact alias must be present after scripts/leptos-postbuild.sh.
-    // Without this file, SSR pages render but the browser silently falls back to
-    // a non-hydrated snapshot.
+    // The hydration loader fetches `/pkg/<name>_bg.wasm`; the ServeDir fallback
+    // in main.rs serves it from `<name>.wasm` even when no `_bg.wasm` file was
+    // staged. Guard that the alias resolves (200, non-empty) so pages hydrate
+    // instead of silently degrading to a non-hydrated SSR snapshot.
     let r = client
         .get(server.url("/pkg/eigenpulse_bg.wasm"))
         .send()

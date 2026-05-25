@@ -110,7 +110,24 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/static", axum::routing::any(static_handler))
         .nest_service(
             "/pkg",
-            tower_http::services::ServeDir::new(format!("{}/pkg", leptos_options.site_root)),
+            // The hydration wasm filename is chosen by Leptos's
+            // `<HydrationScripts/>` (the `wasm_output_name` it hands the
+            // wasm-bindgen loader), and it has differed across versions: the
+            // current one loads `<output-name>.wasm` (exactly what cargo-leptos
+            // 0.3.6 publishes), while older Leptos — and wasm-bindgen's own
+            // default path — use `<output-name>_bg.wasm`. A postbuild copy step
+            // used to bridge that, but any build that skipped it (every
+            // `cargo leptos watch` recompile) could then silently degrade pages
+            // to their SSR snapshot. Serving the real `.wasm` whenever the
+            // `_bg.wasm` name 404s makes the bundle resolve under either naming
+            // with no postbuild copy: `fallback` keeps ServeFile's `200` +
+            // `application/wasm`, and a genuine `_bg.wasm` is still served first
+            // if one exists.
+            tower_http::services::ServeDir::new(format!("{}/pkg", leptos_options.site_root))
+                .fallback(tower_http::services::ServeFile::new(format!(
+                    "{}/pkg/{}.wasm",
+                    leptos_options.site_root, leptos_options.output_name
+                ))),
         )
         .leptos_routes_with_context(&state, leptos_routes, provide_state, {
             let opts = leptos_options_for_shell.clone();
