@@ -3030,6 +3030,10 @@ pub async fn update_category_inner(
 /// Internal counterpart of [`update_category_inner`]; mirrors
 /// [`update_account_inner_with`]. A category's `currency_code` is immutable.
 #[cfg(feature = "ssr")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "internal update helper; parameters mirror the category form fields"
+)]
 pub async fn update_category_inner_with(
     pool: &SqlitePool,
     currency_code: String,
