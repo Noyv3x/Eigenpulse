@@ -218,6 +218,15 @@ fn render_today_item(
         "LRN" => "/learning",
         _ => "/",
     };
+    // Per-module marker colour on the timeline rail (mirrors the dashboard
+    // module tags + finance txn-indicator accents): FIN amber, FIT green,
+    // LRN blue. CSS reads the `mod-*` class via the `--mark-color` token.
+    let item_class = match module.as_str() {
+        "FIN" => "today-item mod-fin",
+        "FIT" => "today-item mod-fit",
+        "LRN" => "today-item mod-lrn",
+        _ => "today-item",
+    };
     let amount_text = amount.map(|a| {
         let (sym, dec) = currency_code
             .as_deref()
@@ -228,7 +237,7 @@ fn render_today_item(
         format!("{sign}{sym}{}", fmt_minor_compact(a.abs(), dec))
     });
     view! {
-        <a class="today-item" href=module_link>
+        <a class=item_class href=module_link>
             <span class="time mono">{time}</span>
             <span class="mark"></span>
             <div>

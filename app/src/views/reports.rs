@@ -294,7 +294,7 @@ fn render_month_trend(d: &ReportsData) -> impl IntoView {
                 </div>
                 <div>
                     <div class="mono dim chart-row-label">{t(locale, "app.reports.month.expense")}</div>
-                    <ChartBars data=expense_data labels=labels/>
+                    <ChartBars data=expense_data labels=labels class="expense"/>
                 </div>
                 <div>
                     <div class="mono dim chart-row-label">{t(locale, "app.reports.month.net")}</div>

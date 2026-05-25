@@ -1534,6 +1534,11 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outli
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 1ms !important;
+    /* Zero the delay too: staggered entrance reveals (see the Motion layer
+       at the end of this file) hold their `from` state during the delay via
+       animation-fill-mode, so a non-zero delay would leave content briefly
+       hidden for motion-sensitive users. */
+    animation-delay: 0s !important;
     transition-duration: 1ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
@@ -1686,3 +1691,146 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outli
 .module-glyph { transition: box-shadow var(--motion) var(--ease); }
 .module-banner:hover .module-glyph { box-shadow: 0 0 0 1px color-mix(in oklab, currentColor 30%, transparent),
               inset 0 -8px 24px -10px color-mix(in oklab, currentColor 40%, transparent); }
+
+/* ================================================================
+   Motion · orchestrated entrance + data-viz reveals
+   ----------------------------------------------------------------
+   Additive layer. The existing per-view / per-card fade-ins stay as
+   the base; this brings the *data* to life on first paint — KPI tiles
+   cascade, chart bars grow from the baseline, the today timeline and
+   note heatmap ripple in, rings pop. Every animation here is governed
+   by the global prefers-reduced-motion block above (duration + delay
+   both neutralised), so motion-sensitive users see the final state
+   immediately. animation-fill-mode:both holds the `from` state during
+   the stagger delay so nothing flashes before its turn.
+   ================================================================ */
+@keyframes ep-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ep-bar-grow {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+@keyframes ep-cell-in {
+  from { opacity: 0; transform: scale(0.5); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes ep-ring-in {
+  from { opacity: 0; transform: scale(0.86); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* KPI tiles cascade left-to-right. We animate each tile's *contents* rather
+   than the tile box: the grid paints 1px hairline gaps over a border-coloured
+   backplate, so dipping a whole tile to opacity:0 would flash that grey plate
+   mid-cascade. Animating the inner label/value/delta keeps every tile's
+   surface painted the entire time while the figures still rise into place. */
+.kpi-grid .kpi > * { animation: ep-rise var(--motion-slow) var(--ease-out) both; }
+.kpi-grid .kpi:nth-child(1) > * { animation-delay: 20ms; }
+.kpi-grid .kpi:nth-child(2) > * { animation-delay: 70ms; }
+.kpi-grid .kpi:nth-child(3) > * { animation-delay: 120ms; }
+.kpi-grid .kpi:nth-child(4) > * { animation-delay: 170ms; }
+.kpi-grid .kpi:nth-child(5) > * { animation-delay: 220ms; }
+.kpi-grid .kpi:nth-child(6) > * { animation-delay: 270ms; }
+
+/* Chart bars grow up from their baseline, sweeping left-to-right. */
+.chart-bars .bar-cell {
+  transform-origin: bottom;
+  animation: ep-bar-grow var(--motion-slow) var(--ease-out) both;
+}
+.chart-bars .bar-cell:nth-child(1)  { animation-delay: 20ms; }
+.chart-bars .bar-cell:nth-child(2)  { animation-delay: 42ms; }
+.chart-bars .bar-cell:nth-child(3)  { animation-delay: 64ms; }
+.chart-bars .bar-cell:nth-child(4)  { animation-delay: 86ms; }
+.chart-bars .bar-cell:nth-child(5)  { animation-delay: 108ms; }
+.chart-bars .bar-cell:nth-child(6)  { animation-delay: 130ms; }
+.chart-bars .bar-cell:nth-child(7)  { animation-delay: 152ms; }
+.chart-bars .bar-cell:nth-child(8)  { animation-delay: 174ms; }
+.chart-bars .bar-cell:nth-child(9)  { animation-delay: 196ms; }
+.chart-bars .bar-cell:nth-child(10) { animation-delay: 218ms; }
+.chart-bars .bar-cell:nth-child(11) { animation-delay: 240ms; }
+.chart-bars .bar-cell:nth-child(12) { animation-delay: 262ms; }
+
+/* Expense bars read amber — matches the `txind.exp` accent so income (green)
+   and expense (amber) no longer share one colour in the reports trend. */
+.chart-bars.expense .bar-cell { background: var(--amber-soft); }
+.chart-bars.expense .bar-cell.hi,
+.chart-bars.expense .bar-cell:hover { background: var(--amber); }
+
+/* Progress fills (expense-mix, category-share, budget usage) sweep in from the
+   left. scaleX grows the span to its inline width without the keyframe needing
+   to know that width; the `.bar`'s overflow:hidden clips the transform. */
+@keyframes ep-bar-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.bar > span {
+  transform-origin: left center;
+  animation: ep-bar-fill var(--motion-slow) var(--ease-out) both;
+}
+
+/* Note heatmap ripples in as four quick waves. */
+.heatmap .c { animation: ep-cell-in var(--motion) var(--ease-out) both; }
+.heatmap .c:nth-child(4n+1) { animation-delay: 0ms; }
+.heatmap .c:nth-child(4n+2) { animation-delay: 55ms; }
+.heatmap .c:nth-child(4n+3) { animation-delay: 110ms; }
+.heatmap .c:nth-child(4n)   { animation-delay: 165ms; }
+
+/* Progress rings pop in. */
+.ring { animation: ep-ring-in var(--motion-slow) var(--ease-out) both; }
+
+/* ================================================================
+   Today timeline · continuous rail + per-module markers
+   The vertical rail threads the marker column (centre = 14px item pad
+   + 70px time col + 10px grid gap + 4px to the 8px mark column centre
+   = 98px). The geometry is density-independent: `.today-item` padding
+   and font-size are fixed, not `--u`-scaled, so the rail aligns under
+   both densities. Rail sits above row hover backgrounds (z-index:1)
+   but below the markers (z-index:2), which carry a surface halo so
+   they punch cleanly through the line.
+   ================================================================ */
+.today-list { position: relative; }
+.today-list::before {
+  content: "";
+  position: absolute;
+  left: 97px;
+  top: 20px;
+  bottom: 20px;
+  width: 2px;
+  background: var(--border);
+  /* Fade both ends so any minor first/last-dot offset reads as intentional. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+          mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  z-index: 1;
+  pointer-events: none;
+}
+.today-item { --mark-color: var(--primary); }
+.today-item.mod-fin { --mark-color: var(--amber); }
+.today-item.mod-fit { --mark-color: var(--primary); }
+.today-item.mod-lrn { --mark-color: var(--blue); }
+.today-item .mark {
+  background: var(--mark-color);
+  position: relative;
+  z-index: 2;
+  box-shadow: 0 0 0 3px var(--surface);
+}
+.today-item:hover .mark {
+  box-shadow: 0 0 0 3px var(--surface),
+              0 0 0 6px color-mix(in oklab, var(--mark-color) 22%, transparent);
+}
+/* Timeline rows cascade in under the rail. */
+.today-item { animation: ep-rise var(--motion) var(--ease-out) both; }
+.today-item:nth-child(1) { animation-delay: 0ms; }
+.today-item:nth-child(2) { animation-delay: 35ms; }
+.today-item:nth-child(3) { animation-delay: 70ms; }
+.today-item:nth-child(4) { animation-delay: 105ms; }
+.today-item:nth-child(5) { animation-delay: 140ms; }
+.today-item:nth-child(6) { animation-delay: 175ms; }
+.today-item:nth-child(7) { animation-delay: 210ms; }
+.today-item:nth-child(8) { animation-delay: 245ms; }
+
+/* ================================================================
+   Branded text selection + Firefox scrollbar parity
+   (the WebKit scrollbar is already styled above; Firefox uses the
+   standard scrollbar-* properties.)
+   ================================================================ */
+::selection { background: color-mix(in oklab, var(--primary) 24%, transparent); }
+.main, .sidebar-scroll { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }

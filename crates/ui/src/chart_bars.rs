@@ -5,6 +5,10 @@ pub fn ChartBars(
     data: Vec<f64>,
     #[prop(default = None)] highlight: Option<usize>,
     #[prop(default = vec![])] labels: Vec<String>,
+    /// Extra class on the `.chart-bars` element, e.g. `"expense"` to recolour
+    /// the bars amber. Defaults to none (the standard green series).
+    #[prop(into, optional)]
+    class: Option<String>,
 ) -> impl IntoView {
     let max = chart_max(&data);
     let bars = data
@@ -30,9 +34,13 @@ pub fn ChartBars(
             </div>
         }.into_any()
     };
+    let bars_class = match class {
+        Some(c) if !c.trim().is_empty() => format!("chart-bars {c}"),
+        _ => "chart-bars".to_string(),
+    };
     view! {
         <div>
-            <div class="chart-bars">{bars}</div>
+            <div class=bars_class>{bars}</div>
             {label_row}
         </div>
     }
