@@ -7,7 +7,8 @@ use ep_core::{fmt_ts_hm, server_err};
 use ep_finance::Currency;
 use ep_i18n::{server_fn_error_text, t, use_locale};
 use ep_ui::{
-    Card, Direction, EmptyState, Kpi, PageHead, SectionLabel, SkeletonCard, SkeletonKpi, Tag,
+    Card, Direction, EmptyState, Kpi, LoadError, PageHead, SectionLabel, SkeletonCard, SkeletonKpi,
+    Tag,
 };
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -74,17 +75,32 @@ pub async fn load_dashboard() -> Result<DashboardData, ServerFnError> {
               WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')",
         )
         .fetch_one(pool);
-        let weekly_workouts_q = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM fit_workout
-              WHERE occurred_at >= unixepoch('now','localtime','-6 days','start of day','utc')",
-        )
-        .fetch_one(pool);
-        let weekly_learning_q = sqlx::query_scalar::<_, i64>(
+        // Cross-module weekly KPIs use the *same* Monday-anchored local week
+        // as each module's own banner so the dashboard never disagrees with the
+        // module page (the rolling-7-day form drifted on Mon–Sat). The modifier
+        // order is documented in `ep_fitness`'s `WEEK_START_LOCAL_MODIFIERS`:
+        // '-6 days' steps back, 'weekday 1' lands on the week's Monday,
+        // 'start of day' anchors local midnight, 'utc' converts to epoch.
+        //
+        // Both reads are off the unified `activity` feed (module='FIT'/'LRN')
+        // rather than mixing a direct `fit_workout` count with an `activity`
+        // count — every workout/learning entry writes exactly one activity row,
+        // so the values match their module banners while sharing one source.
+        const WEEK_START: &str = "'-6 days','weekday 1','start of day','utc'";
+        // Bound to `let` so the formatted SQL outlives the `&str` borrow the
+        // query builder holds until `try_join!` polls each future.
+        let weekly_workouts_sql = format!(
+            "SELECT COUNT(*) FROM activity
+              WHERE module = 'FIT'
+                AND occurred_at >= unixepoch('now','localtime',{WEEK_START})"
+        );
+        let weekly_learning_sql = format!(
             "SELECT COUNT(*) FROM activity
               WHERE module = 'LRN'
-                AND occurred_at >= unixepoch('now','localtime','-6 days','start of day','utc')",
-        )
-        .fetch_one(pool);
+                AND occurred_at >= unixepoch('now','localtime',{WEEK_START})"
+        );
+        let weekly_workouts_q = sqlx::query_scalar::<_, i64>(&weekly_workouts_sql).fetch_one(pool);
+        let weekly_learning_q = sqlx::query_scalar::<_, i64>(&weekly_learning_sql).fetch_one(pool);
         let rows_q = sqlx::query_as::<_, ActivityQueryRow>(
             "SELECT occurred_at, module, summary, amount, currency_code
                FROM activity ORDER BY occurred_at DESC LIMIT 12",
@@ -175,7 +191,7 @@ pub fn DashboardView() -> impl IntoView {
                 <SkeletonCard rows=2/>
             }>
                 {move || r.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <LoadError detail=server_fn_error_text(&e)/> }.into_any(),
                     Ok(d) => render_body(d).into_any(),
                 })}
             </Suspense>
@@ -221,10 +237,10 @@ fn render_body(d: DashboardData) -> impl IntoView {
                  delta=t(locale, "app.dashboard.kpi.since_midnight") dir=Direction::Flat/>
             <Kpi code="FIT-K01" label=t(locale, "app.dashboard.kpi.weekly_workouts") value=format!("{}", d.weekly_workouts)
                  unit=t(locale, "app.dashboard.unit.times").to_string()
-                 delta=t(locale, "app.dashboard.kpi.last_7_days") dir=Direction::Flat/>
+                 delta=t(locale, "app.dashboard.kpi.this_week") dir=Direction::Flat/>
             <Kpi code="LRN-K01" label=t(locale, "app.dashboard.kpi.weekly_learning") value=format!("{}", d.weekly_learning)
                  unit=t(locale, "app.dashboard.unit.entries").to_string()
-                 delta=t(locale, "app.dashboard.kpi.last_7_days") dir=Direction::Flat/>
+                 delta=t(locale, "app.dashboard.kpi.this_week") dir=Direction::Flat/>
         </div>
 
         <SectionLabel index="§ 02".to_string()>{t(locale, "app.dashboard.activity.title")}</SectionLabel>

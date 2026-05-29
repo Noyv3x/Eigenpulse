@@ -118,13 +118,45 @@ fn no_redirect_client() -> reqwest::blocking::Client {
         .unwrap()
 }
 
+/// Extract the hidden CSRF token value from a login page body. The form embeds
+/// `<input type="hidden" name="csrf" value="…"/>`.
+fn extract_csrf_token(body: &str) -> String {
+    let marker = r#"name="csrf" value=""#;
+    let start = body
+        .find(marker)
+        .map(|i| i + marker.len())
+        .expect("login page should embed a csrf hidden field");
+    let rest = &body[start..];
+    let end = rest.find('"').expect("csrf value should be quoted");
+    rest[..end].to_string()
+}
+
+/// Perform the full login handshake against a CSRF-protected `/login`: GET to
+/// mint the `ep_csrf` cookie + token, then POST password + token. The client's
+/// cookie store carries the csrf cookie back automatically. Returns the response.
+fn login_with_csrf(
+    client: &reqwest::blocking::Client,
+    server: &Server,
+    password: &str,
+    next: Option<&str>,
+) -> reqwest::blocking::Response {
+    let page = client.get(server.url("/login")).send().unwrap();
+    let body = page.text().unwrap();
+    let csrf = extract_csrf_token(&body);
+    let mut form = vec![("password", password), ("csrf", csrf.as_str())];
+    if let Some(next) = next {
+        form.push(("next", next));
+    }
+    client
+        .post(server.url("/login"))
+        .form(&form)
+        .send()
+        .unwrap()
+}
+
 fn login_and_extract_session_cookie(server: &Server) -> String {
     let client = no_redirect_client();
-    let r = client
-        .post(server.url("/login"))
-        .form(&[("password", "test-pw")])
-        .send()
-        .unwrap();
+    let r = login_with_csrf(&client, server, "test-pw", None);
     assert_eq!(r.status(), 303);
 
     r.headers()
@@ -245,12 +277,8 @@ fn full_flow() {
     let loc = r.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(loc, "/login?error=1");
 
-    // POST /login correct password → 303 → /
-    let r = client
-        .post(server.url("/login"))
-        .form(&[("password", "test-pw")])
-        .send()
-        .unwrap();
+    // POST /login correct password (with the CSRF handshake) → 303 → /
+    let r = login_with_csrf(&client, &server, "test-pw", None);
     assert_eq!(r.status(), 303);
 
     // GET / authed (cookie kept by jar) → 200 with Dashboard markers

@@ -3,8 +3,8 @@ use ep_core::{fmt_minor, fmt_minor_compact, MinorAmount};
 use ep_finance::{CategorySummary, Currency, MonthBucket};
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    Card, ChartBars, Direction, EmptyState, Icon, Kpi, PageHead, Ring, SkeletonCard, SkeletonKpi,
-    Tag,
+    Card, ChartBars, Direction, EmptyState, Icon, Kpi, LoadError, PageHead, Ring, SkeletonCard,
+    SkeletonKpi, Tag,
 };
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
@@ -205,7 +205,7 @@ pub fn ReportsView() -> impl IntoView {
                 </div>
             }>
                 {move || data.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <LoadError detail=server_fn_error_text(&e)/> }.into_any(),
                     Ok(d) => render_reports(d).into_any(),
                 })}
             </Suspense>

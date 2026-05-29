@@ -1,13 +1,33 @@
 use axum::{extract::State, Extension, Json};
 use ep_auth::{require_scope, AuthPat};
-use ep_core::{fmt_ts_hm, AppState, TodayActivityOrder, TodayActivityRow, SCOPE_ACTIVITY_READ};
-use serde::Serialize;
+use ep_core::{
+    fmt_ts_hm, ApiQuery, AppState, TodayActivityOrder, TodayActivityRow, SCOPE_ACTIVITY_READ,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::errors::ApiError;
+
+/// Default page size when the caller omits `limit`, and the hard cap applied
+/// to any caller-supplied `limit`. Kept aligned with the finance list
+/// endpoints' implicit `LIMIT 50` so the open-API surface paginates uniformly.
+const DEFAULT_LIMIT: u32 = 50;
+const MAX_LIMIT: u32 = 200;
+
+#[derive(Debug, Deserialize)]
+pub struct TodayQuery {
+    /// Page size. Clamped to `1..=MAX_LIMIT`; defaults to `DEFAULT_LIMIT`.
+    pub limit: Option<u32>,
+    /// Rows to skip from the start of today's ordered activity. Defaults to 0.
+    pub offset: Option<u32>,
+}
 
 #[derive(Serialize)]
 pub struct TodayResp {
     pub date: String,
+    /// Echo of the effective (clamped) paging window so clients can drive a
+    /// "next page" without re-deriving the server's caps.
+    pub limit: u32,
+    pub offset: u32,
     pub items: Vec<TodayItemDto>,
 }
 #[derive(Serialize)]
@@ -25,22 +45,41 @@ pub struct TodayItemDto {
     pub link_doc: Option<String>,
 }
 
-/// Returns recent activity rows as today's API items.
+/// Returns recent activity rows as today's API items, paginated via the
+/// `limit`/`offset` query params (defaults: limit=50, offset=0; limit capped at
+/// 200).
 pub async fn handler(
     State(state): State<AppState>,
     Extension(pat): Extension<AuthPat>,
+    ApiQuery(q): ApiQuery<TodayQuery>,
 ) -> Result<Json<TodayResp>, ApiError> {
     if require_scope(&pat, SCOPE_ACTIVITY_READ).is_err() {
         return Err(ApiError::Forbidden(format!(
             "requires scope: {SCOPE_ACTIVITY_READ}"
         )));
     }
-    let today = ep_core::load_today_activity(&state.db, TodayActivityOrder::Desc, Some(50)).await?;
+    let (limit, offset) = clamp_paging(q.limit, q.offset);
+    let today = ep_core::load_today_activity_paged(
+        &state.db,
+        TodayActivityOrder::Desc,
+        Some(limit),
+        offset,
+    )
+    .await?;
     let items = today.rows.into_iter().map(activity_row_to_item).collect();
     Ok(Json(TodayResp {
         date: today.date,
+        limit,
+        offset,
         items,
     }))
+}
+
+/// Clamp caller paging into the supported window: limit ∈ `1..=MAX_LIMIT`
+/// (defaulting to `DEFAULT_LIMIT`), offset passed through verbatim.
+fn clamp_paging(limit: Option<u32>, offset: Option<u32>) -> (u32, u32) {
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    (limit, offset.unwrap_or(0))
 }
 
 fn activity_row_to_item(row: TodayActivityRow) -> TodayItemDto {
@@ -59,12 +98,22 @@ fn activity_row_to_item(row: TodayActivityRow) -> TodayItemDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_row_to_item, handler};
+    use super::{
+        activity_row_to_item, clamp_paging, handler, TodayQuery, DEFAULT_LIMIT, MAX_LIMIT,
+    };
     use crate::errors::ApiError;
     use crate::test_support::{app_state, noop_notify};
     use axum::{extract::State, Extension};
     use ep_auth::AuthPat;
-    use ep_core::TodayActivityRow;
+    use ep_core::{ApiQuery, TodayActivityRow};
+
+    #[test]
+    fn clamp_paging_applies_defaults_and_caps() {
+        assert_eq!(clamp_paging(None, None), (DEFAULT_LIMIT, 0));
+        assert_eq!(clamp_paging(Some(0), Some(10)), (1, 10));
+        assert_eq!(clamp_paging(Some(10_000), None), (MAX_LIMIT, 0));
+        assert_eq!(clamp_paging(Some(25), Some(5)), (25, 5));
+    }
 
     #[test]
     fn activity_row_mapping_preserves_structured_today_fields() {
@@ -123,11 +172,20 @@ mod tests {
             name: "reader".into(),
             scopes: vec![ep_core::SCOPE_ACTIVITY_READ.into()],
         };
-        let axum::Json(resp) = handler(State(app_state(db, noop_notify())), Extension(pat))
-            .await
-            .expect("today response");
+        let axum::Json(resp) = handler(
+            State(app_state(db, noop_notify())),
+            Extension(pat),
+            ApiQuery(TodayQuery {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await
+        .expect("today response");
 
         assert_eq!(resp.date.len(), 10);
+        assert_eq!(resp.limit, DEFAULT_LIMIT);
+        assert_eq!(resp.offset, 0);
         assert_eq!(resp.items.len(), 1);
         let item = &resp.items[0];
         assert_eq!(item.state, "done");
@@ -151,7 +209,16 @@ mod tests {
             scopes: vec![ep_core::SCOPE_NOTIFY_WRITE.into()],
         };
 
-        let err = match handler(State(app_state(db, noop_notify())), Extension(pat)).await {
+        let err = match handler(
+            State(app_state(db, noop_notify())),
+            Extension(pat),
+            ApiQuery(TodayQuery {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await
+        {
             Ok(_) => panic!("missing activity scope should fail"),
             Err(err) => err,
         };

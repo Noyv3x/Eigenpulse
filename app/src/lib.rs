@@ -1,9 +1,21 @@
 //! Eigenpulse — Leptos `App` shell shared by the SSR binary and hydrate bundle.
 
+pub mod admin;
 mod app;
+mod security;
 mod views;
 
-pub use app::{shell, App};
+pub use app::App;
+// `shell()` is SSR-only (renders the document; hydrate mounts `<App/>` instead).
+#[cfg(feature = "ssr")]
+pub use app::shell;
+
+// Re-export the security-headers middleware so it is part of the crate's public
+// surface. The binary (`main.rs`) layers it on the web router; the lib build
+// would otherwise flag the SSR-only CSP machinery as dead code since the shared
+// `app.rs` only consumes `security::theme_init_inline`.
+#[cfg(feature = "ssr")]
+pub use security::security_headers;
 
 #[cfg(feature = "hydrate")]
 #[cfg_attr(feature = "hydrate", wasm_bindgen::prelude::wasm_bindgen)]

@@ -20,10 +20,10 @@ ssr = [
     "dep:axum", "dep:axum-extra", "dep:tokio", "dep:tower", "dep:tower-http",
     "dep:leptos_axum", "dep:sqlx", "dep:cookie", "dep:tracing",
     "dep:tracing-subscriber", "dep:rust-embed", "dep:mime_guess",
-    "dep:rand", "dep:hex", "dep:tokio-stream",
+    "dep:rand", "dep:hex", "dep:tokio-stream", "dep:sha2",
     "dep:ep-db", "dep:ep-auth", "dep:ep-notify", "dep:ep-api",
-    "dep:anyhow", "dep:serde_json",
-    "leptos/ssr",
+    "dep:anyhow",
+    "leptos/ssr", "leptos/nonce",
     "ep-core/ssr", "ep-db/ssr", "ep-auth/ssr", "ep-ui/ssr", "ep-i18n/ssr",
     "ep-notify/ssr", "ep-api/ssr",
     "ep-finance/ssr", "ep-fitness/ssr", "ep-learning/ssr", "ep-marketplace/ssr",
@@ -49,6 +49,9 @@ leptos_meta   = { workspace = true }
 leptos_router = { workspace = true }
 
 serde         = { workspace = true }
+# Shared on both targets: `admin::DataExport` carries `serde_json::Value`, which
+# the hydrate client must deserialize from the export server fn.
+serde_json    = { workspace = true }
 
 # SSR-only
 ep-db            = { workspace = true, optional = true }
@@ -56,7 +59,6 @@ ep-auth          = { workspace = true, optional = true }
 ep-notify        = { workspace = true, optional = true }
 ep-api           = { workspace = true, optional = true }
 anyhow           = { workspace = true, optional = true }
-serde_json       = { workspace = true, optional = true }
 axum             = { workspace = true, optional = true }
 axum-extra       = { workspace = true, optional = true }
 tokio            = { workspace = true, optional = true }
@@ -72,6 +74,7 @@ mime_guess       = { workspace = true, optional = true }
 rand             = { workspace = true, optional = true }
 hex              = { workspace = true, optional = true }
 tokio-stream     = { workspace = true, optional = true }
+sha2             = { workspace = true, optional = true }
 
 # hydrate-only
 wasm-bindgen             = { workspace = true, optional = true }

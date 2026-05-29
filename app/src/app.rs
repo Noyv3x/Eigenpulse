@@ -1,4 +1,7 @@
-use ep_i18n::{t, use_locale, Locale};
+use ep_i18n::{t, use_locale};
+// `Locale` (the type) is only referenced by the SSR-only `shell()`.
+#[cfg(feature = "ssr")]
+use ep_i18n::Locale;
 use ep_ui::{provide_toast_stack, provide_unread_signal, ToastViewport};
 use ep_ui::{provide_tweak_state, Sidebar, Topbar, TweakState};
 use leptos::prelude::*;
@@ -69,7 +72,11 @@ pub fn App() -> impl IntoView {
         <Meta name="apple-mobile-web-app-capable" content="yes"/>
         <Meta name="apple-mobile-web-app-title" content="Eigenpulse"/>
         <Meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-        <Script src="/static/theme-init.js"/>
+        // The anti-FOUC theme-init IIFE is inlined into the SSR `<head>` by
+        // `shell()` (see `crate::security::theme_init_inline`), so it runs
+        // before first paint with no render-blocking network fetch. No
+        // `<Script src>` here — a duplicate would re-run the same idempotent
+        // IIFE and require a redundant request.
 
         <Router>
             <div class=move || {
@@ -100,6 +107,7 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("settings")     view=crate::views::settings::SettingsIndex/>
                         <Route path=path!("settings/notifications") view=crate::views::settings::notifications::NotificationChannelsView/>
                         <Route path=path!("settings/security")      view=crate::views::settings::security::PatView/>
+                        <Route path=path!("status")                 view=crate::views::status::StatusView/>
                     </Routes>
                 </main>
             </div>
@@ -167,15 +175,36 @@ fn NotFound() -> impl IntoView {
 /// the per-request `provide_state` callback in `main.rs`); falls back to
 /// the default locale when no context is present (e.g. during hydration's
 /// initial type-check pass).
+///
+/// SSR-only: only `main.rs` renders the document shell; the hydrate entry
+/// (`lib.rs::hydrate`) mounts `<App/>` into the existing DOM and never calls
+/// this. Gating it keeps the nonce/CSP machinery (and `leptos/nonce` →
+/// `getrandom`) out of the wasm bundle.
+#[cfg(feature = "ssr")]
 pub fn shell(options: leptos::config::LeptosOptions) -> impl IntoView {
     use leptos_meta::MetaTags;
     let lang = use_context::<Locale>().unwrap_or_default().as_html_lang();
+    // The per-request nonce `leptos_axum` provided (`provide_nonce()`), shared
+    // by both the CSP `<meta>` and every inline script below so they always
+    // match. See `crate::security` for why the CSP is a meta tag, not a header.
+    let nonce = leptos::nonce::use_nonce();
     view! {
         <!DOCTYPE html>
         <html lang=lang>
             <head>
                 <meta charset="utf-8"/>
+                // CSP first, so it governs every inline script that follows.
+                <meta
+                    http-equiv="Content-Security-Policy"
+                    content=crate::security::csp_content(nonce.clone())
+                />
                 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+                // Anti-FOUC: inline the theme-init IIFE so `data-theme` /
+                // `data-density` are set on `<html>` before first paint with no
+                // render-blocking network fetch. Carries the per-request nonce
+                // so it passes the CSP above (the `<HydrationScripts>` bootstrap
+                // carries the same nonce, generated once by leptos_axum).
+                <script nonce=nonce inner_html=crate::security::theme_init_inline()></script>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>
                 <MetaTags/>

@@ -1,7 +1,9 @@
 #![cfg(feature = "ssr")]
 
+mod admin;
 mod app;
 mod login;
+mod security;
 mod sse;
 mod views;
 
@@ -75,6 +77,12 @@ async fn main() -> anyhow::Result<()> {
         leptos_options: leptos_options.clone(),
     };
 
+    // Periodic expired-session sweep. `lookup_session` already reaps the row it
+    // touches, but sessions for users who never return would otherwise pile up.
+    // The task is detached and runs every hour; it shuts down with the runtime
+    // when the process exits (it holds a pool clone, no extra handshake needed).
+    spawn_session_gc(state.db.clone());
+
     // Leptos routes from <App/>.
     let leptos_routes = generate_route_list(crate::app::App);
 
@@ -105,7 +113,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/events/notifications", get(sse::notifications_stream))
         .route("/favicon.svg", get(static_handler))
         .route("/manifest.webmanifest", get(static_handler))
-        .route("/sw.js", get(static_handler))
+        // Dedicated handler so the SW cache key tracks CARGO_PKG_VERSION.
+        .route("/sw.js", get(service_worker_handler))
         .route("/theme-init.js", get(static_handler))
         .nest_service("/static", axum::routing::any(static_handler))
         .nest_service(
@@ -137,7 +146,13 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ep_auth::require_session,
-        ));
+        ))
+        // Security headers (CSP / nosniff / frame-deny / referrer / opt-in HSTS)
+        // are applied to the browser-facing web app only — not the JSON
+        // `/api/v1/*` group, whose responses are not rendered as HTML documents.
+        // Outermost layer so it stamps every web response, including redirects
+        // from the auth/login handlers. See `crate::security`.
+        .layer(axum::middleware::from_fn(security::security_headers));
 
     let router: Router = Router::<AppState>::new()
         .nest("/api/v1", open_api_routes)
@@ -151,9 +166,15 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(?addr, "eigenpulse listening");
-    axum::serve(listener, router.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` makes the peer `SocketAddr`
+    // available as `ConnectInfo<SocketAddr>` so the login handler can key its
+    // brute-force throttle on the client IP (falling back from X-Forwarded-For).
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -198,6 +219,26 @@ fn healthcheck_addr(raw: Option<&str>) -> String {
     } else {
         raw.to_string()
     }
+}
+
+/// Hourly expired-session GC. Detached background task; logs the row count when
+/// it removes anything. Errors are logged at `warn` and the loop continues.
+fn spawn_session_gc(db: sqlx::SqlitePool) {
+    const GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(GC_INTERVAL);
+        // Skip the immediate first tick `interval` fires at t=0 so startup isn't
+        // blocked by (or racing) the first sweep.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match ep_auth::delete_expired_sessions(&db).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(removed = n, "session GC swept expired sessions"),
+                Err(e) => tracing::warn!(error = %e, "session GC failed"),
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {
@@ -310,6 +351,49 @@ fn service_worker_allowed(path: &str) -> Option<&'static str> {
     matches!(path, "sw.js" | "static/sw.js").then_some("/")
 }
 
+/// Placeholder token in `assets/sw.js` that the handler swaps for the crate
+/// version so the SW cache key is always `ep-<CARGO_PKG_VERSION>`.
+const SW_VERSION_TOKEN: &str = "__EP_SW_VERSION__";
+
+/// Render `sw.js` with its cache-version token substituted for the compile-time
+/// `CARGO_PKG_VERSION`. Pure string op so it is unit-testable without HTTP.
+fn render_sw_js(template: &str) -> String {
+    template.replace(SW_VERSION_TOKEN, env!("CARGO_PKG_VERSION"))
+}
+
+/// Serve `/sw.js` with the cache version templated from `CARGO_PKG_VERSION`,
+/// keeping the existing `no-cache` + root-scope semantics. The network-first
+/// fetch logic in `sw.js` is untouched; only the `CACHE` constant is rewritten.
+async fn service_worker_handler() -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+
+    match Assets::get("sw.js") {
+        Some(file) => {
+            let raw = String::from_utf8_lossy(&file.data);
+            let body = render_sw_js(&raw);
+            let mut response = (
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "text/javascript; charset=utf-8".to_string(),
+                    ),
+                    (header::CACHE_CONTROL, static_cache_control("sw.js").into()),
+                ],
+                Body::from(body),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                HeaderName::from_static("service-worker-allowed"),
+                HeaderValue::from_static("/"),
+            );
+            response
+        }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
     use axum::body::Body;
     use axum::http::{header, HeaderName, HeaderValue, StatusCode};
@@ -346,10 +430,52 @@ async fn static_handler(uri: axum::http::Uri) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_secret, read_stored_secret, secret_file_path, service_worker_allowed,
-        static_cache_control, static_handler,
+        normalize_secret, read_stored_secret, render_sw_js, secret_file_path,
+        service_worker_allowed, service_worker_handler, static_cache_control, static_handler,
+        SW_VERSION_TOKEN,
     };
     use axum::http::{header, StatusCode, Uri};
+
+    #[test]
+    fn render_sw_js_substitutes_crate_version() {
+        let rendered = render_sw_js("const CACHE = 'ep-__EP_SW_VERSION__';");
+        assert!(!rendered.contains(SW_VERSION_TOKEN));
+        assert_eq!(
+            rendered,
+            format!("const CACHE = 'ep-{}';", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[tokio::test]
+    async fn service_worker_handler_templates_version_and_sets_scope() {
+        let response = service_worker_handler().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("service-worker-allowed")
+                .and_then(|v| v.to_str().ok()),
+            Some("/")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-cache")
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read sw body");
+        let body = std::str::from_utf8(&body).expect("sw body utf8");
+        assert!(
+            !body.contains(SW_VERSION_TOKEN),
+            "version token not substituted"
+        );
+        assert!(body.contains(&format!("ep-{}", env!("CARGO_PKG_VERSION"))));
+        // Network-first logic must survive the substitution.
+        assert!(body.contains("fetch(req).then((res)"));
+    }
 
     #[test]
     fn secret_file_path_defaults_to_local_data_dir() {

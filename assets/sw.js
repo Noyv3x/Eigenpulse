@@ -1,7 +1,13 @@
 // Eigenpulse service worker: cache immutable-ish static assets only.
 // Authenticated HTML must always go to the network so logout/session changes
 // cannot show a stale SSR snapshot.
-const CACHE = 'ep-v0.1.5';
+//
+// The cache version is templated at request time from CARGO_PKG_VERSION by the
+// `/sw.js` handler (it replaces the __EP_SW_VERSION__ token below), so the SW
+// cache key always tracks the running binary's crate version. If this file is
+// ever served raw (e.g. via the generic static handler), the literal token is a
+// valid—if version-less—cache name, so caching still works.
+const CACHE = 'ep-__EP_SW_VERSION__';
 const PRECACHE_ASSETS = [
   '/static/favicon.svg',
   '/static/manifest.webmanifest',
