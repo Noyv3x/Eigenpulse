@@ -1,7 +1,7 @@
 pub mod notifications;
 pub mod security;
 
-use crate::admin::{admin_status, AdminStatus, ExportAllFn};
+use crate::admin::{admin_status, import_all, AdminStatus, DataExport, ExportAllFn};
 use ep_core::IconKind;
 use ep_i18n::{server_fn_error_text, t, use_locale};
 use ep_ui::{use_tweaks, Density, TweakState};
@@ -227,13 +227,10 @@ pub fn SettingsIndex() -> impl IntoView {
                             </span>
                         </ActionForm>
                     </div>
-                    // Import is a documented server-side stub (no DB writes); the
-                    // control is intentionally disabled until a safe transactional
-                    // importer lands. Surfaced so the absence is explicit, not a
-                    // missing feature.
-                    <p class="muted" style="margin-top:10px;font-size:12px">
-                        {t(locale, "app.settings.index.data_card.import_disabled")}
-                    </p>
+                    // Destructive import: paste an exported JSON, confirm, and
+                    // replace ALL data. Self-contained component so its parse
+                    // state / confirm dialog never re-renders the export anchor.
+                    <ImportDataControl/>
                 </Card>
                 <Card title=t(locale, "app.settings.index.notify_card.title") code="CFG-NOT" sub="SMTP / Bark / Telegram / Discord">
                     <p class="muted">{t(locale, "app.settings.index.notify_card.hint_a")} " " <A href="/settings/notifications">{t(locale, "app.settings.index.notify_card.link")}</A> " " {t(locale, "app.settings.index.notify_card.hint_b")}</p>
@@ -259,6 +256,140 @@ pub fn SettingsIndex() -> impl IntoView {
             </div>
         </div>
     }
+}
+
+/// Destructive whole-database restore control: paste an exported JSON, confirm,
+/// and replace ALL data via [`import_all`].
+///
+/// A paste-into-textarea flow (rather than a native `<input type=file>`) was
+/// chosen on purpose: `import_all` takes a structured `DataExport`, not form
+/// fields, so the existing `<ActionForm>`/`RowDeleteAction` plumbing doesn't
+/// apply. We parse the textarea on the wasm side (`serde_json::from_str` is
+/// wasm-safe) and `dispatch` a manual `Action`. An in-app confirm modal (same
+/// chrome as `RowDeleteAction`) gates the run, since it cannot be undone.
+#[component]
+fn ImportDataControl() -> impl IntoView {
+    let locale = use_locale();
+    let raw = RwSignal::new(String::new());
+    let open = RwSignal::new(false);
+    // Local (non-server) error, e.g. the pasted text isn't valid export JSON.
+    let parse_error = RwSignal::new(Option::<String>::None);
+    // Manual action: parse already happened, this just runs the restore.
+    let action = Action::new(|payload: &DataExport| {
+        let payload = payload.clone();
+        async move { import_all(payload).await }
+    });
+
+    // Close the confirm dialog once the import has actually completed.
+    let last_version = RwSignal::new(0usize);
+    Effect::new(move |_| {
+        let v = action.version().get();
+        if v != 0 && v != last_version.get_untracked() {
+            open.set(false);
+            last_version.set(v);
+        }
+    });
+
+    let confirm_msg = t(locale, "app.settings.index.data_card.import_confirm");
+    view! {
+        <div class="vstack" style="gap:8px;margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
+            <span class="mono dim" style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em">
+                {t(locale, "app.settings.index.data_card.import")}
+            </span>
+            <p class="muted" style="margin:0;font-size:12px">
+                {t(locale, "app.settings.index.data_card.import_warn")}
+            </p>
+            <textarea
+                class="input"
+                rows="4"
+                style="font-family:var(--mono);font-size:12px;resize:vertical"
+                placeholder=t(locale, "app.settings.index.data_card.import_placeholder")
+                prop:value=move || raw.get()
+                on:input=move |ev| raw.set(event_target_value(&ev))
+            ></textarea>
+            <div class="hstack" style="gap:10px;align-items:center;flex-wrap:wrap">
+                <button
+                    class="btn danger"
+                    type="button"
+                    disabled=move || raw.with(|s| s.trim().is_empty())
+                    on:click=move |_| { parse_error.set(None); open.set(true); }
+                >
+                    <Icon kind=IconKind::Upload size=14/>{t(locale, "app.settings.index.data_card.import")}
+                </button>
+                // Stable wrapper element so the tachys text-node walker keeps its
+                // anchor (AGENTS.md footgun) — holds the success / error tag.
+                <span class="new-token-slot">
+                    {move || {
+                        if let Some(msg) = parse_error.get() {
+                            return view! { <span class="tag rose">{msg}</span> }.into_any();
+                        }
+                        match action.value().get() {
+                            Some(Ok(summary)) => view! {
+                                <span class="tag green">
+                                    {t_done(locale, summary.total_rows)}
+                                </span>
+                            }.into_any(),
+                            Some(Err(e)) => view! {
+                                <span class="tag rose">{server_fn_error_text(&e)}</span>
+                            }.into_any(),
+                            None => ().into_any(),
+                        }
+                    }}
+                </span>
+            </div>
+            {move || {
+                if !open.get() {
+                    return ().into_any();
+                }
+                view! {
+                    <div class="fin-modal-backdrop confirm-backdrop"
+                         on:click=move |_| open.set(false)>
+                        <div class="fin-modal confirm-modal" role="alertdialog" aria-modal="true"
+                             on:click=move |e| e.stop_propagation()>
+                            <div class="confirm-body">
+                                <div class="confirm-icon danger">
+                                    <Icon kind=IconKind::Close size=18/>
+                                </div>
+                                <div class="confirm-text">
+                                    <div class="confirm-title">{confirm_msg}</div>
+                                </div>
+                            </div>
+                            <div class="confirm-foot">
+                                <button class="btn ghost" type="button"
+                                        on:click=move |_| open.set(false)>
+                                    {t(locale, "app.settings.index.data_card.import_cancel")}
+                                </button>
+                                <button class="btn primary danger-action" type="button"
+                                        on:click=move |_| {
+                                            match serde_json::from_str::<DataExport>(&raw.get()) {
+                                                Ok(export) => {
+                                                    parse_error.set(None);
+                                                    action.dispatch(export);
+                                                }
+                                                Err(_) => {
+                                                    open.set(false);
+                                                    parse_error.set(Some(
+                                                        t(locale, "app.settings.index.data_card.import_invalid_json").to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        }>
+                                    {t(locale, "app.settings.index.data_card.import_run")}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                }.into_any()
+            }}
+        </div>
+    }
+}
+
+/// Render the "imported N rows" success message with the row count substituted
+/// for the `{payload}` placeholder. Kept out of the view body so the template
+/// lookup + replace is a single readable call.
+fn t_done(locale: ep_i18n::Locale, rows: i64) -> String {
+    t(locale, "app.settings.index.data_card.import_done").replace("{payload}", &rows.to_string())
 }
 
 #[cfg(all(test, feature = "ssr"))]
