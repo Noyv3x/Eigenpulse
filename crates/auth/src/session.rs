@@ -98,6 +98,20 @@ where
     Ok(result.rows_affected())
 }
 
+/// Delete every session whose `expires_at` is at or before the current time.
+/// `lookup_session` already lazily reaps the row it touches, but sessions for
+/// users who never return would otherwise accumulate forever. The app layer
+/// spawns a periodic sweep that calls this; the GC interval lives there, not
+/// here. Returns the number of rows removed.
+pub async fn delete_expired_sessions(pool: &SqlitePool) -> anyhow::Result<u64> {
+    let now = ep_core::unix_now();
+    let result = sqlx::query("DELETE FROM session WHERE expires_at <= ?1")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn lookup_session(
     pool: &SqlitePool,
     token: &str,
@@ -233,6 +247,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_expired_sessions_removes_only_past_due_rows() {
+        let pool = fixture_pool().await;
+        let now = ep_core::unix_now();
+        // Two expired (at and before now), one well in the future.
+        sqlx::query("INSERT INTO session VALUES ('past', 1, 0, ?1, 0)")
+            .bind(now - 10)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO session VALUES ('boundary', 1, 0, ?1, 0)")
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO session VALUES ('future', 1, 0, ?1, 0)")
+            .bind(now + SESSION_LIFETIME_SECS)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let deleted = delete_expired_sessions(&pool).await.unwrap();
+        assert_eq!(deleted, 2);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let survivor: String = sqlx::query_scalar("SELECT token FROM session")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(survivor, "future");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_expired_sessions_on_empty_table_is_zero() {
+        let pool = fixture_pool().await;
+        assert_eq!(delete_expired_sessions(&pool).await.unwrap(), 0);
     }
 
     #[test]

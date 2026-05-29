@@ -3,6 +3,8 @@ mod argon;
 #[cfg(feature = "ssr")]
 mod bootstrap;
 #[cfg(feature = "ssr")]
+mod login_guard;
+#[cfg(feature = "ssr")]
 mod middleware;
 #[cfg(feature = "ssr")]
 mod pat;
@@ -14,6 +16,8 @@ pub use argon::{hash_password, hash_password_async, verify_password, verify_pass
 #[cfg(feature = "ssr")]
 pub use bootstrap::bootstrap_admin;
 #[cfg(feature = "ssr")]
+pub use login_guard::{issue_csrf_token, verify_csrf, LoginThrottle, RetryAfter};
+#[cfg(feature = "ssr")]
 pub use middleware::{require_session, require_user_for_server_fn};
 #[cfg(feature = "ssr")]
 pub use pat::{
@@ -21,9 +25,9 @@ pub use pat::{
 };
 #[cfg(feature = "ssr")]
 pub use session::{
-    cookie_secure, expired_session_cookie, login_create_session, logout_destroy_session,
-    lookup_session, purge_all_sessions, session_cookie, should_refresh_session, AuthUser, Session,
-    COOKIE_NAME,
+    cookie_secure, delete_expired_sessions, expired_session_cookie, login_create_session,
+    logout_destroy_session, lookup_session, purge_all_sessions, session_cookie,
+    should_refresh_session, AuthUser, Session, COOKIE_NAME,
 };
 
 #[cfg(feature = "ssr")]

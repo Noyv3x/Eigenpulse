@@ -36,6 +36,12 @@ type PatAuthRow = (i64, String, String, Option<i64>, Option<i64>);
 
 pub const MAX_PAT_NAME_CHARS: usize = 64;
 
+/// Minimum interval between `pat.last_used_at` writes. Read-only API calls hit
+/// `require_pat` on every request; without this throttle each one would issue a
+/// `UPDATE`, making GETs write-bound. 3600s matches the `session.last_seen`
+/// sliding-renewal window in `session.rs`.
+const LAST_USED_THROTTLE_SECS: i64 = 3600;
+
 fn hash_token(token: &str) -> String {
     let mut h = Sha256::new();
     h.update(token.as_bytes());
@@ -50,7 +56,7 @@ fn random_token() -> String {
     s
 }
 
-fn base62_encode(bytes: &[u8]) -> String {
+pub(crate) fn base62_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     let mut out = String::new();
     for chunk in bytes.chunks(2) {
@@ -193,11 +199,20 @@ pub async fn require_pat(State(state): State<AppState>, req: Request, next: Next
         return unauthorized();
     }
     let scopes_v: Vec<String> = scopes.split_whitespace().map(|s| s.to_string()).collect();
-    if let Err(e) = sqlx::query("UPDATE pat SET last_used_at = ?1 WHERE id = ?2")
-        .bind(now)
-        .bind(id)
-        .execute(&state.db)
-        .await
+    // Throttle the `last_used_at` write so read-only API traffic isn't
+    // write-bound: only touch the row when it has never been used or the
+    // recorded timestamp is older than `LAST_USED_THROTTLE_SECS`. Mirrors the
+    // `session.last_seen` sliding-renewal throttle in `session.rs`. The
+    // `WHERE` clause makes the skip atomic without a prior read.
+    if let Err(e) = sqlx::query(
+        "UPDATE pat SET last_used_at = ?1
+         WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)",
+    )
+    .bind(now)
+    .bind(id)
+    .bind(now - LAST_USED_THROTTLE_SECS)
+    .execute(&state.db)
+    .await
     {
         tracing::warn!(pat_id = id, error = %e, "failed to update PAT last_used_at");
     }
@@ -366,6 +381,45 @@ mod tests {
                 ep_core::SCOPE_FIN_READ,
                 ep_core::SCOPE_NOTIFY_WRITE
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn last_used_at_write_is_throttled_by_window() {
+        let pool = pat_test_pool().await;
+        let (_token, row) = generate_pat(&pool, "throttle", &[ep_core::SCOPE_FIN_READ], None)
+            .await
+            .expect("pat");
+
+        // Same UPDATE shape `require_pat` issues. Helper returns whether the
+        // row was actually touched (`rows_affected() > 0`).
+        async fn touch(pool: &SqlitePool, id: i64, now: i64) -> u64 {
+            sqlx::query(
+                "UPDATE pat SET last_used_at = ?1
+                 WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)",
+            )
+            .bind(now)
+            .bind(id)
+            .bind(now - super::LAST_USED_THROTTLE_SECS)
+            .execute(pool)
+            .await
+            .expect("update")
+            .rows_affected()
+        }
+
+        let t0 = 1_700_000_000;
+        // First call: last_used_at is NULL → writes.
+        assert_eq!(touch(&pool, row.id, t0).await, 1);
+        // Within the window → skipped.
+        assert_eq!(touch(&pool, row.id, t0 + 10).await, 0);
+        assert_eq!(
+            touch(&pool, row.id, t0 + super::LAST_USED_THROTTLE_SECS).await,
+            0
+        );
+        // Past the window → writes again.
+        assert_eq!(
+            touch(&pool, row.id, t0 + super::LAST_USED_THROTTLE_SECS + 1).await,
+            1
         );
     }
 

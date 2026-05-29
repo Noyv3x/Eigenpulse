@@ -26,3 +26,12 @@ sqlx       = { workspace = true, optional = true }
 reqwest    = { workspace = true, optional = true }
 lettre     = { workspace = true, optional = true }
 tracing    = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The provider `send()` tests bind a throwaway loopback HTTP listener on
+# 127.0.0.1:0 and point a notifier at it (no real network). That needs the
+# tokio `net` + `io-util` features, which the SSR build does not otherwise
+# enable; dev-deps unify additively so the in-crate `#[cfg(test)]` modules
+# get them. These tests only compile/run under `--features ssr` (the whole
+# crate body is `#[cfg(feature = "ssr")]`).
+tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
