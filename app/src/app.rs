@@ -3,11 +3,17 @@ use ep_i18n::{t, use_locale};
 #[cfg(feature = "ssr")]
 use ep_i18n::Locale;
 use ep_ui::{provide_toast_stack, provide_unread_signal, ToastViewport};
-use ep_ui::{provide_tweak_state, Sidebar, Topbar, TweakState};
+use ep_ui::{provide_tweak_state, Sidebar, Theme, Topbar, TweakState};
 use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::components::{Route, Router, Routes, A};
 use leptos_router::path;
+
+/// Browser-chrome / status-bar colour for each theme. These mirror the `--bg`
+/// design token per theme in `assets/styles.css` (light `oklch(0.985 0.004 85)`,
+/// dark `oklch(0.18 0.012 250)`) as the sRGB hex the `theme-color` meta needs.
+const THEME_COLOR_LIGHT: &str = "#fbf9f5";
+const THEME_COLOR_DARK: &str = "#0e1217";
 
 #[cfg(feature = "hydrate")]
 type NotificationEventHandler = wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MessageEvent)>;
@@ -68,7 +74,25 @@ pub fn App() -> impl IntoView {
         <Title text="Eigenpulse · Personal Life ERP"/>
         <Link rel="icon" type_="image/svg+xml" href="/static/favicon.svg"/>
         <Link rel="manifest" href="/static/manifest.webmanifest"/>
-        <Meta name="theme-color" content="#fbf9f5"/>
+        // Reactive status-bar / browser-chrome colour. leptos_meta's `<Meta>`
+        // exposes no `media` prop (0.7.8) and a raw `<meta media=…>` placed in
+        // `<App/>` would land in `<body>`, not `<head>` — only the leptos_meta
+        // components hoist via `<MetaTags/>`. So instead of two static
+        // media-scoped tags we drive a single hoisted `<Meta>` off the live
+        // theme signal: dark-theme users no longer get a light status-bar
+        // flash once the theme-init script + hydrate settle the theme. The
+        // hex values mirror the `--bg` token for each theme in `styles.css`.
+        <Meta
+            name="theme-color"
+            content=move || if _tweaks.get().theme == Theme::Dark {
+                THEME_COLOR_DARK
+            } else {
+                THEME_COLOR_LIGHT
+            }
+        />
+        <Meta name="mobile-web-app-capable" content="yes"/>
+        // Kept alongside the standard `mobile-web-app-capable` above for older
+        // iOS Safari, which still only honours the `apple-` prefixed form.
         <Meta name="apple-mobile-web-app-capable" content="yes"/>
         <Meta name="apple-mobile-web-app-title" content="Eigenpulse"/>
         <Meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>

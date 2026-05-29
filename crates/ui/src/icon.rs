@@ -11,6 +11,10 @@ pub fn Icon(
     let sw = stroke;
     let path = path_for(kind);
     view! {
+        // Icons are decorative: every call site that conveys meaning carries
+        // its own accessible name (button/link text or `aria-label`). Hide the
+        // SVG from the a11y tree so screen readers don't announce a nameless
+        // graphic, and keep it out of the tab order on IE/legacy engines.
         <svg
             width=s
             height=s
@@ -21,6 +25,8 @@ pub fn Icon(
             stroke-linecap="round"
             stroke-linejoin="round"
             class="ep-icon"
+            aria-hidden="true"
+            focusable="false"
             inner_html=path
         ></svg>
     }

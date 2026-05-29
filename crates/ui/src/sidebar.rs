@@ -137,7 +137,12 @@ pub fn Sidebar(
                     <small>{move || user_meta.get()}</small>
                 </div>
                 <form method="post" action="/logout">
-                    <button class="foot-btn" type="submit" title=t!(locale, ui.sidebar.logout_title)>
+                    <button
+                        class="foot-btn"
+                        type="submit"
+                        title=t!(locale, ui.sidebar.logout_title)
+                        aria-label=t!(locale, ui.sidebar.logout_title)
+                    >
                         <Icon kind=IconKind::Logout size=14/>
                     </button>
                 </form>

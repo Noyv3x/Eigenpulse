@@ -4,6 +4,7 @@
   "description": "模块化的个人生活 ERP — 财务 / 健身 / 学习 / 通知 / 开放 API",
   "lang": "zh-CN",
   "dir": "ltr",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

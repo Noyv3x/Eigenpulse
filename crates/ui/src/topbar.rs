@@ -23,7 +23,10 @@ pub fn Topbar(sidebar_collapsed: RwSignal<bool>, mobile_nav_open: RwSignal<bool>
         <div class="topbar">
             <button
                 class="icon-btn"
+                type="button"
                 title=t!(locale, ui.topbar.collapse_title)
+                aria-label=t!(locale, ui.topbar.collapse_title)
+                aria-expanded=move || (!sidebar_collapsed.get()).to_string()
                 on:click=move |_| {
                     sidebar_collapsed.update(|v| *v = !*v);
                     mobile_nav_open.update(|v| *v = !*v);
@@ -46,7 +49,9 @@ pub fn Topbar(sidebar_collapsed: RwSignal<bool>, mobile_nav_open: RwSignal<bool>
             <div class="topbar-spacer"></div>
             <button
                 class="icon-btn lang-toggle mono"
+                type="button"
                 title=t!(locale, ui.topbar.lang_toggle.title)
+                aria-label=t!(locale, ui.topbar.lang_toggle.title)
                 on:click=move |_| {
                     // Reload-mode toggle. Browser-only path; SSR ignores
                     // `on:click` entirely so no cfg branch needed.
@@ -58,11 +63,19 @@ pub fn Topbar(sidebar_collapsed: RwSignal<bool>, mobile_nav_open: RwSignal<bool>
             </button>
             <button
                 class="icon-btn"
+                type="button"
                 title=move || if tweaks.get().theme == Theme::Dark {
                     t!(locale, ui.topbar.light_title)
                 } else {
                     t!(locale, ui.topbar.dark_title)
                 }
+                aria-label=move || if tweaks.get().theme == Theme::Dark {
+                    t!(locale, ui.topbar.light_title)
+                } else {
+                    t!(locale, ui.topbar.dark_title)
+                }
+                // Announces whether dark mode is the active state.
+                aria-pressed=move || (tweaks.get().theme == Theme::Dark).to_string()
                 on:click=move |_| tweaks.update(|v: &mut TweakState| {
                     v.theme = if v.theme == Theme::Dark { Theme::Light } else { Theme::Dark };
                 })
@@ -73,7 +86,12 @@ pub fn Topbar(sidebar_collapsed: RwSignal<bool>, mobile_nav_open: RwSignal<bool>
                     view! { <Icon kind=IconKind::Moon size=16/> }
                 }}
             </button>
-            <a class="icon-btn" href="/notifications" title=t!(locale, ui.topbar.notif_title)>
+            <a
+                class="icon-btn"
+                href="/notifications"
+                title=t!(locale, ui.topbar.notif_title)
+                aria-label=t!(locale, ui.topbar.notif_title)
+            >
                 <Icon kind=IconKind::Bell size=16/>
                 {move || (unread.get() > 0).then(|| view! { <span class="dot"></span> })}
             </a>

@@ -85,13 +85,14 @@ where
                     <div class="fin-modal-backdrop confirm-backdrop"
                          on:click=move |_| open.set(false)>
                         <div class="fin-modal confirm-modal" role="alertdialog" aria-modal="true"
+                             aria-labelledby="row-action-confirm-title"
                              on:click=move |e| e.stop_propagation()>
                             <div class="confirm-body">
                                 <div class="confirm-icon danger">
                                     <crate::Icon kind=ep_core::IconKind::Close size=18/>
                                 </div>
                                 <div class="confirm-text">
-                                    <div class="confirm-title">{confirm_text}</div>
+                                    <div class="confirm-title" id="row-action-confirm-title">{confirm_text}</div>
                                 </div>
                             </div>
                             <ActionForm action=action attr:class="confirm-foot">
