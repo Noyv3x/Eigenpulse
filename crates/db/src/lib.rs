@@ -1,4 +1,7 @@
 #[cfg(feature = "ssr")]
+pub mod backup;
+
+#[cfg(feature = "ssr")]
 mod pool;
 
 #[cfg(feature = "ssr")]

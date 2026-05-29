@@ -36,6 +36,20 @@ pub async fn load_today_activity(
     order: TodayActivityOrder,
     limit: Option<u32>,
 ) -> sqlx::Result<TodayActivity> {
+    load_today_activity_paged(pool, order, limit, 0).await
+}
+
+/// Like [`load_today_activity`] but with an additional `offset` for keyset-free
+/// limit/offset pagination (used by the `/api/v1/today` open-API endpoint).
+/// A `None` limit returns every row from `offset` onward; `offset` is clamped
+/// to be non-negative. `limit` is clamped to at least 1 when present, matching
+/// the existing zero-limit behaviour.
+pub async fn load_today_activity_paged(
+    pool: &SqlitePool,
+    order: TodayActivityOrder,
+    limit: Option<u32>,
+    offset: u32,
+) -> sqlx::Result<TodayActivity> {
     let date: String = sqlx::query_scalar("SELECT date('now','localtime')")
         .fetch_one(pool)
         .await?;
@@ -44,7 +58,11 @@ pub async fn load_today_activity(
     // left-to-right: shift to localtime, round to local midnight, then convert
     // back to UTC epoch seconds for comparison against stored unix timestamps.
     // `direction` is an enum-derived literal (never user input) and the
-    // optional `LIMIT` is bound, so this format! is injection-safe.
+    // `LIMIT`/`OFFSET` values are bound, so this format! is injection-safe.
+    //
+    // SQLite requires a LIMIT before OFFSET; when the caller wants an offset
+    // but no row cap we use the sentinel `LIMIT -1` (== unbounded) so paging
+    // past a cursor without a cap still works.
     let direction = match order {
         TodayActivityOrder::Asc => "ASC",
         TodayActivityOrder::Desc => "DESC",
@@ -55,13 +73,22 @@ pub async fn load_today_activity(
           WHERE occurred_at >= unixepoch('now','localtime','start of day','utc')
           ORDER BY occurred_at {direction}"
     );
-    if limit.is_some() {
+    let want_offset = offset > 0;
+    if limit.is_some() || want_offset {
         sql.push_str(" LIMIT ?1");
+    }
+    if want_offset {
+        sql.push_str(" OFFSET ?2");
     }
 
     let mut query = sqlx::query_as::<_, TodayActivityRow>(&sql);
-    if let Some(limit) = limit {
-        query = query.bind(i64::from(limit.max(1)));
+    if limit.is_some() || want_offset {
+        // `-1` is SQLite's documented "no limit" sentinel for the OFFSET case.
+        let bound_limit = limit.map(|l| i64::from(l.max(1))).unwrap_or(-1);
+        query = query.bind(bound_limit);
+    }
+    if want_offset {
+        query = query.bind(i64::from(offset));
     }
     let rows = query.fetch_all(pool).await?;
 
@@ -116,6 +143,47 @@ mod tests {
             .expect("desc");
         assert_eq!(desc.rows.len(), 1);
         assert_eq!(desc.rows[0].doc_id, "FIT-1");
+    }
+
+    #[tokio::test]
+    async fn load_today_activity_paged_applies_limit_and_offset() {
+        let pool = pool_with_activity().await;
+        // Three rows, oldest → newest by occurred_at.
+        sqlx::query(
+            "INSERT INTO activity (occurred_at, module, doc_id, summary, amount, status, link_doc)
+             VALUES
+                (unixepoch('now') - 30, 'FIN', 'A', 's', '-1', NULL, NULL),
+                (unixepoch('now') - 20, 'FIN', 'B', 's', '-1', NULL, NULL),
+                (unixepoch('now') - 10, 'FIN', 'C', 's', '-1', NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("activity");
+
+        // DESC = C, B, A. Page 2 with limit=1, offset=1 → B.
+        let page = load_today_activity_paged(&pool, TodayActivityOrder::Desc, Some(1), 1)
+            .await
+            .expect("page");
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].doc_id, "B");
+
+        // Offset past the end yields no rows.
+        let empty = load_today_activity_paged(&pool, TodayActivityOrder::Desc, Some(10), 5)
+            .await
+            .expect("empty page");
+        assert!(empty.rows.is_empty());
+
+        // Offset with no limit (sentinel LIMIT -1) skips and returns the rest.
+        let rest = load_today_activity_paged(&pool, TodayActivityOrder::Desc, None, 1)
+            .await
+            .expect("rest");
+        assert_eq!(
+            rest.rows
+                .iter()
+                .map(|r| r.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
     }
 
     #[tokio::test]

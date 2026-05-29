@@ -122,7 +122,10 @@ pub fn app_state_context() -> Result<AppState, leptos::server_fn::ServerFnError>
 }
 
 #[cfg(feature = "ssr")]
-pub use activity::{load_today_activity, TodayActivity, TodayActivityOrder, TodayActivityRow};
+pub use activity::{
+    load_today_activity, load_today_activity_paged, TodayActivity, TodayActivityOrder,
+    TodayActivityRow,
+};
 #[cfg(feature = "ssr")]
 pub use api_error::{api_error_response, ApiErrorBody, ApiErrorInner, ApiJson, ApiQuery};
 #[cfg(feature = "ssr")]

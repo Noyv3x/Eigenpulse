@@ -1,0 +1,14 @@
+{
+  "migrations/0001_init.sql": "8451f02a8ac0b8abc16c61cb14ebb105650b06536f3a8046e7e9a4b275c26832",
+  "migrations/0002_activity_currency.sql": "66317b0cda5d38cd3452d64299dafd229a356534773242299216db271964ddf9",
+  "migrations/0003_activity_amount_integer.sql": "aea3c16c8ee8233a0814bc24c02e8e28113d569baee6a31b00a415884f312e88",
+  "migrations/0004_activity_amount_text.sql": "c4a72939ca7f0115bfd468910f61baf74f1e68b593d97c34aee2633c6348acfd",
+  "modules/finance/migrations/001_finance.sql": "a3c821d9a2cb6b66dc08985987764af3d73e776c3e0613d70d97249f6759bdec",
+  "modules/finance/migrations/002_multi_currency.sql": "1dda039d29e8173c7cca5d47eedc653b789696cadb26bca48030e6c48729a52f",
+  "modules/finance/migrations/003_money_text.sql": "ce2a510027c2c02e99cef381efe98ffba6aab12ea1ff528eb834ec1c419b0f11",
+  "modules/finance/migrations/004_currency_remark.sql": "8b8ac755395ba2a655f2e533c5c52b3d819defe8415fcbd8f85c34ff3aaa6615",
+  "modules/finance/migrations/005_category_icon.sql": "88d6662c6c656098ab2fced2fee00dd89a557e6d76f0ad940ed3ce9003ee1ee6",
+  "modules/fitness/migrations/001_fitness.sql": "3a07affac426d137bf66a70f795bae063ef58f7c03d0ff887fc2ae459fd4e787",
+  "modules/fitness/migrations/002_fit_set_reserved.sql": "a184473d36db1bb57b31a8094fe7e8ef465b36d8cc4b4e8dc46e87f841308b42",
+  "modules/learning/migrations/001_learning.sql": "67a996994c96d751001b5d846f27914af3828cd167a92a38c0a4f30429f4413e"
+}

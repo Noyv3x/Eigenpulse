@@ -25,6 +25,60 @@ pub async fn open_pool(url: &str) -> anyhow::Result<SqlitePool> {
         .connect_with(opts)
         .await?;
 
+    // Fail fast on a corrupt database before we touch it with migrations.
+    // `quick_check` is the cheaper sibling of `integrity_check`; anything other
+    // than the single "ok" row means structural damage.
+    let quick_check: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&pool)
+        .await?;
+    if !quick_check.eq_ignore_ascii_case("ok") {
+        tracing::error!(
+            result = %quick_check,
+            "sqlite quick_check failed — refusing to run migrations on a corrupt database"
+        );
+        anyhow::bail!("sqlite integrity check failed: {quick_check}");
+    }
+
+    // Pre-migration snapshot: if there is an existing, non-empty on-disk
+    // database, copy it next to the original before applying core migrations.
+    // The suffix is the current schema_version (PRAGMA), so the name is
+    // deterministic (no clock access — unavailable on this runtime) and a
+    // re-run at the same version simply refreshes the snapshot. Failure here
+    // is non-fatal (e.g. a read-only FS) but is surfaced as a warning.
+    if let Some(path) = sqlite_file_path(url) {
+        let non_empty = tokio::fs::metadata(&path)
+            .await
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if non_empty {
+            let schema_version: i64 = sqlx::query_scalar("PRAGMA schema_version")
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+            let mut file_name = path
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_else(|| std::ffi::OsStr::new("eigenpulse.db").to_os_string());
+            file_name.push(format!(".pre-migration-{schema_version}.bak"));
+            let snapshot_path = path.with_file_name(file_name);
+            // `VACUUM INTO` refuses to overwrite, so clear any stale snapshot
+            // for this schema version first.
+            let _ = tokio::fs::remove_file(&snapshot_path).await;
+            match crate::backup::snapshot(&pool, &snapshot_path).await {
+                Ok(()) => tracing::info!(
+                    snapshot = %snapshot_path.display(),
+                    schema_version,
+                    "pre-migration snapshot written"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    snapshot = %snapshot_path.display(),
+                    "pre-migration snapshot failed — continuing without backup"
+                ),
+            }
+        }
+    }
+
     // Run core migrations (the global ones in /migrations).
     crate::CORE_MIGRATOR.run(&pool).await?;
     tracing::info!("db pool ready, core migrations applied");
