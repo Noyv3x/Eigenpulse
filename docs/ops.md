@@ -281,3 +281,114 @@ docker compose up -d
 
 > 注意：通知通道凭证（SMTP 密码、Bark device key、Telegram bot token、Discord
 > webhook）以明文存于 SQLite。建议启用 NAS 的卷加密 / 文件加密保护 `/data`。
+
+---
+
+## 6. 发布镜像 · Releasing
+
+发布流水线在 `.github/workflows/release.yml`，由 **`v*` 语义化版本 tag** 触发。
+它复用与 CI `docker` job 相同的 `Dockerfile`（同一份 wasm-opt shim / mold /
+多架构 workaround），用 QEMU + buildx 构建 `linux/amd64,linux/arm64`，
+然后**可选**推送到 GHCR、用 cosign 无密钥签名、并附 syft 生成的 SBOM。
+
+The release pipeline lives in `.github/workflows/release.yml` and is triggered
+by a **semver `v*` tag push**. It reuses the same `Dockerfile` as the CI
+`docker` job (identical wasm-opt shim / mold / multi-arch workarounds), builds
+`linux/amd64,linux/arm64` via QEMU + buildx, then *optionally* pushes to GHCR,
+signs with cosign (keyless), and attaches a syft SBOM.
+
+### 6.1 发布是默认安全的（gate）· Publishing is opt-in
+
+未配置任何东西时，tag 触发的 workflow 只做**构建期多架构校验**（`push: false`），
+不碰任何 registry —— 与 CI `docker` job 同等安全。推送 / 签名 / SBOM 这些步骤
+统一由 `gate` step 输出的一个布尔门控，门控为「真」需要**同时满足**：
+
+1. repo Actions **变量** `ENABLE_RELEASE_PUSH` 设为 `true`；**且**
+2. 存在可用的 registry token（`GHCR_TOKEN` PAT 优先，否则用内置 `GITHUB_TOKEN`）。
+
+任一不满足 → workflow 退回 build-only，fork / dry-run tag 不会误发布。
+
+### 6.2 维护者需要配置的 GitHub 仓库设置 · Required repo settings
+
+要启用发布，在仓库 **Settings → Secrets and variables → Actions** 配置：
+
+| 类型 | 名称 | 必填 | 用途 |
+|---|---|---|---|
+| **Variable** | `ENABLE_RELEASE_PUSH` | 启用推送必填 | 设为 `true` 打开发布门控。其他值 / 未设 → build-only。 |
+| **Secret** | `GHCR_TOKEN` | 否（推荐用于跨 org / 私有发布） | `write:packages` 的 PAT。设了就优先用它登录 GHCR；不设则用内置 `GITHUB_TOKEN`。 |
+| **Secret** | `COSIGN_PRIVATE_KEY` | 否 | 仅当改用 **基于密钥**的 cosign 签名时需要（见 6.5）。默认走 OIDC 无密钥签名，**无需**该 secret。 |
+
+权限（**Permissions**）—— workflow 的 `release` job 已在 `permissions:` 块内声明，
+无需在 UI 额外勾选，但仓库设置不能更严格地撤销它们：
+
+- `contents: read` —— 检出代码。
+- `packages: write` —— 用内置 `GITHUB_TOKEN` 推送 GHCR。
+  若 **Settings → Actions → General → Workflow permissions** 设成了
+  “Read repository contents permission”，需要改为允许 job 级
+  `packages: write`（默认 GitHub 允许 job 在 `permissions:` 块内提升）。
+- `id-token: write` —— cosign 无密钥签名向 Sigstore 申请 OIDC token。
+
+> 推送的镜像首次会创建一个 GHCR package，默认继承仓库可见性。私有仓库 → 私有
+> 镜像；要公开拉取需在 package 设置里改 visibility 为 public，并（可选）把
+> package 链接回本仓库。
+
+### 6.3 切一个版本 · Cutting a release
+
+```bash
+# 在干净的 main（或发布分支）上，确认版本号无误后：
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+tag push 即触发 `release` workflow。门控打开时产物：
+
+- `ghcr.io/<owner>/eigenpulse:v0.1.0` 和 `:latest`（多架构 manifest）；
+- cosign 签名（keyless，记录在 Rekor 透明日志）；
+- SPDX SBOM attestation（同时作为 workflow artifact `sbom-v0.1.0` 上传）。
+
+`workflow_dispatch` 也能手动跑（无 tag 时镜像 tag 退化为 `manual-<sha7>`），
+便于在打正式 tag 前演练一遍构建。
+
+### 6.4 拉取并运行已发布镜像 · Pull & run the published image
+
+```bash
+# 拉取（私有镜像需先登录：echo <PAT> | docker login ghcr.io -u <user> --password-stdin）
+docker pull ghcr.io/<owner>/eigenpulse:v0.1.0
+
+# 最小运行（首启需要 EP_ADMIN_PASSWORD；生产参数见 §1/§2）
+docker run -d --name eigenpulse \
+  -p 3000:3000 \
+  -v ep-data:/data \
+  -e EP_ADMIN_PASSWORD='<first-boot-owner-password>' \
+  -e TZ='Asia/Shanghai' \
+  ghcr.io/<owner>/eigenpulse:v0.1.0
+```
+
+生产部署请用 compose + 反代 + `EP_COOKIE_SECURE=1`，见 [§1](#1-反向代理--tls)、
+[§2](#2-环境变量参考--env-reference)。绑定宿主目录到 `/data` 时记得
+`chown -R 65532:65532`。
+
+### 6.5 验证签名与 SBOM · Verifying signature & SBOM
+
+无密钥签名可用 cosign 按 OIDC 身份校验（identity = 触发该 tag 的 workflow，
+issuer = GitHub Actions OIDC）：
+
+```bash
+cosign verify ghcr.io/<owner>/eigenpulse:v0.1.0 \
+  --certificate-identity-regexp "https://github.com/<owner>/.*/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# 取出 SBOM attestation（SPDX JSON）
+cosign verify-attestation --type spdxjson \
+  --certificate-identity-regexp "https://github.com/<owner>/.*/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/<owner>/eigenpulse:v0.1.0
+```
+
+> 若改用**基于密钥**的签名：设 `COSIGN_PRIVATE_KEY` secret，把 workflow 里
+> `cosign sign --yes "${IMAGE}@${DIGEST}"` 换成
+> `cosign sign --key env://COSIGN_PRIVATE_KEY --yes "${IMAGE}@${DIGEST}"`
+> （workflow 内已注释标注），验证时用 `cosign verify --key <pub.key>`。
+
+> 实际推送 / 签名 / SBOM 只能由具备上述 secrets/permissions 的维护者在真实
+> 仓库里跑通；本仓库未配置时 workflow 仅做构建校验。

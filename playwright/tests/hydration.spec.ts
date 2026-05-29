@@ -1,73 +1,125 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { login, themeToggle, watchConsole } from "./helpers.js";
 
-// Single hydration smoke test.
+// End-to-end hydration suite.
 //
-// What it proves: after the SSR HTML loads, the WASM hydrate bundle runs and
-// wires up the reactive Topbar theme toggle. Before hydration the toggle is an
-// inert SSR <button>; after hydration, clicking it flips the `data-theme`
-// attribute on <html> through the TweakState signal + persist Effect. If
-// hydration silently fell back to the SSR snapshot (the historical failure
-// mode documented in AGENTS.md — wrong wasm filename, a tachys text-node
-// panic, an SSR-only dep leaking into wasm), the click does nothing and this
-// test fails. That is exactly the regression we want to catch.
+// This is the highest-value guard in the project: a real headless Chromium
+// executes the hydrate WASM against the real release binary. It catches the
+// bug class that compile / clippy / unit / HTTP-smoke ALL miss — a CSP or
+// hydration footgun that degrades every page to a dead SSR snapshot. (Such a
+// CSP bug shipped to production once and only a browser caught it.)
 //
-// The authenticated shell (Sidebar/Topbar) is the only place hydration
-// matters — `/login` is a plain server-rendered <form> with no Leptos
-// hydration — so the test logs in first.
-//
-// Env:
-//   EP_BASE_URL        SSR binary base URL (default http://127.0.0.1:3000)
-//   EP_LOGIN_PASSWORD  owner password to log in with (default "dev")
-//
-// The whole test self-skips if the server is unreachable, so running the suite
-// without a booted binary is a no-op rather than a hard failure.
+// Three things are proven:
+//   1. No CSP / hydration console errors on any main authenticated route.
+//   2. Hydration is LIVE: the reactive theme toggle flips <html data-theme>.
+//   3. Client-side SPA navigation works (a nav-link click changes the route
+//      WITHOUT a full document reload — proof the router hydrated).
 
-const LOGIN_PASSWORD = process.env.EP_LOGIN_PASSWORD ?? "dev";
+// The authenticated routes that render inside the hydrated app shell. The
+// status route is `/status` (the sidebar "STA" entry); there is no
+// `/settings/status`. `/settings/security` exercises the ActionForm +
+// error-slot wrapper hydration path called out in AGENTS.md.
+const ROUTES = [
+  "/",
+  "/finance",
+  "/fitness",
+  "/learning",
+  "/reports",
+  "/settings",
+  "/status",
+  "/settings/security",
+] as const;
 
-async function serverIsUp(page: Page): Promise<boolean> {
-  try {
-    const res = await page.request.get("/healthz", { timeout: 3_000 });
-    return res.ok();
-  } catch {
-    return false;
-  }
-}
+test.describe("authenticated hydration", () => {
+  test("no CSP / hydration console errors on any main route", async ({
+    page,
+  }) => {
+    const sink = watchConsole(page);
+    await login(page);
 
-test.describe("hydration smoke", () => {
-  test("WASM hydration wires the reactive theme toggle", async ({ page }) => {
-    test.skip(
-      !(await serverIsUp(page)),
-      "Eigenpulse SSR binary not reachable at EP_BASE_URL — boot it first (see playwright/README.md).",
-    );
+    for (const route of ROUTES) {
+      await page.goto(route, { waitUntil: "load" });
+      // Give the hydrate bundle a beat to run and attach handlers; a CSP
+      // rejection or wasm panic fires synchronously during this window.
+      await page.waitForLoadState("networkidle");
+      // The app shell must be present (proves we are authenticated, not on a
+      // login redirect or error page).
+      await expect(page.locator("aside.sidebar")).toBeVisible();
+      sink.assertNoFatal(route);
+    }
 
-    // 1. Authenticate via the server-rendered login form.
-    await page.goto("/login");
-    await page.locator("#login-password").fill(LOGIN_PASSWORD);
-    await Promise.all([
-      page.waitForURL((url) => !url.pathname.startsWith("/login"), {
-        timeout: 10_000,
-      }),
-      page.locator("button.login-submit").click(),
-    ]);
+    // Final sweep across everything collected during the walk.
+    sink.assertNoFatal("the full route walk");
+  });
 
-    // 2. We should now be on an authenticated, hydrated route (the Topbar with
-    //    the theme toggle renders inside the app shell).
+  test("hydration is live — theme toggle flips <html data-theme>", async ({
+    page,
+  }) => {
+    const sink = watchConsole(page);
+    await login(page);
+
+    // Land on the dashboard; the Topbar (with the theme toggle) renders in the
+    // app shell on every authenticated route.
+    await page.goto("/", { waitUntil: "networkidle" });
+
     const html = page.locator("html");
-    const themeToggle = page.locator("button.icon-btn").last();
-    await expect(themeToggle).toBeVisible();
+    const toggle = themeToggle(page);
+    await expect(toggle).toBeVisible();
 
-    // 3. Wait for hydration: the toggle only mutates state once the WASM
-    //    module has run and attached the reactive on:click handler. Poll the
-    //    click until `data-theme` flips (or the assertion times out).
     const before = await html.getAttribute("data-theme");
+    expect(["light", "dark"]).toContain(before);
 
+    // The on:click handler only exists once the WASM module has run and wired
+    // the reactive TweakState signal. Poll the click until data-theme flips;
+    // if hydration silently degraded to the SSR snapshot the attribute never
+    // changes and this times out (the regression we want to catch).
     await expect(async () => {
-      await themeToggle.click();
+      await toggle.click();
       const after = await html.getAttribute("data-theme");
       expect(after, "data-theme should flip after hydration").not.toEqual(
         before,
       );
       expect(["light", "dark"]).toContain(after);
-    }).toPass({ timeout: 10_000 });
+    }).toPass({ timeout: 15_000 });
+
+    sink.assertNoFatal("theme toggle");
+  });
+
+  test("hydration is live — client-side SPA navigation (no full reload)", async ({
+    page,
+  }) => {
+    const sink = watchConsole(page);
+    await login(page);
+    await page.goto("/", { waitUntil: "networkidle" });
+
+    // Tag the live document. A hydrated leptos_router intercepts <A> clicks and
+    // swaps the view WITHOUT a navigation, so this marker survives. A
+    // non-hydrated page would do a full document load on the anchor click and
+    // wipe the marker.
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__ep_spa_marker = true;
+    });
+
+    // The sidebar nav link to /finance is a hydrated <A> (renders as <a href>).
+    const financeLink = page.locator('aside.sidebar a[href="/finance"]');
+    await expect(financeLink).toBeVisible();
+    await financeLink.click();
+
+    await page.waitForURL((url) => url.pathname === "/finance", {
+      timeout: 15_000,
+    });
+
+    const survived = await page.evaluate(
+      () =>
+        (window as unknown as Record<string, unknown>).__ep_spa_marker === true,
+    );
+    expect(
+      survived,
+      "window marker should survive a client-side SPA navigation; if it was wiped, the anchor triggered a full reload (router did not hydrate)",
+    ).toBe(true);
+
+    // And we are genuinely on the finance route inside the shell.
+    await expect(page.locator("aside.sidebar")).toBeVisible();
+    sink.assertNoFatal("SPA navigation");
   });
 });

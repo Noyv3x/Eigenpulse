@@ -1,65 +1,78 @@
-# Playwright hydration smoke (light)
+# Playwright E2E hydration suite
 
-A deliberately small harness: **one** Playwright test that proves the WASM
-hydrate bundle actually runs in a real browser and wires up Leptos reactivity.
-It is **not** a full E2E suite and is **not** wired as a required CI gate — it
-complements the Rust `app/tests/smoke.rs` harness (which checks the HTTP layer:
-`/pkg/<name>_bg.wasm` alias, login redirect, PAT 401) with a single
-browser-level hydration assertion that those server-side checks cannot make.
+A real browser-driven end-to-end suite that boots the **release** SSR binary
+against a **freshly built** leptos site and drives it through headless Chromium.
 
-## What the test asserts
+This is the highest-value automated guard in the project. It catches the bug
+class that `cargo check`, `clippy`, the unit tests, and the HTTP-level
+`app/tests/smoke.rs` harness **all miss**: a Content-Security-Policy or
+hydration footgun that silently degrades every page to a dead, non-interactive
+SSR snapshot. That class of bug is only observable in a browser actually
+executing the hydrate WASM — exactly what this suite does. (A CSP bug that
+blocked all hydration shipped to production once; only a browser caught it.)
 
-After the SSR HTML loads, the hydrate bundle must run and attach the reactive
-`on:click` handler to the Topbar theme toggle. The test logs in, then clicks
-the toggle and asserts the `data-theme` attribute on `<html>` flips. If
-hydration silently fell back to the SSR snapshot — the historical failure mode
-documented in `AGENTS.md` (wrong wasm filename, a tachys text-node panic, an
-SSR-only dep leaking into the wasm graph) — the click does nothing and the test
-fails. See `tests/hydration.spec.ts`.
+## What it asserts (`tests/hydration.spec.ts`)
 
-## Running it
+After logging in through the real CSRF double-submit flow, three things:
 
-The harness does **not** build or boot the app; that is the caller's job
-(building the leptos site is slow and arch-specific). Steps:
+1. **No CSP / hydration console errors** on every main authenticated route
+   (`/`, `/finance`, `/fitness`, `/learning`, `/reports`, `/settings`,
+   `/status`, `/settings/security`). Any console error / pageerror matching
+   `Content Security Policy` / `Refused to execute` / `hydration` /
+   `unreachable` (wasm trap) / `failed_to_cast` (tachys text-node panic) /
+   `panicked` fails the test — those are the signatures of the bug class.
+2. **Hydration is LIVE** — clicking the Topbar theme toggle flips
+   `<html data-theme>` via the reactive `TweakState` signal. An un-hydrated
+   page leaves the attribute unchanged.
+3. **Client-side SPA navigation works** — a `window` marker survives a
+   sidebar nav-link click that changes the route, proving `leptos_router`
+   intercepted the `<A>` click instead of doing a full document reload.
+
+## Build/boot consistency invariant
+
+The binary and the wasm hydrate bundle **must** come from the same
+`cargo leptos build` — a stale wasm paired with a fresh binary is itself a
+hydration mismatch. So `global-setup.ts` runs `cargo leptos build --release`
+immediately before `playwright.config.ts`'s `webServer` boots
+`target/release/eigenpulse`. The binary is launched with the same env the Rust
+smoke harness uses (`EP_SECRET` 64 chars, `EP_COOKIE_SECURE=0`,
+`RUST_MIN_STACK=16777216`, a temp `DATABASE_URL`, the `LEPTOS_*` site vars) plus
+`EP_ADMIN_PASSWORD` so first-boot bootstraps the owner with the login password.
+
+## Running it locally
 
 ```bash
-# 1. Build the leptos site (SSR binary + wasm hydrate bundle).
-cargo leptos build --release
-
-# 2. Boot the binary with a known owner password on a fresh DB.
-EP_ADMIN_PASSWORD=dev EP_SECRET="$(openssl rand -hex 64)" \
-  LEPTOS_OUTPUT_NAME=eigenpulse LEPTOS_SITE_ROOT=target/site \
-  LEPTOS_SITE_PKG_DIR=pkg LEPTOS_SITE_ADDR=127.0.0.1:3000 \
-  DATABASE_URL='sqlite:///tmp/ep-pw.db?mode=rwc' \
-  ./target/release/eigenpulse &
-
-# 3. Install deps + browser, then run the one test.
 cd playwright
 npm install
-npm run install-browsers   # playwright install --with-deps chromium
-EP_LOGIN_PASSWORD=dev npm test
+npm run install-browsers        # playwright install --with-deps chromium
+npm test                        # global-setup builds, webServer boots, specs run
 ```
 
-If the SSR binary is not reachable at `EP_BASE_URL` (default
-`http://127.0.0.1:3000`), the test **self-skips** rather than failing, so
-`npm test` is safe to run without a server.
+To reuse an already-built site (skip the slow `cargo leptos build`):
 
-### Env
+```bash
+cargo leptos build --release    # from the workspace root
+EP_SKIP_BUILD=1 npm test        # global-setup asserts target/site + binary exist
+```
 
-| var                 | default                 | meaning                              |
-| ------------------- | ----------------------- | ------------------------------------ |
-| `EP_BASE_URL`       | `http://127.0.0.1:3000` | base URL of a running SSR binary     |
-| `EP_LOGIN_PASSWORD` | `dev`                   | owner password to log in with        |
+### Env knobs
 
-## TODO / not done here (intentionally light)
+| var               | default       | meaning                                                       |
+| ----------------- | ------------- | ------------------------------------------------------------- |
+| `EP_E2E_PORT`     | `31734`       | fixed test port for the booted binary                         |
+| `EP_E2E_PASSWORD` | `e2e-test-pw` | owner password (bootstrapped + used to log in)                |
+| `EP_SKIP_BUILD`   | _(unset)_     | `1` ⇒ skip the leptos build, assert artifacts already present |
 
-- Not added to `.github/workflows/ci.yml` as a gate. Wiring it would mean
-  building the leptos site (already done in the `smoke` job), booting the
-  binary as a background service, and `npm ci && npx playwright install`. If a
-  maintainer wants it gated, add a job that reuses the `smoke` job's build,
-  runs the binary with `EP_ADMIN_PASSWORD`, then `cd playwright && npm ci &&
-  npm run install-browsers && EP_LOGIN_PASSWORD=… npm test`.
-- No `package-lock.json` is committed yet (run `npm install` to generate one);
-  a gated CI job should switch to `npm ci` once the lockfile lands.
-- Single browser (chromium). Add firefox/webkit projects in
-  `playwright.config.ts` if cross-engine hydration coverage is ever needed.
+## CI
+
+Wired as the `e2e` job in `.github/workflows/ci.yml`. It installs Rust + mold +
+the wasm32 target + cargo-leptos + Node + Chromium, runs
+`cargo leptos build --release`, then `EP_SKIP_BUILD=1 npx playwright test`
+(the build step already produced `target/site/`).
+
+## Type-checking
+
+`npm run typecheck` (`tsc --noEmit`) validates the specs/config against
+`tsconfig.json`. The `.ts` files import sibling modules with a `.js` specifier
+(the ESM runtime convention Playwright's loader expects); `moduleResolution:
+"bundler"` resolves those back to the `.ts` source for the check.

@@ -147,6 +147,60 @@ jobs:
       - name: Smoke test
         run: cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
 
+  # Real-browser end-to-end hydration suite (playwright/). This is the only
+  # guard that catches a CSP / hydration footgun that degrades every page to a
+  # dead SSR snapshot — a bug class the compile / clippy / unit / HTTP-smoke
+  # jobs all miss because it is only observable in a browser executing the
+  # hydrate WASM. Slow (full leptos build + Chromium), so it is its own job and
+  # runs on the same push/PR triggers as the rest. Builds the leptos site here,
+  # then `global-setup.ts` skips its own build (EP_SKIP_BUILD=1) and the
+  # webServer boots the freshly built binary.
+  e2e:
+    name: playwright e2e (hydration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: smoke
+      - name: Install cargo-leptos
+        run: cargo install cargo-leptos --locked --version 0.3.6
+      - name: Cargo Leptos build (release)
+        run: cargo leptos build --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install npm deps
+        working-directory: playwright
+        # No lockfile is committed (it is .gitignored), so `npm install`. If a
+        # maintainer later commits playwright/package-lock.json, switch this to
+        # `npm ci` and add `cache: npm` to the setup-node step above.
+        run: npm install --no-audit --no-fund
+      - name: Install Playwright Chromium
+        working-directory: playwright
+        run: npx playwright install --with-deps chromium
+      - name: Playwright type-check
+        working-directory: playwright
+        run: npx tsc --noEmit
+      - name: Run Playwright suite
+        working-directory: playwright
+        # The site is already built above; skip global-setup's own build.
+        env:
+          EP_SKIP_BUILD: "1"
+        run: npx playwright test
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright/playwright-report/
+          retention-days: 7
+
   # cargo-deny: advisories (RUSTSEC vulns + unmaintained), banned/duplicate
   # crates, license allow-list, and registry sources. Config in deny.toml at
   # the repo root. advisories+bans+sources are hard failures; license is an
