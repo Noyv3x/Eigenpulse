@@ -3,7 +3,6 @@ use leptos::prelude::*;
 #[component]
 pub fn ChartBars(
     data: Vec<f64>,
-    #[prop(default = None)] highlight: Option<usize>,
     #[prop(default = vec![])] labels: Vec<String>,
     /// Extra class on the `.chart-bars` element, e.g. `"expense"` to recolour
     /// the bars amber. Defaults to none (the standard green series).
@@ -13,15 +12,9 @@ pub fn ChartBars(
     let max = chart_max(&data);
     let bars = data
         .iter()
-        .enumerate()
-        .map(|(i, v)| {
+        .map(|v| {
             let h = bar_height(*v, max);
-            let cls = if Some(i) == highlight {
-                "bar-cell hi"
-            } else {
-                "bar-cell"
-            };
-            view! { <div class=cls style=format!("height:{h:.1}%")></div> }
+            view! { <div class="bar-cell" style=format!("height:{h:.1}%")></div> }
         })
         .collect_view();
     let label_row = if labels.is_empty() {

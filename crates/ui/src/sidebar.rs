@@ -65,6 +65,13 @@ pub const NAV: &[NavItem] = &[
         path: "/reports",
     },
     NavItem {
+        code: "STA",
+        name_key: "ui.sidebar.nav.sta",
+        icon: IconKind::Check,
+        section: NavSection::System,
+        path: "/status",
+    },
+    NavItem {
         code: "CFG",
         name_key: "ui.sidebar.nav.cfg",
         icon: IconKind::Settings,
