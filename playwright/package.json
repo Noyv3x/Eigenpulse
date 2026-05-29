@@ -1,0 +1,14 @@
+{
+  "name": "eigenpulse-hydration-smoke",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Light Playwright hydration smoke harness for Eigenpulse. ONE test that logs in and asserts WASM hydration wired the theme toggle. Not a full E2E suite.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "install-browsers": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

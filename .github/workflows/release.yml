@@ -1,0 +1,131 @@
+# Release workflow — SCAFFOLD.
+#
+# Triggered on a semver tag push (e.g. `git tag v0.1.0 && git push --tags`).
+# Builds the multi-arch image (linux/amd64 + linux/arm64 — arm64 is the real
+# NAS target) and *optionally* pushes it to GitHub Container Registry (GHCR),
+# then *optionally* signs the image with cosign and attaches an SBOM (syft).
+#
+# WHAT THE MAINTAINER MUST DO TO FINISH THIS:
+#   1. Decide the registry image name. Default below is
+#      `ghcr.io/<owner>/eigenpulse`, derived from `github.repository_owner`.
+#   2. Pushing to GHCR uses the built-in `GITHUB_TOKEN` with `packages: write`
+#      (no extra secret needed) — that path is enabled whenever the workflow
+#      runs in this repo. The push/sign/SBOM steps are additionally gated on an
+#      explicit `vars.ENABLE_RELEASE_PUSH == 'true'` repo variable so a fork or
+#      a dry-run tag does not publish by accident. Set that variable (Settings
+#      -> Secrets and variables -> Actions -> Variables) to flip pushing on.
+#   3. cosign keyless signing uses OIDC (`id-token: write`) — no key secret to
+#      manage. If you prefer key-based signing, add a `COSIGN_PRIVATE_KEY`
+#      secret and swap the `cosign sign` invocation (commented inline).
+#
+# Nothing here invents credentials. With the gate off, this workflow only does
+# a build-only multi-arch validation on tag — identical safety to CI.
+
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  # Lowercased owner is required for a valid GHCR path.
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/eigenpulse
+
+jobs:
+  release:
+    name: build + (gated) push multi-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to GHCR via GITHUB_TOKEN
+      id-token: write   # cosign keyless (OIDC) signing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive lowercased image name and tag
+        id: meta
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${owner}/eigenpulse" >> "$GITHUB_OUTPUT"
+          # Tag from the git ref (strip refs/tags/). Fall back to `manual` for
+          # workflow_dispatch runs that have no tag.
+          ref="${GITHUB_REF#refs/tags/}"
+          if [ "$ref" = "$GITHUB_REF" ]; then ref="manual-${GITHUB_SHA::7}"; fi
+          echo "version=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Pushing is gated on an explicit opt-in repo variable so tags on forks
+      # or dry runs never publish. Set `ENABLE_RELEASE_PUSH=true` in repo
+      # Actions variables to turn this on.
+      - name: Log in to GHCR
+        if: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build-and-maybe-push in one step. `push:` is true only when the gate is
+      # on; otherwise this is a build-only multi-arch validation (no registry,
+      # same as CI). Capture the digest so cosign/syft can pin by digest.
+      - name: Build multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---- The remaining steps only run when an image was actually pushed ----
+
+      # Cosign keyless signing (Sigstore OIDC). No key secret required; the
+      # `id-token: write` permission above lets the runner mint an OIDC token.
+      # For key-based signing instead, add a COSIGN_PRIVATE_KEY secret and run:
+      #   cosign sign --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
+      - name: Install cosign
+        if: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+        uses: sigstore/cosign-installer@v3
+      - name: Sign the pushed image (keyless)
+        if: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # SBOM generation with syft, attached to the image as an attestation.
+      # syft produces SPDX JSON; cosign attests it against the pushed digest.
+      - name: Install syft
+        if: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+        uses: anchore/sbom-action/download-syft@v0
+      - name: Generate + attest SBOM
+        if: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          syft "${IMAGE}@${DIGEST}" -o spdx-json > sbom.spdx.json
+          cosign attest --yes --predicate sbom.spdx.json \
+            --type spdxjson "${IMAGE}@${DIGEST}"
+
+      - name: Upload SBOM artifact
+        if: ${{ vars.ENABLE_RELEASE_PUSH == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.meta.outputs.version }}
+          path: sbom.spdx.json
+          if-no-files-found: ignore

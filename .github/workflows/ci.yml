@@ -147,30 +147,68 @@ jobs:
       - name: Smoke test
         run: cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
 
-  # Verify the Dockerfile actually produces a runnable image. Single
-  # platform (linux/amd64, the GitHub runner native arch) — multi-arch
-  # is exercised manually via `docker buildx --platform=...,linux/arm64`.
+  # cargo-deny: advisories (RUSTSEC vulns + unmaintained), banned/duplicate
+  # crates, license allow-list, and registry sources. Config in deny.toml at
+  # the repo root. advisories+bans+sources are hard failures; license is an
+  # allow-list (also hard) kept in sync with the lock graph. Does not need the
+  # mold linker or a full build — it only resolves the dependency graph.
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check
+
+  # Verify the Dockerfile actually produces a runnable image. arm64 is the real
+  # NAS deployment target and exercises the wasm-opt shim + mold workarounds in
+  # the Dockerfile that only matter under emulation, so we build BOTH arches via
+  # buildx + QEMU. PR/push CI is build-only (`push: false`) — no registry. The
+  # multi-platform build cannot `load:` into the local docker daemon (it can
+  # only hold a single-arch image), so the runnable healthz probe below does a
+  # second, amd64-only build with `load: true` and runs the container natively;
+  # running an arm64 container on an amd64 runner would require qemu user
+  # emulation for the whole process lifetime, which is slow and flaky for a
+  # health probe, so the probe stays amd64-only.
   docker:
-    name: docker build
+    name: docker build (amd64 + arm64)
     runs-on: ubuntu-latest
     needs: [check]
     steps:
       - uses: actions/checkout@v4
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
       - uses: docker/setup-buildx-action@v3
-      - name: Build image
+      - name: Build multi-arch image (amd64 + arm64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          tags: eigenpulse:ci
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build amd64 image for local probe
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
-          tags: eigenpulse:ci
+          tags: eigenpulse:ci-amd64
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Probe healthz
+      - name: Probe healthz (amd64, native)
         run: |
           docker run -d --name ep-ci -p 3000:3000 \
             -e EP_ADMIN_PASSWORD='ci-test-pw' \
-            eigenpulse:ci
+            eigenpulse:ci-amd64
           for i in $(seq 1 20); do
             status="$(docker inspect -f '{{.State.Health.Status}}' ep-ci 2>/dev/null || true)"
             if [ "$status" = "healthy" ] && curl -fsS -m 2 http://127.0.0.1:3000/healthz > /dev/null; then

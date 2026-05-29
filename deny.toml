@@ -1,0 +1,120 @@
+# cargo-deny configuration for Eigenpulse.
+#
+# Run locally with:   cargo deny check
+# CI runs the same command (see .github/workflows/ci.yml, job `cargo-deny`).
+#
+# Policy summary (see AGENTS.md "supply-chain"):
+#   * advisories — HARD: any RUSTSEC vuln or unmaintained advisory fails CI.
+#   * bans       — HARD: explicitly-banned crates fail; duplicate versions warn.
+#   * licenses   — allow-list of the licenses actually present in the lock graph
+#                  (all permissive / OSI-approved). A crate carrying anything
+#                  outside the list fails — keep the list in sync when adding
+#                  deps. If a new transitive dep introduces unfamiliar but
+#                  still-permissive license noise and you want CI to stay green
+#                  while you triage, temporarily relax `unlicensed`/add the SPDX
+#                  id here rather than disabling the whole check.
+#   * sources    — HARD: only crates.io (and git, if ever needed) are allowed.
+#
+# Schema targets cargo-deny >= 0.18 (no deprecated `vulnerability`/`copyleft`
+# /`default` severity keys).
+
+[graph]
+# Check every target we actually build for: the host (SSR/server) and the
+# wasm32 hydrate bundle. Leaving this empty would only evaluate the host
+# target and miss wasm-only deps (and vice-versa).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "wasm32-unknown-unknown",
+]
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories — RUSTSEC database. HARD failures.
+# ---------------------------------------------------------------------------
+[advisories]
+# Pull the default RustSec advisory DB.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Vulnerabilities and unsound advisories are denied by default in this schema
+# version; unmaintained crates are flagged too. Yanked crates are an error.
+yanked = "deny"
+# When a real advisory lands and a fix isn't yet available, add its id here
+# with a comment + tracking link rather than weakening the whole check.
+ignore = [
+    # RUSTSEC-2024-0436 — `paste` is unmaintained (author archived the repo).
+    # It is a proc-macro-only build dependency pulled transitively via
+    # leptos -> either_of -> paste. No vulnerability, no runtime code, and no
+    # drop-in replacement we control (it's upstream of us). Re-evaluate when
+    # leptos drops it. https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
+]
+
+# ---------------------------------------------------------------------------
+# Bans — duplicate versions, banned crates, wildcard deps. HARD failures
+# only for explicitly-banned crates; duplicates are a warning (this large
+# multi-crate workspace legitimately pulls a few duplicated minor versions).
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+# Workspace-internal path deps (ep-core, ep-finance, …) are referenced as
+# `{ path = "…" }` with no version requirement, which cargo-deny reports as a
+# wildcard `*`. `allow-wildcard-paths` does NOT suppress this because each
+# workspace crate carries a `license` field (inherited from
+# [workspace.package]), so cargo-deny treats them as "public" crates where
+# crates.io would reject path deps. These are never published, so we keep the
+# wildcard check as a WARNING rather than hard-failing CI on our own monorepo
+# wiring. External `*` version requirements would still surface as a warning to
+# investigate.
+wildcards = "warn"
+allow-wildcard-paths = true
+# Crates we never want to appear in the graph. Empty for now — add entries as
+# `{ name = "foo" }` to hard-fail if a dep ever pulls one in.
+deny = [
+    # { name = "openssl-sys" },  # we are rustls-only; uncomment to enforce.
+]
+# Crates allowed to appear more than once (skip the duplicate-version warning).
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Licenses — allow-list. Every SPDX id below is present in Cargo.lock today
+# and is permissive / OSI-approved. A dep outside this set fails the check.
+# ---------------------------------------------------------------------------
+[licenses]
+# Crates must be >= this confidence to be auto-detected from their license
+# text when they don't carry an SPDX expression in metadata.
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "BSL-1.0",
+    # ICU / unicode-ident and friends ship under the Unicode license. Required
+    # by the time/icu_* transitive tree.
+    "Unicode-3.0",
+    # webpki-roots ships the Mozilla CA bundle under CDLA-Permissive-2.0
+    # (a permissive data license).
+    "CDLA-Permissive-2.0",
+]
+# Per-crate license clarifications. None needed yet — every crate's SPDX
+# expression resolves against the allow-list above. Add a [[licenses.clarify]]
+# block here if a crate's license text isn't auto-detected with high enough
+# confidence.
+
+# ---------------------------------------------------------------------------
+# Sources — where crates may come from. HARD failures.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

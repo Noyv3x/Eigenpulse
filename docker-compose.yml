@@ -7,6 +7,12 @@ services:
     ports:
       - "3000:3000"
     volumes:
+      # Persistent data: the SQLite DB (eigenpulse.db + WAL/SHM), the auto-
+      # generated session-signing key (secret.key), pre-migration snapshots
+      # (eigenpulse.db.pre-migration-<v>.bak) and on-demand backups
+      # (backups/eigenpulse-v<n>.db). Back THIS volume up — see docs/ops.md.
+      # If you bind-mount a host path here instead of a named volume, run
+      # `chown -R 65532:65532 <host-path>` first (the image runs as nonroot).
       - ep-data:/data
     environment:
       EP_ADMIN_PASSWORD: "${EP_ADMIN_PASSWORD:?required for first boot}"
@@ -16,8 +22,21 @@ services:
       EP_SECRET_FILE:    "${EP_SECRET_FILE:-/data/secret.key}"
       # Set to "1" only if you serve over HTTPS (public reverse proxy with TLS).
       # Leave unset for LAN/NAS HTTP access so the session cookie can persist.
+      # When "1" the app also marks the session cookie `Secure` and emits HSTS.
       EP_COOKIE_SECURE:  "${EP_COOKIE_SECURE:-0}"
+      # CRITICAL: the app derives local day / week / month boundaries (today's
+      # totals, fitness streaks, the learning heatmap) from the container's
+      # timezone via SQLite's `'localtime'` modifier. A distroless container has
+      # no /etc/localtime, so without TZ the process runs in UTC and any user not
+      # on UTC sees "today"/streak/heatmap rollovers at the wrong wall-clock hour.
+      # Set TZ to your local IANA zone, e.g. `TZ=Asia/Shanghai` or `TZ=Europe/Berlin`.
+      TZ:                "${TZ:-UTC}"
       RUST_LOG:          "info"
+    # Resource ceiling sized for a modern NAS. The idle RSS target is <100 MB;
+    # 256 MB leaves generous headroom for the SQLite page cache and request
+    # bursts. Raise it if you import very large data sets or run many concurrent
+    # open-API clients.
+    mem_limit: 256m
     healthcheck:
       test: ["CMD", "/app/eigenpulse", "--healthcheck"]
       interval: 30s

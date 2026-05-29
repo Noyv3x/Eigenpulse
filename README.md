@@ -110,6 +110,12 @@ EP_ADMIN_PASSWORD=changeme docker compose up -d
 > 镜像内置 `HEALTHCHECK`，直接调用 `/app/eigenpulse --healthcheck` 探测
 > `LEPTOS_SITE_ADDR` 对应的本机 `/healthz`，不依赖 curl/wget。
 
+> **生产部署 / 运维**：反向代理 + TLS、完整环境变量参考、备份恢复、升级回滚见
+> [`docs/ops.md`](docs/ops.md)。生产暴露前至少完成：反代 TLS + `EP_COOKIE_SECURE=1`、
+> 设 `TZ` 为本地时区（否则「今日」/连续训练/热力图按 UTC 翻篇而错位）、配好离机备份。
+> 已内置的硬化：`VACUUM INTO` 备份（手动 + 迁移前自动快照）、安全响应头 + CSP、
+> HSTS（`EP_COOKIE_SECURE=1` 时）、登录暴力破解限流（默认 15 分钟内 5 次失败 → 429）。
+
 ### 环境变量
 
 | 变量 | 必填 | 说明 |
@@ -117,8 +123,9 @@ EP_ADMIN_PASSWORD=changeme docker compose up -d
 | `EP_ADMIN_PASSWORD` | 首次启动 | OWNER 账户初始密码（≥6 字符）；之后可在 UI 中轮换 |
 | `EP_SECRET` | 推荐 | ≥64 字符的 **session cookie 签名密钥**；缺失则首启生成 `EP_SECRET_FILE` 指向的文件（本地默认 `data/secret.key`，Docker 默认 `/data/secret.key`）。轮换会让所有浏览器登录失效，但**不影响 PAT** —— PAT 直接 `sha256(token)` 比对，与本变量无关。 |
 | `EP_SECRET_FILE` | 否 | 未设置 `EP_SECRET` 时用于读取/持久化自动生成密钥；本地默认 `data/secret.key`，Docker 镜像内默认 `/data/secret.key`。文件不存在时会自动生成；文件已存在但内容无效时会拒绝启动，避免静默轮换会话签名密钥。 |
-| `EP_COOKIE_SECURE` | 否 | 设为 `1` / `true` 时 session cookie 标记 `Secure`（仅 HTTPS 发送）。**默认 false**：本地 HTTP / NAS 内网部署会话才能持久化。生产 HTTPS 环境务必设为 `1`。 |
+| `EP_COOKIE_SECURE` | 否 | 设为 `1` / `true` 时 session cookie 标记 `Secure`（仅 HTTPS 发送），并对页面响应附加 HSTS。**默认 false**：本地 HTTP / NAS 内网部署会话才能持久化。生产 HTTPS 环境务必设为 `1`。 |
 | `DATABASE_URL` | 否 | 本地默认 `sqlite://data/eigenpulse.db?mode=rwc`；Docker 镜像内覆盖为 `sqlite:///data/eigenpulse.db?mode=rwc` |
+| `TZ` | 生产建议 | 决定本地日/周/月边界（「今日」聚合、连续训练、热力图，经 SQLite `'localtime'`）。distroless 镜像无 tzdata，未设则按 **UTC** 翻篇；非 UTC 用户务必设为本地 IANA 区，如 `Asia/Shanghai`。 |
 | `RUST_LOG` | 否 | tracing 过滤，例如 `info,sqlx=warn` |
 
 ---
