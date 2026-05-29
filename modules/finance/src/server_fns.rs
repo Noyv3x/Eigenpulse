@@ -1083,11 +1083,12 @@ pub async fn load_ledger(currency_code: String) -> Result<LedgerData, ServerFnEr
 
         let currencies_q = list_currencies_inner(pool);
 
-        // Every account, every currency — the transfer picker spans currencies.
-        // Only the three columns the form actually renders.
+        // Every *active* account, every currency — the transfer picker spans
+        // currencies. Archived accounts are dropped here so they can't be
+        // chosen as a transfer leg; only the three columns the form renders.
         let transfer_accounts_q = sqlx::query_as::<_, TransferAccountRef>(
             "SELECT currency_code, code, name
-               FROM fin_account ORDER BY currency_code, code",
+               FROM fin_account WHERE archived = 0 ORDER BY currency_code, code",
         )
         .fetch_all(pool);
 
@@ -2574,9 +2575,13 @@ pub async fn create_account_inner(
         return Err(ep_i18n::err("finance.err.no_currency"));
     }
     let (code, name, r#type, tone) = validate_account_input(&code, &name, &r#type, &tone)?;
+    // Code auto-generation reads `fin_account` to pick a free slug, then the
+    // INSERT writes it. Run both inside one transaction so a concurrent create
+    // can't slip a row in between the search and the write (TOCTOU): a racing
+    // INSERT either blocks until COMMIT or trips the unique violation below.
+    let mut tx = pool.begin().await.map_err(server_err)?;
     let code = if code.is_empty() {
-        let mut conn = pool.acquire().await.map_err(server_err)?;
-        unique_account_code(&mut conn, &currency_code, &name, None).await?
+        unique_account_code(&mut tx, &currency_code, &name, None).await?
     } else {
         code
     };
@@ -2590,7 +2595,7 @@ pub async fn create_account_inner(
     .bind(&r#type)
     .bind(&tone)
     .bind(opening_balance)
-    .execute(pool)
+    .execute(&mut *tx)
     .await;
     if let Err(e) = res {
         if is_unique_violation(&e) {
@@ -2598,6 +2603,7 @@ pub async fn create_account_inner(
         }
         return Err(server_err(e));
     }
+    tx.commit().await.map_err(server_err)?;
     sqlx::query_as::<_, Account>(
         "SELECT currency_code, code, name, type, tone, balance, archived, created_at
            FROM fin_account WHERE currency_code = ?1 AND code = ?2",
@@ -2769,6 +2775,36 @@ pub async fn delete_account_inner(
     Ok(())
 }
 
+/// Flip an account's `archived` flag. Archiving keeps the row (and its
+/// balance / transaction history) intact but drops it from the active pickers
+/// and account grid — the graceful alternative to a delete that
+/// `delete_account_inner` refuses once the account has transactions.
+#[cfg(feature = "ssr")]
+pub async fn set_account_archived_inner(
+    pool: &SqlitePool,
+    currency_code: String,
+    code: String,
+    archived: bool,
+) -> Result<(), ServerFnError> {
+    let currency_code = currency_code.trim().to_string();
+    let code = code.trim().to_string();
+    if currency_code.is_empty() || code.is_empty() {
+        return Err(ep_i18n::err("finance.err.account_code_format"));
+    }
+    let res =
+        sqlx::query("UPDATE fin_account SET archived = ?1 WHERE currency_code = ?2 AND code = ?3")
+            .bind(i64::from(archived))
+            .bind(&currency_code)
+            .bind(&code)
+            .execute(pool)
+            .await
+            .map_err(server_err)?;
+    if res.rows_affected() == 0 {
+        return Err(ep_i18n::err_with("finance.err.account_not_found", &code));
+    }
+    Ok(())
+}
+
 #[server(CreateAccount, "/api/_internal/fin", "Url", "create_account")]
 pub async fn create_account(
     currency_code: String,
@@ -2884,6 +2920,35 @@ pub async fn delete_account(account_ref: String) -> Result<(), ServerFnError> {
     }
 }
 
+/// Archive or unarchive an account. `account_ref` is the `"{currency}/{code}"`
+/// value the management UI emits; `archived` is `"1"` to archive or `"0"` to
+/// restore (form values arrive as strings — anything other than `"1"`/`"true"`
+/// reads as unarchive).
+#[server(
+    SetAccountArchived,
+    "/api/_internal/fin",
+    "Url",
+    "set_account_archived"
+)]
+pub async fn set_account_archived(
+    account_ref: String,
+    archived: String,
+) -> Result<(), ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        let (currency_code, code) = split_currency_ref(&account_ref)?;
+        let archived = matches!(archived.trim(), "1" | "true");
+        set_account_archived_inner(&state.db, currency_code, code, archived).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (account_ref, archived);
+        Err(ep_core::server_err("ssr-only"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Category CRUD
 // ---------------------------------------------------------------------------
@@ -2968,13 +3033,16 @@ pub async fn create_category_inner(
     if !code.is_empty() {
         reject_reserved_category(&code)?;
     }
+    let sort_order = validate_category_sort_order(sort_order)?;
+    // Same TOCTOU window as `create_account_inner`: auto code-gen searches the
+    // table then the INSERT writes the chosen code, so both run inside one
+    // transaction to commit atomically.
+    let mut tx = pool.begin().await.map_err(server_err)?;
     let code = if code.is_empty() {
-        let mut conn = pool.acquire().await.map_err(server_err)?;
-        unique_category_code(&mut conn, &currency_code, &name, None).await?
+        unique_category_code(&mut tx, &currency_code, &name, None).await?
     } else {
         code
     };
-    let sort_order = validate_category_sort_order(sort_order)?;
     let res = sqlx::query(
         "INSERT INTO fin_category (currency_code, code, name, icon, tone, sort_order, archived, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, unixepoch())",
@@ -2985,7 +3053,7 @@ pub async fn create_category_inner(
     .bind(&icon)
     .bind(&tone)
     .bind(sort_order)
-    .execute(pool)
+    .execute(&mut *tx)
     .await;
     if let Err(e) = res {
         if is_unique_violation(&e) {
@@ -2993,6 +3061,7 @@ pub async fn create_category_inner(
         }
         return Err(server_err(e));
     }
+    tx.commit().await.map_err(server_err)?;
     sqlx::query_as::<_, Category>(
         "SELECT currency_code, code, name, icon, tone, sort_order, archived, created_at
            FROM fin_category WHERE currency_code = ?1 AND code = ?2",
@@ -3190,6 +3259,38 @@ pub async fn delete_category_inner(
     Ok(())
 }
 
+/// Flip a category's `archived` flag. Mirrors [`set_account_archived_inner`]:
+/// archiving keeps the row and its budget / transaction history but drops it
+/// from the active pickers and dropdowns — the graceful alternative to a
+/// delete that `delete_category_inner` refuses once the category is in use.
+/// The reserved `TFR` category is module plumbing and cannot be archived.
+#[cfg(feature = "ssr")]
+pub async fn set_category_archived_inner(
+    pool: &SqlitePool,
+    currency_code: String,
+    code: String,
+    archived: bool,
+) -> Result<(), ServerFnError> {
+    let currency_code = currency_code.trim().to_string();
+    let code = code.trim().to_string();
+    if currency_code.is_empty() || code.is_empty() {
+        return Err(ep_i18n::err("finance.err.category_code_format"));
+    }
+    reject_reserved_category(&code)?;
+    let res =
+        sqlx::query("UPDATE fin_category SET archived = ?1 WHERE currency_code = ?2 AND code = ?3")
+            .bind(i64::from(archived))
+            .bind(&currency_code)
+            .bind(&code)
+            .execute(pool)
+            .await
+            .map_err(server_err)?;
+    if res.rows_affected() == 0 {
+        return Err(ep_i18n::err_with("finance.err.category_not_found", &code));
+    }
+    Ok(())
+}
+
 #[server(CreateCategory, "/api/_internal/fin", "Url", "create_category")]
 pub async fn create_category(
     currency_code: String,
@@ -3251,6 +3352,34 @@ pub async fn delete_category(category_ref: String) -> Result<(), ServerFnError> 
     #[cfg(not(feature = "ssr"))]
     {
         let _ = category_ref;
+        Err(ep_core::server_err("ssr-only"))
+    }
+}
+
+/// Archive or unarchive a category. `category_ref` is the `"{currency}/{code}"`
+/// value the management UI emits; `archived` is `"1"` to archive or `"0"` to
+/// restore. The reserved `TFR` category is rejected server-side.
+#[server(
+    SetCategoryArchived,
+    "/api/_internal/fin",
+    "Url",
+    "set_category_archived"
+)]
+pub async fn set_category_archived(
+    category_ref: String,
+    archived: String,
+) -> Result<(), ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        ep_auth::require_user_for_server_fn().await?;
+        let state = ep_core::app_state_context()?;
+        let (currency_code, code) = split_currency_ref(&category_ref)?;
+        let archived = matches!(archived.trim(), "1" | "true");
+        set_category_archived_inner(&state.db, currency_code, code, archived).await
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = (category_ref, archived);
         Err(ep_core::server_err("ssr-only"))
     }
 }

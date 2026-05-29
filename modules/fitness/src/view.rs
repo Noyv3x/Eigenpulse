@@ -3,17 +3,10 @@ use crate::server_fns::*;
 use ep_core::{IconKind, Tone};
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    Card, ChartBars, Direction, ErrorSlot, Icon, Kpi, PageHead, Ring, RowDeleteAction,
-    SkeletonCard, SkeletonKpi, Tag,
+    Card, ChartBars, Direction, ErrorSlot, Icon, Kpi, LoadError, PageHead, Ring, RowDeleteAction,
+    SkeletonCard, SkeletonKpi, Tag, FIELD_LABEL, INPUT_STYLE, INPUT_STYLE_MONO,
 };
 use leptos::prelude::*;
-
-// Shared inline-style tokens for the form controls on this page — mirrors the
-// same constants in `finance::view` so a styling tweak is a single edit.
-const INPUT_STYLE: &str =
-    "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
-const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
-const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
 
 #[component]
 pub fn FitnessView() -> impl IntoView {
@@ -48,7 +41,7 @@ pub fn FitnessView() -> impl IntoView {
                 <SkeletonCard rows=2/>
             }>
                 {move || data.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <LoadError detail=server_fn_error_text(&e)/> }.into_any(),
                     Ok(d) => render_fitness(d, add, update, delete).into_any(),
                 })}
             </Suspense>
@@ -98,7 +91,7 @@ fn render_fitness(
     } else {
         t(locale, "fitness.kpi.load_no_prev").to_string()
     };
-    let aerobic_target = 150_u32;
+    let aerobic_target = s.aerobic_target_min;
     let aerobic_pct_str = if s.aerobic_min_this_week >= aerobic_target {
         t(locale, "fitness.kpi.target_done").to_string()
     } else {

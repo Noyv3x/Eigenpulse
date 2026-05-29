@@ -9,8 +9,9 @@ use ep_core::{
 };
 use ep_i18n::{server_fn_error_text, t, tf, use_locale};
 use ep_ui::{
-    use_toast, Card, ChartBars, Direction, EmptyState, ErrorSlot, Icon, Kpi, PageHead,
-    RowDeleteAction, SkeletonCard, SkeletonKpi, TabSpec, Tabs, Tag as UiTag,
+    use_toast, Card, ChartBars, Direction, EmptyState, ErrorSlot, Icon, Kpi, LoadError, PageHead,
+    RowDeleteAction, SkeletonCard, SkeletonKpi, TabSpec, Tabs, Tag as UiTag, FIELD_LABEL,
+    INPUT_STYLE, INPUT_STYLE_MONO,
 };
 use leptos::prelude::*;
 
@@ -31,9 +32,11 @@ struct FinanceActions {
     create_account: ServerAction<CreateAccount>,
     update_account: ServerAction<UpdateAccount>,
     delete_account: ServerAction<DeleteAccount>,
+    set_account_archived: ServerAction<SetAccountArchived>,
     create_category: ServerAction<CreateCategory>,
     update_category: ServerAction<UpdateCategory>,
     delete_category: ServerAction<DeleteCategory>,
+    set_category_archived: ServerAction<SetCategoryArchived>,
     update_txn: ServerAction<UpdateTxn>,
     add_transfer: ServerAction<AddTransfer>,
     create_currency: ServerAction<CreateCurrency>,
@@ -43,7 +46,7 @@ struct FinanceActions {
 }
 
 impl FinanceActions {
-    fn versions(self) -> [usize; 16] {
+    fn versions(self) -> [usize; 18] {
         [
             self.add.version().get(),
             self.delete.version().get(),
@@ -52,9 +55,11 @@ impl FinanceActions {
             self.create_account.version().get(),
             self.update_account.version().get(),
             self.delete_account.version().get(),
+            self.set_account_archived.version().get(),
             self.create_category.version().get(),
             self.update_category.version().get(),
             self.delete_category.version().get(),
+            self.set_category_archived.version().get(),
             self.update_txn.version().get(),
             self.add_transfer.version().get(),
             self.create_currency.version().get(),
@@ -133,9 +138,11 @@ pub fn FinanceView() -> impl IntoView {
     let create_account = ServerAction::<CreateAccount>::new();
     let update_account = ServerAction::<UpdateAccount>::new();
     let delete_account = ServerAction::<DeleteAccount>::new();
+    let set_account_archived = ServerAction::<SetAccountArchived>::new();
     let create_category = ServerAction::<CreateCategory>::new();
     let update_category = ServerAction::<UpdateCategory>::new();
     let delete_category = ServerAction::<DeleteCategory>::new();
+    let set_category_archived = ServerAction::<SetCategoryArchived>::new();
     let update_txn = ServerAction::<UpdateTxn>::new();
     let add_transfer = ServerAction::<AddTransfer>::new();
     let create_currency = ServerAction::<CreateCurrency>::new();
@@ -156,9 +163,11 @@ pub fn FinanceView() -> impl IntoView {
         create_account,
         update_account,
         delete_account,
+        set_account_archived,
         create_category,
         update_category,
         delete_category,
+        set_category_archived,
         update_txn,
         add_transfer,
         create_currency,
@@ -182,7 +191,7 @@ pub fn FinanceView() -> impl IntoView {
     // Refetch when any action's version ticks. We compare per-element via a
     // fixed-size array so the closure stays Send + 'static. (Switching the
     // selected currency refetches on its own — it is the resource's source.)
-    Effect::new(move |prev: Option<[usize; 16]>| {
+    Effect::new(move |prev: Option<[usize; 18]>| {
         let cur = actions.versions();
         if prev.is_some_and(|p| p != cur) {
             ledger.refetch();
@@ -215,6 +224,9 @@ pub fn FinanceView() -> impl IntoView {
     wire_action_toast(delete_account, toast, None, move |_| {
         t(locale, "finance.toast.account_deleted").to_string()
     });
+    wire_action_toast(set_account_archived, toast, None, move |_| {
+        t(locale, "finance.toast.account_archive_changed").to_string()
+    });
     wire_action_toast(create_category, toast, None, move |c: &Category| {
         ep_i18n::tf(locale, "finance.toast.category_added", &[("name", &c.name)])
     });
@@ -223,6 +235,9 @@ pub fn FinanceView() -> impl IntoView {
     });
     wire_action_toast(delete_category, toast, None, move |_| {
         t(locale, "finance.toast.category_deleted").to_string()
+    });
+    wire_action_toast(set_category_archived, toast, None, move |_| {
+        t(locale, "finance.toast.category_archive_changed").to_string()
     });
     wire_action_toast(set_budget, toast, None, move |_| {
         t(locale, "finance.toast.budget_saved").to_string()
@@ -272,7 +287,7 @@ pub fn FinanceView() -> impl IntoView {
                 <SkeletonCard rows=3/>
             }>
                 {move || ledger.get().map(|res| match res {
-                    Err(e) => view! { <div class="card"><div class="card-body">{t(locale, "app.common.load_failed")} " · " {server_fn_error_text(&e)}</div></div> }.into_any(),
+                    Err(e) => view! { <LoadError detail=server_fn_error_text(&e)/> }.into_any(),
                     Ok(data) => render_ledger(data, ui, actions).into_any(),
                 })}
             </Suspense>
@@ -481,8 +496,8 @@ fn render_ledger(data: LedgerData, ui: FinanceUiState, actions: FinanceActions) 
         <Tabs tabs=tabs active=active/>
         {move || match active.get().as_str() {
             "budget" => render_budget(&data_for_budget, actions.set_budget, actions.import_budgets).into_any(),
-            "accounts" => render_accounts(&data_for_accounts, actions.create_account, actions.update_account, actions.delete_account).into_any(),
-            "categories" => render_categories(&data_for_categories, actions.create_category, actions.update_category, actions.delete_category).into_any(),
+            "accounts" => render_accounts(&data_for_accounts, actions.create_account, actions.update_account, actions.delete_account, actions.set_account_archived).into_any(),
+            "categories" => render_categories(&data_for_categories, actions.create_category, actions.update_category, actions.delete_category, actions.set_category_archived).into_any(),
             "reports" => render_reports(&data_for_reports).into_any(),
             "currencies" => render_currencies(&data_for_currencies, actions.create_currency, actions.update_currency, actions.delete_currency, actions.set_primary_currency).into_any(),
             _ => view! {
@@ -572,11 +587,6 @@ fn render_banner(d: &LedgerData) -> impl IntoView {
         </div>
     }
 }
-
-const INPUT_STYLE: &str =
-    "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2)";
-const INPUT_STYLE_MONO: &str = "padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-2);font-family:var(--font-mono)";
-const FIELD_LABEL: &str = "font-size:11px;text-transform:uppercase;letter-spacing:0.06em";
 
 fn currency_caption(c: &Currency) -> String {
     let remark = c.remark.trim();
@@ -671,8 +681,20 @@ fn render_txn_modal(
 
 fn render_new_txn_form(add: ServerAction<AddTxn>, data: &LedgerData) -> impl IntoView {
     let locale = use_locale();
-    let categories = data.categories.clone();
-    let accounts = data.accounts.clone();
+    // Archived accounts / categories stay out of the entry pickers — they're
+    // still in `data.*` so the management tabs can list + unarchive them.
+    let categories: Vec<Category> = data
+        .categories
+        .iter()
+        .filter(|c| !c.archived)
+        .cloned()
+        .collect();
+    let accounts: Vec<Account> = data
+        .accounts
+        .iter()
+        .filter(|a| !a.archived)
+        .cloned()
+        .collect();
     let currency_code = data.currency.code.clone();
     let decimals = data.currency.decimals;
     let amount_label = tf(
@@ -785,6 +807,11 @@ fn render_transfer_form(
             (value, label)
         })
         .collect();
+    // A transfer needs two distinct accounts. With 0 or 1 active account a
+    // self-transfer is the only thing the form could submit, so disable the
+    // submit button and surface a hint (the server still guards via
+    // `add_transfer_inner`, but disabling avoids a pointless round-trip).
+    let too_few_accounts = opts.len() < 2;
     let from_opts = opts.clone();
     let to_opts = opts;
     view! {
@@ -825,7 +852,11 @@ fn render_transfer_form(
                     </label>
                 </div>
                 <p class="mono dim" style="font-size:10.5px;margin:-2px 0 2px">
-                    {t(locale, "finance.card.transfer.hint")}
+                    {if too_few_accounts {
+                        t(locale, "finance.card.transfer.needs_two_accounts")
+                    } else {
+                        t(locale, "finance.card.transfer.hint")
+                    }}
                 </p>
                 <div style="display:grid;grid-template-columns:3fr auto auto;gap:10px;align-items:end">
                     <label class="vstack" style="gap:4px">
@@ -834,7 +865,8 @@ fn render_transfer_form(
                                placeholder=t(locale, "finance.placeholder.transfer_note") style=INPUT_STYLE/>
                     </label>
                     <ErrorSlot action=add_transfer style="align-self:center"/>
-                    <button class="btn primary" type="submit" style="align-self:center">
+                    <button class="btn primary" type="submit" style="align-self:center"
+                            disabled=too_few_accounts>
                         <Icon kind=IconKind::Arrow size=14/>{t(locale, "finance.action.transfer")}
                     </button>
                 </div>
@@ -868,10 +900,22 @@ fn render_ledger_tab(
         .collect();
     let visible_count = txns.len();
     let total_count = d.month.total_txn_count as usize;
-    // Computed once per render of this tab. The parent re-runs render_ledger_tab
-    // whenever the resource refetches (add / delete), so the export link picks
-    // up new rows automatically — no reactive attribute needed.
-    let export_href = csv_data_uri(&txns, decimals);
+    // The export reflects the *filtered* rows, not just whatever the resource
+    // last loaded — the href is a reactive closure that re-derives the CSV
+    // from the same `ResolvedFilters` the table body uses, so toggling a
+    // filter re-encodes the data URI in lock-step with the visible rows. The
+    // parent re-runs render_ledger_tab on each refetch (add / delete), giving
+    // a fresh `txns` capture; the closure re-fires on every filter change.
+    let txns_for_export = txns.clone();
+    let export_href = move || {
+        let f = ResolvedFilters::read(filters);
+        let filtered: Vec<Txn> = txns_for_export
+            .iter()
+            .filter(|t| f.matches(t))
+            .cloned()
+            .collect();
+        csv_data_uri(&filtered, decimals)
+    };
     // Same lifetime story for rule suggestions: compute now while we still
     // hold `&d`, hand the owned `Vec<Suggestion>` to the view macro.
     let suggestions = crate::suggestions::compute_suggestions(d, locale);
@@ -905,7 +949,7 @@ fn render_ledger_tab(
                                 on:change=move |ev| filters.category.set(event_target_value(&ev))
                                 style=format!("min-width:140px;{}", INPUT_STYLE)>
                             <option value="">{t(locale, "finance.filter.all_categories")}</option>
-                            {cat_options.iter().map(|c| {
+                            {cat_options.iter().filter(|c| !c.archived).map(|c| {
                                 let code = c.code.clone();
                                 let label = category_display(c);
                                 view! { <option value=code>{label}</option> }
@@ -941,21 +985,10 @@ fn render_ledger_tab(
                         </thead>
                         <tbody>
                             {move || {
-                                let mq = filters.merchant.get().to_lowercase();
-                                let cq = filters.category.get();
-                                // Date filter: convert YYYY-MM-DD to start-of-day unix
-                                // seconds, treating empty inputs as -∞ / +∞. The end
-                                // bound includes the entire end day (24h window).
-                                let from_ts = parse_date_floor(&filters.date_from.get());
-                                let to_ts = parse_date_ceiling(&filters.date_to.get());
+                                let resolved = ResolvedFilters::read(filters);
                                 let cat_lookup = &cat_lookup;
                                 txns.iter()
-                                    .filter(|t| {
-                                        (mq.is_empty() || t.merchant.to_lowercase().contains(&mq))
-                                        && (cq.is_empty() || t.category_code == cq)
-                                        && from_ts.map(|f| t.occurred_at >= f).unwrap_or(true)
-                                        && to_ts.map(|to| t.occurred_at <= to).unwrap_or(true)
-                                    })
+                                    .filter(|t| resolved.matches(t))
                                     .cloned()
                                     .map(|t| render_txn_row(t, TxnRowContext {
                                         cat_lookup,
@@ -1440,7 +1473,15 @@ fn render_budget(
     let symbol = d.currency.symbol.clone();
     let currency_code = d.currency.code.clone();
     let period = m.period.clone();
-    let categories_for_form = d.categories.clone();
+    // The budget editor picker only offers active categories — archived ones
+    // are still rendered in their own management table where they can be
+    // unarchived.
+    let categories_for_form: Vec<Category> = d
+        .categories
+        .iter()
+        .filter(|c| !c.archived)
+        .cloned()
+        .collect();
     // Owned-string lookup so the closures below don't capture a borrow into
     // a Vec the view! macro will move.
     let cat_lookup: std::collections::HashMap<String, (String, String)> = d
@@ -1649,26 +1690,77 @@ fn parse_period(period: &str) -> Option<(i32, u32)> {
     Some((y, m))
 }
 
+/// Archive / unarchive toggle for an account or category management row.
+///
+/// `value` is the `"{currency}/{code}"` reference and `field` the hidden-input
+/// name the matching server fn expects (`account_ref` / `category_ref`). When
+/// `archived` is already set we render an "Unarchive" submit; otherwise an
+/// "Archive" button. The submitted `archived` value is the *target* state.
+/// Generic bounds mirror `ep_ui::RowDeleteAction` so any `ServerAction` over a
+/// form-encoded server fn works.
+fn render_archive_action<S>(
+    action: ServerAction<S>,
+    value: String,
+    field: &'static str,
+    archived: bool,
+) -> impl IntoView
+where
+    S: leptos::server_fn::ServerFn<InputEncoding = leptos::server_fn::codec::PostUrl>
+        + Clone
+        + Send
+        + Sync
+        + 'static
+        + serde::de::DeserializeOwned,
+    <S as leptos::server_fn::ServerFn>::Output: Send + Sync,
+    <S as leptos::server_fn::ServerFn>::Error: Send + Sync,
+    <<<S as leptos::server_fn::ServerFn>::Client as leptos::server_fn::client::Client<
+        <S as leptos::server_fn::ServerFn>::Error,
+    >>::Request as leptos::server_fn::request::ClientReq<
+        <S as leptos::server_fn::ServerFn>::Error,
+    >>::FormData: From<leptos::web_sys::FormData>,
+{
+    let locale = use_locale();
+    let label = if archived {
+        t(locale, "finance.action.unarchive")
+    } else {
+        t(locale, "finance.action.archive")
+    };
+    // Submit the opposite of the current state.
+    let target = if archived { "0" } else { "1" };
+    view! {
+        <ActionForm action=action attr:style="display:inline">
+            <input type="hidden" name=field value=value/>
+            <input type="hidden" name="archived" value=target/>
+            <button class="btn sm ghost" type="submit">{label}</button>
+        </ActionForm>
+    }
+}
+
 fn render_accounts(
     d: &LedgerData,
     create_account: ServerAction<CreateAccount>,
     update_account: ServerAction<UpdateAccount>,
     delete_account: ServerAction<DeleteAccount>,
+    set_account_archived: ServerAction<SetAccountArchived>,
 ) -> impl IntoView {
     let decimals = d.currency.decimals;
     let symbol = d.currency.symbol.clone();
     let currency_code = d.currency.code.clone();
-    let pairs: Vec<(Account, AccountStats)> = d
+    // Active accounts first, archived sink to the bottom of the grid so the
+    // management view stays focused on live accounts while still surfacing
+    // archived ones (each carries an unarchive action).
+    let mut pairs: Vec<(Account, AccountStats)> = d
         .accounts
         .iter()
         .cloned()
         .zip(d.account_stats.iter().cloned())
         .collect();
+    pairs.sort_by_key(|(a, _)| a.archived);
     view! {
         {render_account_manager(create_account, currency_code.clone(), decimals)}
         <div class="grid-3" style="margin-top:20px">
             {pairs.into_iter().map(|(a, s)| {
-                render_account_card(a, s, update_account, delete_account, decimals, symbol.clone())
+                render_account_card(a, s, update_account, delete_account, set_account_archived, decimals, symbol.clone())
             }).collect_view()}
         </div>
     }
@@ -1757,11 +1849,13 @@ fn render_account_card(
     s: AccountStats,
     update_account: ServerAction<UpdateAccount>,
     delete_account: ServerAction<DeleteAccount>,
+    set_account_archived: ServerAction<SetAccountArchived>,
     decimals: u8,
     symbol: String,
 ) -> impl IntoView {
     let locale = use_locale();
     let tone = Tone::parse(&a.tone);
+    let archived = a.archived;
     let last_seen = match s.last_seen_at {
         Some(ts) => tf(
             locale,
@@ -1785,6 +1879,7 @@ fn render_account_card(
     let card_class = format!("account-card type-{}", type_slug);
     let balance_text = format!("{}{}", symbol, fmt_minor(a.balance, decimals));
     let delete_ref = format!("{}/{}", a.currency_code, a.code);
+    let archive_ref = delete_ref.clone();
     // ChartBars takes f64 heights; accounting amounts stay exact elsewhere.
     let history: Vec<f64> = s.history_14d.iter().map(|v| v.to_f64()).collect();
     let confirm_msg = tf(
@@ -1799,6 +1894,9 @@ fn render_account_card(
             </div>
             <div class="hstack" style="margin-top:10px;gap:10px">
                 <UiTag tone=tone>{a.r#type.clone()}</UiTag>
+                {archived.then(|| view! {
+                    <UiTag>{t(locale, "finance.account.archived_badge")}</UiTag>
+                })}
                 <span class="mono dim" style="font-size:10.5px">{last_seen}</span>
             </div>
             <div style="margin-top:14px">
@@ -1844,6 +1942,7 @@ fn render_account_card(
                         </div>
                     </ActionForm>
                 </details>
+                {render_archive_action(set_account_archived, archive_ref, "account_ref", archived)}
                 <RowDeleteAction action=delete_account value=delete_ref field="account_ref"
                                  confirm=confirm_msg label=t(locale, "finance.action.delete")/>
             </div>
@@ -1856,13 +1955,20 @@ fn render_categories(
     create_category: ServerAction<CreateCategory>,
     update_category: ServerAction<UpdateCategory>,
     delete_category: ServerAction<DeleteCategory>,
+    set_category_archived: ServerAction<SetCategoryArchived>,
 ) -> impl IntoView {
     let locale = use_locale();
     let currency_code = d.currency.code.clone();
-    // Sort by sort_order then code so the management table matches what the
-    // dropdown shows. Cloning is fine — the categories vec is small (≤ ~20).
+    // Sort by archived (active first) then sort_order then code so the
+    // management table matches what the dropdown shows and archived rows sink
+    // to the bottom. Cloning is fine — the categories vec is small (≤ ~20).
     let mut cats = d.categories.clone();
-    cats.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.code.cmp(&b.code)));
+    cats.sort_by(|a, b| {
+        a.archived
+            .cmp(&b.archived)
+            .then(a.sort_order.cmp(&b.sort_order))
+            .then(a.code.cmp(&b.code))
+    });
     let usage = d.category_usage.clone();
     let next_sort = cats.iter().map(|c| c.sort_order).max().unwrap_or(0) + 1;
     let open = RwSignal::new(false);
@@ -1954,7 +2060,7 @@ fn render_categories(
                         </tr>
                     </thead>
                     <tbody>
-                        {cats.into_iter().map(|c| render_category_row(c, &usage, update_category, delete_category)).collect_view()}
+                        {cats.into_iter().map(|c| render_category_row(c, &usage, update_category, delete_category, set_category_archived)).collect_view()}
                     </tbody>
                 </table>
             </div>
@@ -1970,9 +2076,11 @@ fn render_category_row(
     usage: &std::collections::HashMap<String, i64>,
     update_category: ServerAction<UpdateCategory>,
     delete_category: ServerAction<DeleteCategory>,
+    set_category_archived: ServerAction<SetCategoryArchived>,
 ) -> impl IntoView {
     let locale = use_locale();
     let tone_enum = Tone::parse(&c.tone);
+    let archived = c.archived;
     let usage_count = usage.get(&c.code).copied().unwrap_or(0);
     let confirm_msg = tf(
         locale,
@@ -1992,15 +2100,23 @@ fn render_category_row(
         c.icon.clone()
     };
     let delete_ref = format!("{}/{}", c.currency_code, c.code);
+    let archive_ref = delete_ref.clone();
     let display_tone_label = if c.tone.is_empty() {
         "—".to_string()
     } else {
         c.tone.clone()
     };
+    // Dim archived rows; the badge after the name makes the state explicit.
+    let row_style = if archived { "opacity:0.55" } else { "" };
+    let archived_badge = archived.then(|| {
+        view! {
+            " " <span class="tag" style="font-size:10px">{t(locale, "finance.account.archived_badge")}</span>
+        }
+    });
     view! {
-        <tr>
+        <tr style=row_style>
             <td style="font-size:17px">{display_icon}</td>
-            <td>{display_name}</td>
+            <td>{display_name}{archived_badge}</td>
             <td>
                 <UiTag tone=tone_enum>{display_tone_label}</UiTag>
             </td>
@@ -2044,6 +2160,7 @@ fn render_category_row(
                             </div>
                         </ActionForm>
                     </details>
+                    {render_archive_action(set_category_archived, archive_ref, "category_ref", archived)}
                     <RowDeleteAction action=delete_category value=delete_ref field="category_ref"
                                      confirm=confirm_msg label=t(locale, "finance.action.delete")/>
                 </div>
@@ -2433,6 +2550,37 @@ fn next_month_plan(d: &LedgerData) -> Vec<(String, String, MinorAmount)> {
 /// Parse a `YYYY-MM-DD` string into a unix-second timestamp at the START of
 /// that day in UTC. Empty / malformed input yields `None`. Pure math, safe
 /// on wasm32.
+/// Snapshot of the ledger filter inputs, resolved to comparable values once
+/// per reactive read. Shared by the table body and the CSV export so both show
+/// exactly the same row set.
+struct ResolvedFilters {
+    merchant: String,
+    category: String,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+}
+
+impl ResolvedFilters {
+    fn read(filters: LedgerFilters) -> Self {
+        Self {
+            merchant: filters.merchant.get().to_lowercase(),
+            category: filters.category.get(),
+            // Date filter: convert YYYY-MM-DD to start-of-day unix seconds,
+            // treating empty inputs as -∞ / +∞. The end bound includes the
+            // entire end day (24h window).
+            from_ts: parse_date_floor(&filters.date_from.get()),
+            to_ts: parse_date_ceiling(&filters.date_to.get()),
+        }
+    }
+
+    fn matches(&self, t: &Txn) -> bool {
+        (self.merchant.is_empty() || t.merchant.to_lowercase().contains(&self.merchant))
+            && (self.category.is_empty() || t.category_code == self.category)
+            && self.from_ts.map(|f| t.occurred_at >= f).unwrap_or(true)
+            && self.to_ts.map(|to| t.occurred_at <= to).unwrap_or(true)
+    }
+}
+
 fn parse_date_floor(s: &str) -> Option<i64> {
     parse_ymd(s).and_then(|(y, m, d)| date_to_unix(y, m, d, 0))
 }

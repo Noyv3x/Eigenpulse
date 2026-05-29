@@ -162,6 +162,25 @@ async fn fetch_balance(pool: &SqlitePool, code: &str) -> anyhow::Result<Option<f
     Ok(bal.map(|b| b.to_f64() / 100.0))
 }
 
+/// Currency-aware balance read in *exact minor units* (no f64 scaling). The
+/// cross-currency transfer test mixes currencies with different `decimals`, so
+/// it must assert on raw minor amounts per leg rather than a CNY-scaled `f64`.
+/// Returns `None` if the row is absent.
+async fn fetch_balance_minor(
+    pool: &SqlitePool,
+    currency: &str,
+    code: &str,
+) -> anyhow::Result<Option<ep_core::MinorAmount>> {
+    let bal: Option<ep_core::MinorAmount> = sqlx::query_scalar(
+        "SELECT balance FROM fin_account WHERE currency_code = ?1 AND code = ?2",
+    )
+    .bind(currency)
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
+    Ok(bal)
+}
+
 /// Count the number of `fin_txn` rows. Used to assert "deletion took
 /// effect" / "transfer added exactly two rows".
 async fn count_txns(pool: &SqlitePool) -> anyhow::Result<i64> {
@@ -643,6 +662,64 @@ async fn add_txn_inner_rejects_invalid_contract_before_insert() {
     assert_eq!(fetch_balance(&pool, "ACC-T").await.unwrap(), Some(100.0));
 }
 
+/// Auto code-generation + INSERT now run inside one transaction (TOCTOU fix).
+/// The externally-observable contract is unchanged: an empty `code` yields a
+/// slug derived from the name and the row is committed and readable.
+#[tokio::test]
+async fn create_account_auto_generates_code_atomically() {
+    let pool = make_test_pool().await.expect("pool");
+
+    let acc = ep_finance::create_account_inner(
+        &pool,
+        "CNY".into(),
+        "".into(), // empty → auto code-gen inside the tx
+        "Cash Wallet".into(),
+        "Cash".into(),
+        "".into(),
+        amt(0),
+    )
+    .await
+    .expect("create account");
+    assert_eq!(acc.code, "CASH-WALLET", "slug derived from the name");
+
+    // The row committed and is readable on a fresh query.
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fin_account WHERE currency_code='CNY' AND code='CASH-WALLET'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
+/// Same TOCTOU fix for categories: empty `code` auto-generates a slug and the
+/// row commits atomically.
+#[tokio::test]
+async fn create_category_auto_generates_code_atomically() {
+    let pool = make_test_pool().await.expect("pool");
+
+    let cat = ep_finance::create_category_inner(
+        &pool,
+        "CNY".into(),
+        "".into(),
+        "Food".into(),
+        "🍜".into(),
+        "".into(),
+        1,
+    )
+    .await
+    .expect("create category");
+    assert_eq!(cat.code, "FOOD");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fin_category WHERE currency_code='CNY' AND code='FOOD'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+}
+
 #[tokio::test]
 async fn delete_unused_account_removes_row() {
     let pool = make_test_pool().await.expect("pool");
@@ -735,6 +812,63 @@ async fn delete_account_rejects_rows_with_transactions() {
     let res = ep_finance::delete_account_inner(&pool, "CNY".into(), "ACC-BUSY".into()).await;
     assert!(res.is_err(), "account with txns must not be deleted");
     assert_eq!(fetch_balance(&pool, "ACC-BUSY").await.unwrap(), Some(-8.0));
+}
+
+/// Archive is the graceful alternative to a delete that's blocked by
+/// dependencies: an account with transactions can't be deleted but it can be
+/// archived (and unarchived), and the row / balance survive untouched.
+#[tokio::test]
+async fn archive_and_unarchive_account_round_trips() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-BUSY", 0.0).await.unwrap();
+    seed_category(&pool, "EXP", "Expense").await.unwrap();
+    seed_txn_directly(&pool, "FIN-ARC-A", "ACC-BUSY", "EXP", -8.0, "exp")
+        .await
+        .unwrap();
+
+    // Delete is refused (it has a transaction)...
+    assert!(
+        ep_finance::delete_account_inner(&pool, "CNY".into(), "ACC-BUSY".into())
+            .await
+            .is_err(),
+        "account with txns must not be deleted"
+    );
+    // ...but archive succeeds and is reflected in the column.
+    ep_finance::set_account_archived_inner(&pool, "CNY".into(), "ACC-BUSY".into(), true)
+        .await
+        .expect("archive account");
+    let archived: bool = sqlx::query_scalar(
+        "SELECT archived FROM fin_account WHERE currency_code='CNY' AND code='ACC-BUSY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(archived, "account should be archived");
+    // Balance / row are untouched.
+    assert_eq!(fetch_balance(&pool, "ACC-BUSY").await.unwrap(), Some(-8.0));
+
+    ep_finance::set_account_archived_inner(&pool, "CNY".into(), "ACC-BUSY".into(), false)
+        .await
+        .expect("unarchive account");
+    let archived: bool = sqlx::query_scalar(
+        "SELECT archived FROM fin_account WHERE currency_code='CNY' AND code='ACC-BUSY'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!archived, "account should be active again");
+}
+
+#[tokio::test]
+async fn archive_account_reports_missing_row() {
+    let pool = make_test_pool().await.expect("pool");
+    let res =
+        ep_finance::set_account_archived_inner(&pool, "CNY".into(), "ACC-NOPE".into(), true).await;
+    assert!(res.is_err(), "archiving a non-existent account must error");
+    assert_eq!(
+        server_fn_error_text_en(&res.unwrap_err()),
+        "Account 'ACC-NOPE' not found"
+    );
 }
 
 #[tokio::test]
@@ -976,6 +1110,58 @@ async fn delete_category_rejects_rows_with_transactions() {
             .await
             .unwrap();
     assert_eq!(cat_exists, 1);
+}
+
+#[tokio::test]
+async fn archive_and_unarchive_category_round_trips() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-CAT", 0.0).await.unwrap();
+    seed_category(&pool, "CAT", "Category").await.unwrap();
+    seed_txn_directly(&pool, "FIN-ARC-C", "ACC-CAT", "CAT", -8.0, "exp")
+        .await
+        .unwrap();
+
+    // A category in use can't be deleted but can be archived.
+    assert!(
+        ep_finance::delete_category_inner(&pool, "CNY".into(), "CAT".into())
+            .await
+            .is_err()
+    );
+    ep_finance::set_category_archived_inner(&pool, "CNY".into(), "CAT".into(), true)
+        .await
+        .expect("archive category");
+    let archived: bool = sqlx::query_scalar(
+        "SELECT archived FROM fin_category WHERE currency_code='CNY' AND code='CAT'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(archived);
+
+    ep_finance::set_category_archived_inner(&pool, "CNY".into(), "CAT".into(), false)
+        .await
+        .expect("unarchive category");
+    let archived: bool = sqlx::query_scalar(
+        "SELECT archived FROM fin_category WHERE currency_code='CNY' AND code='CAT'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!archived);
+}
+
+/// The reserved TFR transfer category is module plumbing — archiving it would
+/// break transfers, so it is rejected just like delete / update.
+#[tokio::test]
+async fn archive_category_rejects_reserved_transfer_code() {
+    let pool = make_test_pool().await.expect("pool");
+    let res =
+        ep_finance::set_category_archived_inner(&pool, "CNY".into(), "TFR".into(), true).await;
+    assert!(res.is_err(), "TFR category must not be archivable");
+    assert_eq!(
+        server_fn_error_text_en(&res.unwrap_err()),
+        "TFR is a reserved transfer category and cannot be edited or deleted"
+    );
 }
 
 // parse_occurred_at three-state: empty / valid / malformed.
@@ -1562,6 +1748,36 @@ async fn add_transfer_trims_optional_note() {
     assert_eq!(blank_from.note, None);
 }
 
+/// A transfer whose two legs are the same currency + account is a no-op
+/// self-transfer; `add_transfer_inner` must reject it before writing any rows
+/// (the form-side disable only covers the structural "fewer than two accounts"
+/// case, so the server guard is the real backstop).
+#[tokio::test]
+async fn add_transfer_rejects_self_transfer() {
+    let pool = make_test_pool().await.expect("pool");
+    seed_account(&pool, "ACC-FROM", 1000.0).await.unwrap();
+    seed_category(&pool, "TFR", "Transfer").await.unwrap();
+
+    let mut fields = transfer_fields(10_000, 10_000, None, 1_700_000_000);
+    fields.to_account = "ACC-FROM".into();
+
+    let res = ep_finance::add_transfer_inner(&pool, fields).await;
+    assert!(res.is_err(), "self-transfer must be rejected");
+    assert_eq!(
+        server_fn_error_text_en(&res.unwrap_err()),
+        "From-account and to-account must differ"
+    );
+    assert_eq!(
+        count_txns(&pool).await.unwrap(),
+        0,
+        "no rows written on a rejected self-transfer"
+    );
+    assert_eq!(
+        fetch_balance(&pool, "ACC-FROM").await.unwrap(),
+        Some(1000.0)
+    );
+}
+
 /// Bonus assertion — deleting the *to* leg (instead of the from) must work
 /// the same way. The cascade walks `linked_doc_id`, which is only set on
 /// the from-side row; the to-side row points back via the symmetric
@@ -1972,6 +2188,168 @@ async fn delete_rejects_when_multiple_distinct_tfr_partners() {
         fetch_balance(&pool, "ACC-FROM").await.unwrap(),
         Some(900.0),
         "ACC-FROM stays at transferred-out balance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-currency transfer: the two legs may live in different currencies with
+// different `decimals`, and each leg carries its own explicit minor-unit
+// amount (there is no FX conversion — the operator supplies both sides). The
+// existing transfer tests all hardcode dual-CNY equal amounts, so this is the
+// only coverage that the from/to currency + amount actually flow through
+// independently. Asserts both legs persist under their own currency's TFR
+// category, both balances move by the correct per-currency minor amount, the
+// `tfr-pair` link is intact, and deleting one leg cleanly reverses BOTH.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cross_currency_transfer_persists_independent_amounts_and_reverses_on_delete() {
+    let pool = make_test_pool().await.expect("pool");
+
+    // CNY is the seeded baseline currency (decimals = 2). `make_test_pool`
+    // wipes fin_category, so re-seed CNY's TFR category by hand. The CNY
+    // source account starts at ¥1000.00 = 100_000 minor units.
+    seed_account(&pool, "ACC-CNY", 1000.0).await.unwrap();
+    seed_category(&pool, "TFR", "Transfer").await.unwrap();
+
+    // Register USD with 2 decimals. `create_currency_inner` auto-creates the
+    // USD TFR category in the same tx, so transfers can file the to-leg there.
+    let usd = ep_finance::create_currency_inner(
+        &pool,
+        "USD".into(),
+        "$".into(),
+        "US Dollar".into(),
+        2,
+        1,
+    )
+    .await
+    .expect("create USD currency");
+    assert_eq!(usd.decimals, 2);
+
+    // USD destination account opens empty.
+    ep_finance::create_account_inner(
+        &pool,
+        "USD".into(),
+        "ACC-USD".into(),
+        "Brokerage USD".into(),
+        "Investment".into(),
+        "violet".into(),
+        amt(0),
+    )
+    .await
+    .expect("create USD account");
+
+    // Move ¥700.00 out of the CNY account and credit $96.50 into the USD
+    // account — deliberately *different* per-leg amounts (no 1:1 mapping) to
+    // prove from_amount and to_amount flow through independently.
+    let from_minor = 70_000_i64; // ¥700.00
+    let to_minor = 9_650_i64; // $96.50
+    let occurred_at = 1_700_000_000_i64;
+    let (from_txn, to_txn) = ep_finance::add_transfer_inner(
+        &pool,
+        ep_finance::AddTransferFields {
+            from_currency: "CNY".into(),
+            from_account: "ACC-CNY".into(),
+            to_currency: "USD".into(),
+            to_account: "ACC-USD".into(),
+            from_amount: amt(from_minor),
+            to_amount: amt(to_minor),
+            note: Some("rebalance into USD".into()),
+            occurred_at,
+        },
+    )
+    .await
+    .expect("cross-currency transfer ok");
+
+    // Both legs persisted as exactly two fin_txn rows.
+    assert_eq!(
+        count_txns(&pool).await.unwrap(),
+        2,
+        "cross-currency transfer creates 2 fin_txn rows"
+    );
+
+    // Each leg is filed under its own currency + the reserved TFR category,
+    // tag='tfr', sharing the caller's occurred_at, with the from-leg debited
+    // and the to-leg credited in their own currency's minor units.
+    assert_eq!(from_txn.currency_code, "CNY");
+    assert_eq!(to_txn.currency_code, "USD");
+    assert_eq!(from_txn.category_code, "TFR");
+    assert_eq!(to_txn.category_code, "TFR");
+    assert_eq!(from_txn.tag, "tfr");
+    assert_eq!(to_txn.tag, "tfr");
+    assert_eq!(from_txn.amount, -from_minor, "from-leg debited from_amount");
+    assert_eq!(to_txn.amount, to_minor, "to-leg credited to_amount");
+    assert_eq!(from_txn.occurred_at, occurred_at);
+    assert_eq!(to_txn.occurred_at, occurred_at);
+    // The note is recorded on the from-leg only (the to-leg row stores NULL,
+    // mirroring the single-currency transfer contract).
+    assert_eq!(from_txn.note.as_deref(), Some("rebalance into USD"));
+    assert_eq!(to_txn.note, None);
+
+    // Persisted rows confirm the legs landed under their own currency.
+    let from_persisted: (String, ep_core::MinorAmount) =
+        sqlx::query_as("SELECT currency_code, amount FROM fin_txn WHERE doc_id = ?1")
+            .bind(&from_txn.doc_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(from_persisted, ("CNY".into(), amt(-from_minor)));
+    let to_persisted: (String, ep_core::MinorAmount) =
+        sqlx::query_as("SELECT currency_code, amount FROM fin_txn WHERE doc_id = ?1")
+            .bind(&to_txn.doc_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(to_persisted, ("USD".into(), amt(to_minor)));
+
+    // Balances moved by the correct per-currency minor amount: CNY down by
+    // 70_000 (¥1000.00 → ¥300.00), USD up by 9_650 ($0 → $96.50).
+    assert_eq!(
+        fetch_balance_minor(&pool, "CNY", "ACC-CNY").await.unwrap(),
+        Some(amt(100_000 - from_minor)),
+        "CNY source debited by from_amount"
+    );
+    assert_eq!(
+        fetch_balance_minor(&pool, "USD", "ACC-USD").await.unwrap(),
+        Some(amt(to_minor)),
+        "USD destination credited by to_amount"
+    );
+
+    // The transfer pairing is intact: two symmetric tfr-pair links spanning
+    // the two currencies' docs.
+    assert_eq!(
+        count_links_by_kind(&pool, "tfr-pair").await.unwrap(),
+        2,
+        "two symmetric tfr-pair links across the currency boundary"
+    );
+
+    // Deleting one leg (the from-leg) cleanly reverses BOTH legs across the
+    // currency boundary — both rows gone, both links gone, both balances
+    // restored in their own currency.
+    let deleted = ep_finance::delete_txn_inner(&pool, &from_txn.doc_id)
+        .await
+        .expect("cross-currency cascade delete ok");
+    assert!(deleted);
+
+    assert_eq!(
+        count_txns(&pool).await.unwrap(),
+        0,
+        "deleting one leg cascade-deletes the cross-currency partner"
+    );
+    assert_eq!(
+        count_links_by_kind(&pool, "tfr-pair").await.unwrap(),
+        0,
+        "both tfr-pair links cleaned up"
+    );
+    assert_eq!(
+        fetch_balance_minor(&pool, "CNY", "ACC-CNY").await.unwrap(),
+        Some(amt(100_000)),
+        "CNY source balance fully restored"
+    );
+    assert_eq!(
+        fetch_balance_minor(&pool, "USD", "ACC-USD").await.unwrap(),
+        Some(amt(0)),
+        "USD destination balance fully restored"
     );
 }
 

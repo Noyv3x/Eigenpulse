@@ -508,6 +508,9 @@ struct PatchAccountInput {
     #[serde(rename = "type")]
     pub r#type: Option<String>,
     pub tone: Option<String>,
+    /// Optional archive toggle. When present, the flag is applied after the
+    /// field update so a single PATCH can both rename and (un)archive.
+    pub archived: Option<bool>,
 }
 
 async fn patch_account(
@@ -539,8 +542,8 @@ async fn patch_account(
     // PATCH always leaves the code in place even when the name changes.
     let acc = update_account_inner_with(
         &state.db,
-        currency_code,
-        code,
+        currency_code.clone(),
+        code.clone(),
         input.name.unwrap_or(cur_name),
         input.r#type.unwrap_or(cur_type),
         input.tone.unwrap_or(cur_tone),
@@ -548,6 +551,16 @@ async fn patch_account(
     )
     .await
     .map_err(server_err_to_response)?;
+    // Apply the archive toggle (if requested) after the field update so the
+    // returned row reflects the final state.
+    if let Some(archived) = input.archived {
+        crate::server_fns::set_account_archived_inner(&state.db, currency_code, code, archived)
+            .await
+            .map_err(server_err_to_response)?;
+        let mut acc = acc;
+        acc.archived = archived;
+        return Ok(Json(acc));
+    }
     Ok(Json(acc))
 }
 
@@ -658,6 +671,8 @@ struct PatchCategoryInput {
     pub icon: Option<String>,
     pub tone: Option<String>,
     pub sort_order: Option<i64>,
+    /// Optional archive toggle, applied after the field update.
+    pub archived: Option<bool>,
 }
 
 async fn patch_category(
@@ -686,8 +701,8 @@ async fn patch_category(
     };
     let cat = update_category_inner_with(
         &state.db,
-        currency_code,
-        code,
+        currency_code.clone(),
+        code.clone(),
         input.name.unwrap_or(cur_name),
         input.icon.unwrap_or(cur_icon),
         input.tone.unwrap_or(cur_tone),
@@ -696,6 +711,14 @@ async fn patch_category(
     )
     .await
     .map_err(server_err_to_response)?;
+    if let Some(archived) = input.archived {
+        crate::server_fns::set_category_archived_inner(&state.db, currency_code, code, archived)
+            .await
+            .map_err(server_err_to_response)?;
+        let mut cat = cat;
+        cat.archived = archived;
+        return Ok(Json(cat));
+    }
     Ok(Json(cat))
 }
 

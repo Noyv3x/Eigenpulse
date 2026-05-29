@@ -26,7 +26,36 @@ pub(crate) struct BookInput {
     pub(crate) name: String,
     pub(crate) author: Option<String>,
     pub(crate) status: String,
-    pub(crate) progress: f64,
+}
+
+/// Default progress for a freshly-flagged `reading` book when no prior
+/// progress exists. Matches the midpoint `cycle_book_status` bumps a book to
+/// when it transitions `todo -> reading`.
+#[cfg(feature = "ssr")]
+pub(crate) const READING_DEFAULT_PROGRESS: f64 = 0.5;
+
+/// Canonical `status -> progress` mapping, the single source of truth shared by
+/// every write path (`add_book`, `update_book`, `cycle_book_status`). The
+/// `existing` argument is the book's current stored progress, if any:
+///
+/// * `todo`    -> `0.0` (queued, not started)
+/// * `done`    -> `1.0` (finished)
+/// * `reading` -> preserve `existing` when supplied (so updating an in-progress
+///   book never silently resets its position), otherwise the
+///   [`READING_DEFAULT_PROGRESS`] midpoint for a newly-started book.
+///
+/// Without this, `update_book` re-derived progress purely from status and
+/// silently zeroed a `reading` book's progress on every edit — a contradiction
+/// visible through `GET /book` and the dashboard ring.
+#[cfg(feature = "ssr")]
+pub(crate) fn progress_for_status(status: &str, existing: Option<f64>) -> f64 {
+    match status {
+        "done" => 1.0,
+        "reading" => existing
+            .map(normalize_progress)
+            .unwrap_or(READING_DEFAULT_PROGRESS),
+        _ => 0.0,
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -70,13 +99,11 @@ pub(crate) fn normalize_book_input(
         "" => "todo".to_string(),
         other => return Err(err_with("learning.err.status_invalid", other)),
     };
-    let progress = if status == "done" { 1.0 } else { 0.0 };
 
     Ok(BookInput {
         name: name.to_string(),
         author,
         status,
-        progress,
     })
 }
 
@@ -278,54 +305,6 @@ pub(crate) async fn add_course_inner(
         due_on: input.due_on,
         tone: input.tone,
     })
-}
-
-#[server(
-    UpdateCourseProgress,
-    "/api/_internal/lrn",
-    "Url",
-    "update_course_progress"
-)]
-pub async fn update_course_progress(
-    doc_id: String,
-    progress_pct: f64,
-) -> Result<Course, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        ep_auth::require_user_for_server_fn().await?;
-        let doc_id = normalize_doc_id(&doc_id)?;
-        let progress = normalize_progress_pct(progress_pct)?;
-        let st = ep_core::app_state_context()?;
-        let mut tx = st.db.begin().await.map_err(server_err)?;
-        let row: Option<Course> = sqlx::query_as(
-            "UPDATE lrn_course
-                SET progress = ?1
-              WHERE doc_id = ?2 AND archived = 0
-              RETURNING doc_id, name, provider, progress, due_on, tone",
-        )
-        .bind(progress)
-        .bind(&doc_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(server_err)?;
-        let mut course = match row {
-            Some(row) => row,
-            None => return Err(err_with("learning.err.course_not_found", &doc_id)),
-        };
-        sqlx::query("UPDATE activity SET status = ?1 WHERE module = 'LRN' AND doc_id = ?2")
-            .bind(format!("{:.0}%", progress * 100.0))
-            .bind(&doc_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-        tx.commit().await.map_err(server_err)?;
-        course.progress = normalize_progress(course.progress);
-        Ok(course)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        Err(server_err("ssr-only"))
-    }
 }
 
 #[server(UpdateCourse, "/api/_internal/lrn", "Url", "update_course")]
@@ -551,6 +530,8 @@ pub(crate) async fn add_book_inner(
     )
     .await
     .map_err(server_err)?;
+    // New book: no prior progress, so `reading` lands on the default midpoint.
+    let progress = progress_for_status(&input.status, None);
     sqlx::query(
         "INSERT INTO lrn_book (doc_id, name, author, status, progress) VALUES (?1, ?2, ?3, ?4, ?5)",
     )
@@ -558,7 +539,7 @@ pub(crate) async fn add_book_inner(
     .bind(&input.name)
     .bind(&input.author)
     .bind(&input.status)
-    .bind(input.progress)
+    .bind(progress)
     .execute(&mut *tx)
     .await
     .map_err(server_err)?;
@@ -579,7 +560,7 @@ pub(crate) async fn add_book_inner(
         name: input.name,
         author: input.author,
         status: input.status,
-        progress: input.progress,
+        progress,
     })
 }
 
@@ -611,6 +592,18 @@ pub(crate) async fn update_book_inner(
     input: BookInput,
 ) -> Result<Book, ServerFnError> {
     let mut tx = pool.begin().await.map_err(server_err)?;
+    // Read the current progress first so the canonical `status -> progress`
+    // mapping can preserve a `reading` book's position instead of zeroing it.
+    let existing: Option<f64> =
+        sqlx::query_scalar("SELECT progress FROM lrn_book WHERE doc_id = ?1")
+            .bind(doc_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(server_err)?;
+    let Some(existing) = existing else {
+        return Err(err_with("learning.err.book_not_found", doc_id));
+    };
+    let progress = progress_for_status(&input.status, Some(existing));
     let row: Option<Book> = sqlx::query_as(
         "UPDATE lrn_book
             SET name = ?1,
@@ -623,7 +616,7 @@ pub(crate) async fn update_book_inner(
     .bind(&input.name)
     .bind(&input.author)
     .bind(&input.status)
-    .bind(input.progress)
+    .bind(progress)
     .bind(doc_id)
     .fetch_optional(&mut *tx)
     .await
@@ -657,12 +650,15 @@ pub async fn cycle_book_status(doc_id: String) -> Result<String, ServerFnError> 
         let st = ep_core::app_state_context()?;
         let mut tx = st.db.begin().await.map_err(server_err)?;
         // status cycle: todo -> reading -> done -> todo
-        // progress is bumped to mirror the next state:
-        //   reading (was 'todo')      -> 0.5  (in-progress; arbitrary midpoint)
+        // progress is bumped to mirror the NEXT state, kept in lock-step with
+        // the canonical `progress_for_status` mapping:
+        //   reading (was 'todo')      -> 0.5  (READING_DEFAULT_PROGRESS)
         //   done    (was 'reading')   -> 1.0
         //   todo    (was 'done')      -> 0.0
         // The CASE is keyed on the OLD status because SQLite evaluates both
-        // SET expressions against the row before any updates land.
+        // SET expressions against the row before any updates land. A cycle
+        // always re-derives progress (vs. update_book which preserves it),
+        // because the status transition itself is the user's intent.
         let next: Option<String> = sqlx::query_scalar(
             r#"UPDATE lrn_book
                SET status = CASE status
@@ -857,15 +853,32 @@ mod tests {
         assert_eq!(got.name, "Domain Modeling");
         assert_eq!(got.author.as_deref(), Some("Evans"));
         assert_eq!(got.status, "todo");
-        assert_eq!(got.progress, 0.0);
     }
 
     #[test]
-    fn normalize_book_input_done_sets_full_progress() {
+    fn normalize_book_input_accepts_done_status() {
         let got = normalize_book_input("Book", "", " done ").unwrap();
         assert_eq!(got.author, None);
         assert_eq!(got.status, "done");
-        assert_eq!(got.progress, 1.0);
+    }
+
+    #[test]
+    fn progress_for_status_maps_canonically() {
+        // todo / unknown -> 0.0, regardless of any existing progress.
+        assert_eq!(progress_for_status("todo", None), 0.0);
+        assert_eq!(progress_for_status("todo", Some(0.7)), 0.0);
+        // done -> 1.0.
+        assert_eq!(progress_for_status("done", None), 1.0);
+        assert_eq!(progress_for_status("done", Some(0.3)), 1.0);
+        // reading: preserve existing (clamped), else the default midpoint.
+        assert_eq!(
+            progress_for_status("reading", None),
+            READING_DEFAULT_PROGRESS
+        );
+        assert_eq!(progress_for_status("reading", Some(0.42)), 0.42);
+        // existing reading progress is normalized (clamped, NaN -> 0.0).
+        assert_eq!(progress_for_status("reading", Some(1.5)), 1.0);
+        assert_eq!(progress_for_status("reading", Some(f64::NAN)), 0.0);
     }
 
     #[test]
@@ -970,6 +983,17 @@ mod tests {
 
     async fn ref_cleanup_pool() -> sqlx::SqlitePool {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE seq (
+                module TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                last_value INTEGER NOT NULL,
+                PRIMARY KEY (module, kind)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "CREATE TABLE lrn_book (
                 doc_id TEXT PRIMARY KEY,
@@ -1125,36 +1149,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_book_inner_clears_note_book_references() {
-        let pool = ref_cleanup_pool().await;
-        sqlx::query(
-            "INSERT INTO lrn_book (doc_id, name, status, progress)
-             VALUES ('LRN-B-0001', 'Book', 'todo', 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO lrn_note (doc_id, title, book_doc, updated_at)
-             VALUES ('LRN-N-0001', 'Note', 'LRN-B-0001', 1_700_000_000)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        delete_book_inner(&pool, "LRN-B-0001")
-            .await
-            .expect("delete book");
-
-        let book_doc: Option<String> =
-            sqlx::query_scalar("SELECT book_doc FROM lrn_note WHERE doc_id = 'LRN-N-0001'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(book_doc, None);
-    }
-
-    #[tokio::test]
     async fn update_book_inner_updates_book_and_activity() {
         let pool = ref_cleanup_pool().await;
         sqlx::query(
@@ -1191,6 +1185,76 @@ mod tests {
         assert_eq!(activity, ("New".into(), "done".into()));
     }
 
+    /// Invariant: editing a `reading` book through `update_book` must NOT
+    /// silently reset its progress. The previous bug re-derived progress from
+    /// status alone (`reading -> 0.0`); the canonical mapping preserves it.
+    #[tokio::test]
+    async fn update_book_inner_preserves_reading_progress() {
+        let pool = ref_cleanup_pool().await;
+        sqlx::query(
+            "INSERT INTO lrn_book (doc_id, name, author, status, progress)
+             VALUES ('LRN-B-0001', 'In Progress', 'A', 'reading', 0.6)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Edit only the title; status stays 'reading'.
+        let input = normalize_book_input("In Progress v2", "A", "reading").unwrap();
+        let got = update_book_inner(&pool, "LRN-B-0001", input)
+            .await
+            .expect("update book");
+
+        assert_eq!(got.name, "In Progress v2");
+        assert_eq!(got.status, "reading");
+        assert_eq!(got.progress, 0.6, "reading progress must round-trip");
+
+        // And it is persisted, not just returned.
+        let stored: f64 = sqlx::query_scalar("SELECT progress FROM lrn_book WHERE doc_id = ?1")
+            .bind("LRN-B-0001")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0.6);
+
+        // Transitioning the same book to 'done' snaps to 1.0; back to 'todo'
+        // resets to 0.0 — the other two legs of the canonical mapping.
+        let done = update_book_inner(
+            &pool,
+            "LRN-B-0001",
+            normalize_book_input("In Progress v2", "A", "done").unwrap(),
+        )
+        .await
+        .expect("mark done");
+        assert_eq!(done.progress, 1.0);
+
+        let todo = update_book_inner(
+            &pool,
+            "LRN-B-0001",
+            normalize_book_input("In Progress v2", "A", "todo").unwrap(),
+        )
+        .await
+        .expect("back to todo");
+        assert_eq!(todo.progress, 0.0);
+    }
+
+    /// A brand-new `reading` book (no prior progress) lands on the default
+    /// midpoint via `add_book_inner`.
+    #[tokio::test]
+    async fn add_book_inner_reading_uses_default_progress() {
+        let pool = ref_cleanup_pool().await;
+        // add_book_inner allocates a doc id from `seq`.
+        sqlx::query("INSERT INTO seq (module, kind, last_value) VALUES ('LRN', 'type:B', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let input = normalize_book_input("Fresh", "", "reading").unwrap();
+        let got = add_book_inner(&pool, input).await.expect("add book");
+        assert_eq!(got.status, "reading");
+        assert_eq!(got.progress, READING_DEFAULT_PROGRESS);
+    }
+
     #[tokio::test]
     async fn delete_note_inner_clears_external_references() {
         let pool = ref_cleanup_pool().await;
@@ -1216,18 +1280,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_course_inner_clears_note_course_references_and_external_refs() {
+    async fn delete_course_inner_clears_external_references() {
         let pool = ref_cleanup_pool().await;
         sqlx::query(
             "INSERT INTO lrn_course (doc_id, name, progress)
              VALUES ('LRN-C-0001', 'Course', 0.4)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO lrn_note (doc_id, title, course_doc, updated_at)
-             VALUES ('LRN-N-0001', 'Note', 'LRN-C-0001', 1_700_000_000)",
         )
         .execute(&pool)
         .await
@@ -1243,12 +1300,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(courses, 0);
-        let course_doc: Option<String> =
-            sqlx::query_scalar("SELECT course_doc FROM lrn_note WHERE doc_id = 'LRN-N-0001'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(course_doc, None);
         assert_external_refs_cleared(&pool, "LRN-C-0001").await;
     }
 
@@ -1398,21 +1449,11 @@ async fn delete_learning_doc_inner(
     kind: LearningDocKind,
     doc_id: &str,
 ) -> Result<(), ServerFnError> {
+    // Note: `lrn_note.book_doc` / `lrn_note.course_doc` are retained but unused
+    // schema columns — no production write path ever populates them, so there
+    // is no intra-module reference to scrub here. Only the module-owned row and
+    // the shared cross-module graph need cleanup.
     let mut tx = pool.begin().await.map_err(server_err)?;
-    if matches!(kind, LearningDocKind::Book) {
-        sqlx::query("UPDATE lrn_note SET book_doc = NULL WHERE book_doc = ?1")
-            .bind(doc_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-    }
-    if matches!(kind, LearningDocKind::Course) {
-        sqlx::query("UPDATE lrn_note SET course_doc = NULL WHERE course_doc = ?1")
-            .bind(doc_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(server_err)?;
-    }
     let deleted = sqlx::query(kind.delete_sql())
         .bind(doc_id)
         .execute(&mut *tx)

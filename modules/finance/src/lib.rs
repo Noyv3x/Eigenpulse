@@ -16,9 +16,9 @@ pub use server_fns::{
     add_transfer_inner, add_txn_inner, create_account_inner, create_category_inner,
     create_currency_inner, delete_account_inner, delete_category_inner, delete_currency_inner,
     delete_txn_inner, list_currencies_inner, load_month_buckets_12, parse_occurred_at,
-    resolve_currency, set_budget_inner, set_primary_currency_inner, update_account_inner,
-    update_category_inner, update_currency_inner, update_txn_inner, AddTransferFields,
-    AddTxnFields, UpdateTxnFields,
+    resolve_currency, set_account_archived_inner, set_budget_inner, set_category_archived_inner,
+    set_primary_currency_inner, update_account_inner, update_category_inner, update_currency_inner,
+    update_txn_inner, AddTransferFields, AddTxnFields, UpdateTxnFields,
 };
 
 #[cfg(feature = "ssr")]

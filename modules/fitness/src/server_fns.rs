@@ -13,6 +13,63 @@ pub(crate) const MAX_WORKOUT_LOAD_TEXT_CHARS: usize = 128;
 pub(crate) const MAX_WORKOUT_NOTES_CHARS: usize = 2_000;
 pub(crate) const MAX_WORKOUT_DURATION_MINUTES: i64 = 24 * 60;
 
+// ── Summary tuning constants (single source of truth) ──────────────────────
+//
+// These were previously scattered as bare literals through `compute_summary`
+// and the SQL. Hoisting them here keeps the dashboard KPI, the fitness banner,
+// the chart subtitle, and the aggregation queries coherent — change a target
+// or a strain weight in exactly one place. The values reach the view via the
+// `FitnessSummary` DTO (`this_week_target` / `aerobic_target_min`), so they are
+// only ever read server-side; gated under `ssr` to stay out of the wasm bundle
+// and avoid dead-code warnings on the hydrate target.
+
+/// Sessions/week the progress ring + banner tag treat as "100% of plan".
+#[cfg(feature = "ssr")]
+pub(crate) const THIS_WEEK_TARGET: u32 = 6;
+
+/// Aerobic-minutes/week goal (WHO's 150 min/week moderate-activity guideline).
+/// Surfaced on the DTO as `aerobic_target_min` so the view never re-hardcodes it.
+#[cfg(feature = "ssr")]
+pub(crate) const AEROBIC_TARGET_MIN: u32 = 150;
+
+/// Per-strain multipliers applied to `duration_m` when computing weighted
+/// weekly load (`min·sf`). Light efforts count less, hard efforts more.
+/// Kept as named consts so the SQL `CASE` and any future Rust-side recompute
+/// share one definition; the chart subtitle copy (`fitness.card.load.sub`)
+/// documents the same values for users.
+#[cfg(feature = "ssr")]
+pub(crate) const STRAIN_WEIGHT_LIGHT: f64 = 0.6;
+#[cfg(feature = "ssr")]
+pub(crate) const STRAIN_WEIGHT_MEDIUM: f64 = 1.0;
+#[cfg(feature = "ssr")]
+pub(crate) const STRAIN_WEIGHT_HEAVY: f64 = 1.4;
+
+// ── Canonical "this week" window ────────────────────────────────────────────
+//
+// CANONICAL DEFINITION: a fitness "week" is the **Monday-anchored local
+// week** — i.e. from Monday 00:00 (server local time) of the week containing
+// today, through now. A Mon-start week is the most intuitive frame for a
+// workout streak/plan and matches the `strftime('%Y-W%W', …)` (Monday = first
+// day) convention the weekly-load chart already aggregates on, so the ring,
+// the banner tag, the aerobic total, and the load chart are all coherent.
+//
+// This is a SQLite modifier-string fragment meant to be appended after a
+// `'now','localtime'` base inside `unixepoch(…)`. Modifier order is
+// load-bearing: `'-6 days'` shifts back six full days, `'weekday 1'` then
+// advances to the next Monday (which for any starting weekday lands on the
+// Monday of the calling week), `'start of day'` anchors at local 00:00, and
+// `'utc'` converts that local-Monday-00:00 to a UTC unix epoch for comparison
+// against `occurred_at`. Previously this fragment was copy-pasted as a bare
+// literal into both the count and the aerobic query; it now lives here once.
+//
+// NOTE for the dashboard / cross-module KPI: `app/src/views/dashboard.rs`'s
+// `weekly_workouts` currently uses a *rolling 7-day* window
+// (`'-6 days','start of day'`, no `'weekday 1'`), so the dashboard KPI and
+// this banner can disagree on Mon–Sat. To align it, swap the dashboard query
+// to the same Monday-anchored fragment below.
+#[cfg(feature = "ssr")]
+pub(crate) const WEEK_START_LOCAL_MODIFIERS: &str = "'-6 days','weekday 1','start of day','utc'";
+
 #[cfg(feature = "ssr")]
 #[derive(Debug)]
 pub struct AddWorkoutFields {
@@ -165,12 +222,19 @@ pub struct FitnessSummary {
     /// 12 weeks padded — empty weeks render as flat bars.
     pub weekly_load: Vec<f64>,
     pub week_labels: Vec<String>, // "W17" etc., parallel to weekly_load
+    /// Sessions completed in the canonical Monday-anchored local week.
     pub this_week_count: u32,
+    /// `THIS_WEEK_TARGET` — the "100% of plan" denominator for the ring/tag.
     pub this_week_target: u32,
-    pub streak_days: u32,           // consecutive trailing days with ≥ 1 workout
-    pub aerobic_min_this_week: u32, // sum(duration_m where kind ~ "/cardio|aerobic|run|cycle/")
-    pub avg_duration_min: u32,      // last 30 days
-    /// Heaviest strain among workouts in the last 7 days. None if empty.
+    pub streak_days: u32, // consecutive trailing days with ≥ 1 workout
+    /// sum(duration_m where kind ~ cardio/aerobic/run/cycle/swim) over the
+    /// canonical Monday-anchored local week.
+    pub aerobic_min_this_week: u32,
+    /// `AEROBIC_TARGET_MIN` — shipped so the view never re-hardcodes the goal.
+    pub aerobic_target_min: u32,
+    pub avg_duration_min: u32, // rolling last 30 days (intentionally not week-anchored)
+    /// Heaviest strain among workouts in the rolling last 7 days
+    /// (intentionally a rolling window, labelled "in 7d" in the UI). None if empty.
     pub heaviest_strain: Option<String>,
 }
 
@@ -202,20 +266,19 @@ async fn compute_summary(pool: &sqlx::SqlitePool) -> sqlx::Result<FitnessSummary
     // 12-week dense frame, server's local-tz aware. Each row is one ISO week
     // label like "2026-W17" mapped to weighted load (duration × strain).
     type WeekRow = (String, f64);
-    let week_rows: Vec<WeekRow> = sqlx::query_as(
+    let weekly_load_sql = format!(
         "SELECT strftime('%Y-W%W', occurred_at, 'unixepoch', 'localtime') AS w,
                 SUM(duration_m * CASE strain
-                    WHEN 'L' THEN 0.6
-                    WHEN 'H' THEN 1.4
-                    ELSE 1.0
+                    WHEN 'L' THEN {STRAIN_WEIGHT_LIGHT}
+                    WHEN 'H' THEN {STRAIN_WEIGHT_HEAVY}
+                    ELSE {STRAIN_WEIGHT_MEDIUM}
                 END) AS load
            FROM fit_workout
           WHERE occurred_at >= unixepoch('now','localtime','-77 days','utc')
           GROUP BY w
-          ORDER BY w ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+          ORDER BY w ASC"
+    );
+    let week_rows: Vec<WeekRow> = sqlx::query_as(&weekly_load_sql).fetch_all(pool).await?;
 
     let frame: Vec<String> = sqlx::query_scalar(
         "WITH RECURSIVE weeks(w, n) AS (
@@ -245,33 +308,29 @@ async fn compute_summary(pool: &sqlx::SqlitePool) -> sqlx::Result<FitnessSummary
         })
         .collect();
 
-    // Week boundary = local Monday 00:00 of the week containing today.
-    // Matches the Mon-start convention used by `strftime('%Y-W%W', …)`
-    // in the weekly_load aggregator above so the two are coherent.
-    //
-    // Modifier order matters: '-6 days' shifts back six full days first;
-    // 'weekday 1' then advances forward to the next Monday, which (for
-    // any starting weekday) lands on the Monday of the calling week;
-    // 'start of day' anchors at local 00:00 (without it the boundary
-    // drifts by the time-of-day fractional); 'utc' converts the
-    // local-Monday-00:00 string to a UTC unix epoch for comparison
-    // against `occurred_at`. The earlier `'weekday 0','-7 days'` form
-    // was Sun-start AND kept the time-of-day, off by both axes.
-    const THIS_WEEK_COUNT_SQL: &str = "SELECT COUNT(*) FROM fit_workout
-          WHERE occurred_at >= unixepoch('now','localtime','-6 days','weekday 1','start of day','utc')";
-    const AEROBIC_MIN_THIS_WEEK_SQL: &str = "SELECT COALESCE(SUM(duration_m), 0) FROM fit_workout
-          WHERE occurred_at >= unixepoch('now','localtime','-6 days','weekday 1','start of day','utc')
+    // Canonical week boundary = local Monday 00:00 of the week containing
+    // today (see `WEEK_START_LOCAL_MODIFIERS` for the modifier-order
+    // rationale). Both queries share the one fragment so the count and the
+    // aerobic total can never drift apart.
+    let this_week_count_sql = format!(
+        "SELECT COUNT(*) FROM fit_workout
+          WHERE occurred_at >= unixepoch('now','localtime',{WEEK_START_LOCAL_MODIFIERS})"
+    );
+    let aerobic_min_this_week_sql = format!(
+        "SELECT COALESCE(SUM(duration_m), 0) FROM fit_workout
+          WHERE occurred_at >= unixepoch('now','localtime',{WEEK_START_LOCAL_MODIFIERS})
             AND (lower(kind) LIKE '%cardio%'
                  OR lower(kind) LIKE '%\u{6709}\u{6c27}%'
                  OR lower(kind) LIKE '%\u{8dd1}%'
                  OR lower(kind) LIKE '%\u{9a91}%'
-                 OR lower(kind) LIKE '%\u{6e38}%')";
+                 OR lower(kind) LIKE '%\u{6e38}%')"
+    );
 
-    let this_week_count: u32 = sqlx::query_scalar(THIS_WEEK_COUNT_SQL)
+    let this_week_count: u32 = sqlx::query_scalar(&this_week_count_sql)
         .fetch_one(pool)
         .await?;
 
-    let aerobic_min_this_week: u32 = sqlx::query_scalar(AEROBIC_MIN_THIS_WEEK_SQL)
+    let aerobic_min_this_week: u32 = sqlx::query_scalar(&aerobic_min_this_week_sql)
         .fetch_one(pool)
         .await?;
 
@@ -316,9 +375,10 @@ async fn compute_summary(pool: &sqlx::SqlitePool) -> sqlx::Result<FitnessSummary
         weekly_load,
         week_labels,
         this_week_count,
-        this_week_target: 6,
+        this_week_target: THIS_WEEK_TARGET,
         streak_days,
         aerobic_min_this_week,
+        aerobic_target_min: AEROBIC_TARGET_MIN,
         avg_duration_min,
         heaviest_strain,
     })

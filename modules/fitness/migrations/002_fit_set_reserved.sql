@@ -1,0 +1,10 @@
+-- RESERVED / UNUSED: the `fit_set` table (and its `fit_set_workout` index)
+-- created in 001_fitness.sql is not read or written by any code today. It is
+-- intentionally retained as a placeholder for a future per-set strength log
+-- (exercise / reps / weight_kg / done). Dropping it would require a costly
+-- table-rebuild for zero benefit, so it is left in place; this comment-only
+-- migration documents the decision next to the schema.
+--
+-- This file ships no statements on purpose — it exists solely to record the
+-- decision in the module's migration ledger. Do NOT add `fit_set` reads/writes
+-- here; introduce them in a dedicated 00N_*.sql when the feature lands.

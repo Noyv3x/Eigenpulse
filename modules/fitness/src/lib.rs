@@ -19,7 +19,13 @@ mod ssr_module {
             "FIT"
         }
         fn migrations(&self) -> &'static [(&'static str, &'static str)] {
-            &[("001_fitness", include_str!("../migrations/001_fitness.sql"))]
+            &[
+                ("001_fitness", include_str!("../migrations/001_fitness.sql")),
+                (
+                    "002_fit_set_reserved",
+                    include_str!("../migrations/002_fit_set_reserved.sql"),
+                ),
+            ]
         }
 
         fn open_api(&self, state: AppState) -> axum::Router<AppState> {
