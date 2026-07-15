@@ -1,0 +1,94 @@
+services:
+  eigenpulse:
+    # Override EP_IMAGE to consume a published release, e.g.
+    # ghcr.io/<owner>/eigenpulse:v0.2.0. The default remains a local build.
+    image: "${EP_IMAGE:-eigenpulse:0.2.0}"
+    container_name: eigenpulse
+    build: .
+    restart: unless-stopped
+    networks:
+      - ep-app
+    ports:
+      # LAN direct access keeps the default 0.0.0.0. When a host reverse proxy
+      # is the only ingress, set EP_BIND_IP=127.0.0.1 to prevent bypass.
+      - "${EP_BIND_IP:-0.0.0.0}:3000:3000"
+    volumes:
+      # Persistent data: the SQLite DB (+ WAL/SHM), Fitness
+      # GIF/MP4/WebM objects under modules/fitness/media/objects, the generated
+      # session-signing key, internal pre-migration DB snapshots, and portable
+      # `.epbackup` archives containing both DB + media. Back THIS whole volume
+      # up as well; `.epbackup` deliberately excludes secret.key. See docs/ops.md.
+      # If you bind-mount a host path here instead of a named volume, run
+      # `chown -R 65532:65532 <host-path>` first (the image runs as nonroot).
+      - ep-data:/data
+    environment:
+      # May be removed after the OWNER row exists. On a genuinely fresh data
+      # volume the application itself rejects an absent/blank value.
+      EP_ADMIN_PASSWORD: "${EP_ADMIN_PASSWORD:-}"
+      # Optional. If EP_SECRET is not set, the binary reads or creates
+      # EP_SECRET_FILE under /data so the signing key survives container restarts.
+      EP_SECRET:         "${EP_SECRET:-}"
+      EP_SECRET_FILE:    "${EP_SECRET_FILE:-/data/secret.key}"
+      # Fitness media belongs on the persistent volume. The runtime must set
+      # EP_MODULE_DATA_ROOT=/data/modules; its per-file/quota controls are
+      # EP_FITNESS_MEDIA_MAX_FILE_BYTES (128 MiB) and
+      # EP_FITNESS_MEDIA_QUOTA_BYTES (20 GiB).
+      EP_MODULE_DATA_ROOT: "${EP_MODULE_DATA_ROOT:-/data/modules}"
+      EP_FITNESS_MEDIA_MAX_FILE_BYTES: "${EP_FITNESS_MEDIA_MAX_FILE_BYTES:-134217728}"
+      EP_FITNESS_MEDIA_QUOTA_BYTES: "${EP_FITNESS_MEDIA_QUOTA_BYTES:-21474836480}"
+      # Set to "1" only if you serve over HTTPS (public reverse proxy with TLS).
+      # Leave unset for LAN/NAS HTTP access so the session cookie can persist.
+      # When "1" the app also marks the session cookie `Secure` and emits HSTS.
+      EP_COOKIE_SECURE:  "${EP_COOKIE_SECURE:-0}"
+      # Comma-separated CIDRs of proxies that connect directly to the app.
+      # Leave empty for direct LAN access. A host proxy entering through the
+      # published port appears as this compose network's gateway, not loopback:
+      # with the default network below use 172.30.96.1/32 together with
+      # EP_BIND_IP=127.0.0.1. See docs/ops.md before enabling trust.
+      EP_TRUSTED_PROXY_CIDRS: "${EP_TRUSTED_PROXY_CIDRS:-}"
+      # Durable-notification retention.
+      EP_DELIVERY_RETENTION_DAYS: "${EP_DELIVERY_RETENTION_DAYS:-30}"
+      EP_READ_NOTIFICATION_RETENTION_DAYS: "${EP_READ_NOTIFICATION_RETENTION_DAYS:-365}"
+      # Emergency recovery switches; intentionally off unless explicitly set.
+      EP_ALLOW_UNBACKED_MIGRATION: "${EP_ALLOW_UNBACKED_MIGRATION:-0}"
+      EP_ALLOW_INSECURE_FILE_PERMISSIONS: "${EP_ALLOW_INSECURE_FILE_PERMISSIONS:-0}"
+      RUST_LOG:          "info"
+    # Resource ceiling sized for a modern NAS. The idle RSS target is <100 MB;
+    # 256 MB leaves generous headroom for the SQLite page cache and request
+    # bursts. Raise it if you run many concurrent open-API or media clients.
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "/app/eigenpulse", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # Explicitly invoked maintenance helper. The runtime image is distroless,
+  # so listing/copying whole-volume cold backups can run here while sharing the
+  # exact logical volume. Portable `.epbackup` restore itself must run offline
+  # through `eigenpulse --restore`, which validates DB + Fitness media together.
+  data-helper:
+    image: busybox:1.36
+    profiles: ["tools"]
+    network_mode: none
+    volumes:
+      - ep-data:/data
+
+volumes:
+  ep-data:
+    # Keep helper/backup commands and standalone `docker run` on the exact
+    # same volume instead of Compose's project-prefixed implicit name.
+    name: "${EP_DATA_VOLUME:-ep-data}"
+
+# A fixed gateway makes the direct TCP peer of a host nginx/Caddy predictable
+# enough to trust as one /32. If this subnet overlaps the host network, set
+# EP_DOCKER_SUBNET and EP_DOCKER_GATEWAY together and update
+# EP_TRUSTED_PROXY_CIDRS to the chosen gateway /32.
+networks:
+  ep-app:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${EP_DOCKER_SUBNET:-172.30.96.0/24}"
+          gateway: "${EP_DOCKER_GATEWAY:-172.30.96.1}"

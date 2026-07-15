@@ -1,0 +1,12 @@
+[build]
+target-dir = "target"
+
+# Use `mold` for native links — ~5x faster and ~70% less RAM than the default
+# BFD linker. Required after `apt install mold`. The driver is gcc invoking
+# the linker via `-fuse-ld`, so we don't override `linker = ...` (gcc still
+# handles crt + sysroot resolution).
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

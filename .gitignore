@@ -1,0 +1,12 @@
+/target
+/data
+# Hand-rolled DB snapshots (e.g. `cp -a data data.bak.$(date +%H%M%S)`).
+/data.bak.*/
+**/*.rs.bk
+.DS_Store
+node_modules
+secret.key
+.env
+.env.local
+.idea/
+.vscode/

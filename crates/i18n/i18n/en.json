@@ -1,0 +1,6 @@
+{
+  "app.common.load_failed": "Load failed",
+  "app.common.loading": "Loading…",
+  "app.common.server_error": "Internal server error",
+  "app.common.unknown_locale": "Unknown locale code '{payload}'"
+}

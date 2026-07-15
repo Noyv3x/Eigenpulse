@@ -1,0 +1,125 @@
+{
+  "name": "Eigenpulse · 记一笔",
+  "icon_glyph": "creditcard.fill",
+  "icon_tint": "amber",
+  "description": "Prompt for a transaction and POST it to /api/v1/finance/transactions.",
+  "endpoint": {
+    "method": "POST",
+    "url": "{EP_BASE}/api/v1/finance/transactions",
+    "scope_required": "finance:write",
+    "headers": {
+      "Authorization": "Bearer {EP_TOKEN}",
+      "Content-Type": "application/json"
+    }
+  },
+  "config": {
+    "EP_BASE": "http://192.168.1.50:3000",
+    "EP_TOKEN": "ep_pat_REPLACE_ME",
+    "currency_id": 1,
+    "account_id": 2,
+    "category_id": 3
+  },
+  "steps": [
+    {
+      "n": 1,
+      "action": "Comment",
+      "text": "Use positive integer IDs from your own Finance setup. Fresh installs only contain the primary currency."
+    },
+    {
+      "n": 2,
+      "action": "Ask for Input",
+      "bind": "Amount",
+      "input_type": "Number",
+      "prompt": "金额（输入正数，下一步选择支出或收入）"
+    },
+    {
+      "n": 3,
+      "action": "Ask for Input",
+      "bind": "Merchant",
+      "input_type": "Text",
+      "prompt": "商户 / 摘要"
+    },
+    {
+      "n": 4,
+      "action": "Choose from Menu",
+      "bind": "Tag",
+      "prompt": "类型",
+      "items": [
+        {
+          "label": "支出",
+          "value": "exp"
+        },
+        {
+          "label": "收入",
+          "value": "inc"
+        }
+      ]
+    },
+    {
+      "n": 5,
+      "action": "If",
+      "condition": "Tag is exp",
+      "then": "Calculate Amount × -1 and bind SignedAmount",
+      "otherwise": "Bind Amount as SignedAmount"
+    },
+    {
+      "n": 6,
+      "action": "Dictionary",
+      "bind": "Body",
+      "value": {
+        "currency_id": "{{currency_id}}",
+        "merchant": "{{Merchant}}",
+        "category_id": "{{category_id}}",
+        "account_id": "{{account_id}}",
+        "amount": "{{SignedAmount}}",
+        "tag": "{{Tag}}"
+      }
+    },
+    {
+      "n": 7,
+      "action": "Get Contents of URL",
+      "bind": "Response",
+      "method": "POST",
+      "url": "{{EP_BASE}}/api/v1/finance/transactions",
+      "headers": {
+        "Authorization": "Bearer {{EP_TOKEN}}",
+        "Content-Type": "application/json"
+      },
+      "request_body": "{{Body}}"
+    },
+    {
+      "n": 8,
+      "action": "Get Dictionary Value",
+      "bind": "TransactionId",
+      "from": "{{Response}}",
+      "key": "id"
+    },
+    {
+      "n": 9,
+      "action": "Show Notification",
+      "title": "已记账 · #{{TransactionId}}",
+      "body": "{{Merchant}} · {{SignedAmount}}"
+    }
+  ],
+  "request_body_schema": {
+    "currency_id": "positive integer, required",
+    "merchant": "non-empty string, required",
+    "category_id": "positive integer, required",
+    "account_id": "positive integer, required",
+    "amount": "decimal string in major units; negative for exp and positive for inc",
+    "tag": "exp or inc",
+    "note": "optional string",
+    "occurred_at": "optional unix seconds"
+  },
+  "response_shape": {
+    "id": 42,
+    "currency_id": 1,
+    "merchant": "Blue Bottle",
+    "amount": "-4200",
+    "tag": "exp"
+  },
+  "side_effects": [
+    "Inserts one fin_txn row and adjusts its Finance account atomically.",
+    "May dispatch a source=finance large-expense notification."
+  ]
+}

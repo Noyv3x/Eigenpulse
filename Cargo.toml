@@ -1,0 +1,120 @@
+[workspace]
+resolver = "2"
+members = [
+    "app",
+    "crates/core",
+    "crates/db",
+    "crates/auth",
+    "crates/ui",
+    "crates/i18n",
+    "crates/notify",
+    "crates/api",
+    "modules/finance",
+    "modules/fitness",
+    "modules/journal",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Eigenpulse — Self-hosted Personal Hub"
+
+[workspace.dependencies]
+# Leptos
+leptos        = { version = "0.7", default-features = false }
+leptos_meta   = { version = "0.7", default-features = false }
+leptos_router = { version = "0.7", default-features = false }
+leptos_axum   = { version = "0.7" }
+
+# Server stack
+axum          = "0.7"
+axum-extra    = { version = "0.9", features = ["cookie", "cookie-signed"] }
+tower         = "0.5"
+tower-http    = { version = "0.6", features = ["compression-gzip", "compression-br", "trace", "fs"] }
+tokio         = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync", "time"] }
+tokio-util    = { version = "0.7", features = ["io"] }
+
+# DB
+sqlx          = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+
+# Serde / errors / time
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+thiserror     = "2"
+anyhow        = "1"
+time          = { version = "0.3", features = ["macros", "parsing"] }
+chrono        = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz     = "0.10"
+
+# Crypto / cookies / random
+argon2        = { version = "0.5", features = ["std"] }
+sha2          = "0.10"
+rand          = "0.8"
+cookie        = { version = "0.18", features = ["signed", "secure", "percent-encode"] }
+hex           = "0.4"
+base64        = "0.22"
+
+# HTTP client / mail
+reqwest       = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "stream"] }
+lettre        = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# Misc
+async-trait   = "0.1"
+rust-embed    = "8"
+mime_guess    = "2"
+tracing       = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio-stream  = { version = "0.1", features = ["sync", "time"] }
+ipnet         = "2"
+percent-encoding = "2"
+zip            = { version = "2", default-features = false, features = ["deflate"] }
+fs2            = "0.4"
+
+# WASM / browser
+wasm-bindgen  = "0.2"
+console_error_panic_hook = "0.1"
+web-sys       = "0.3"
+
+# Workspace local crates (referenced by path)
+ep-core       = { path = "crates/core" }
+ep-db         = { path = "crates/db" }
+ep-auth       = { path = "crates/auth" }
+ep-ui         = { path = "crates/ui" }
+ep-i18n       = { path = "crates/i18n" }
+ep-notify     = { path = "crates/notify" }
+ep-api        = { path = "crates/api" }
+ep-finance    = { path = "modules/finance" }
+ep-fitness    = { path = "modules/fitness" }
+ep-journal    = { path = "modules/journal" }
+
+[profile.dev]
+# Keep `panic!` backtraces with file:line, drop variable/type DWARF entries —
+# saves roughly half the link memory and disk footprint while still giving
+# useful crash output. If you need to step through Rust source in lldb, flip
+# this to `2` locally.
+debug = "line-tables-only"
+# Splits debug info into separate files instead of bloating each .o, so the
+# linker doesn't have to slurp it all into RAM.
+split-debuginfo = "unpacked"
+
+# Third-party crates: zero debug info. They're not your code; if you really
+# need to step into one, override per-package or temporarily flip the global
+# setting above. This is the single biggest knob — the workspace pulls in
+# axum / sqlx / lettre / reqwest / leptos which together account for >80% of
+# the link work.
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+opt-level     = 3
+strip         = "symbols"
+panic         = "abort"
+
+[profile.wasm-release]
+inherits      = "release"
+opt-level     = "z"
+lto           = "fat"

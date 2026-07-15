@@ -1,0 +1,18 @@
+{
+  "name": "eigenpulse-e2e",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Playwright end-to-end hydration suite for Eigenpulse. Boots the release SSR binary against a built leptos site, logs in via the real CSRF double-submit flow, and asserts that WASM hydration is LIVE on every main route (no CSP/hydration console errors, reactive theme toggle, client-side SPA navigation).",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "install-browsers": "playwright install --with-deps chromium",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.2",
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

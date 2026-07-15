@@ -1,0 +1,46 @@
+[package]
+name        = "ep-db"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+
+[features]
+default = []
+ssr     = [
+    "dep:anyhow",
+    "dep:percent-encoding",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:sqlx",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:zip",
+    "dep:fs2",
+    "dep:ep-core",
+    "ep-core/ssr",
+]
+
+[dependencies]
+anyhow    = { workspace = true, optional = true }
+percent-encoding = { workspace = true, optional = true }
+serde      = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2       = { workspace = true, optional = true }
+
+sqlx      = { workspace = true, optional = true }
+tokio     = { workspace = true, optional = true }
+tracing   = { workspace = true, optional = true }
+zip       = { workspace = true, optional = true }
+fs2       = { workspace = true, optional = true }
+ep-core   = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile  = "3"
+# `tests/migration_immutability.rs` hashes every committed migration .sql and
+# compares against a checked-in snapshot. Pure file IO + hashing — no DB, so
+# it does not need the `ssr` feature.
+sha2       = { workspace = true }
+hex        = { workspace = true }
+serde_json = { workspace = true }

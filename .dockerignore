@@ -1,0 +1,17 @@
+target/
+data/
+.git/
+.github/
+.idea/
+.vscode/
+node_modules/
+*.log
+.env
+.env.local
+secret.key
+README.md
+docs/
+examples/
+playwright/
+.playwright-mcp/
+*.png

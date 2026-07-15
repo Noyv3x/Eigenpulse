@@ -1,0 +1,219 @@
+# Release workflow — tag-triggered multi-arch publish.
+#
+# Triggered on a semver tag push (e.g. `git tag v0.2.0 && git push origin v0.2.0`).
+# Builds the multi-arch image (linux/amd64 + linux/arm64 — arm64 is the real
+# NAS target) and *optionally* pushes it to GitHub Container Registry (GHCR),
+# then *optionally* signs the image with cosign (keyless / Sigstore OIDC) and
+# attaches an SBOM (syft → SPDX). The required CI run builds and probes each
+# platform natively before this workflow reuses those caches for publishing.
+#
+# This is the same Dockerfile the `docker` CI job builds, so the no-op
+# wasm-opt shim, mold linker, and multi-arch workarounds are all inherited —
+# nothing build-related is duplicated here.
+#
+# WHAT THE MAINTAINER MUST DO TO ENABLE PUBLISHING (see docs/ops.md §6):
+#   1. Image name defaults to `ghcr.io/<owner>/eigenpulse`, derived from
+#      `github.repository_owner` (lowercased — GHCR rejects uppercase paths).
+#   2. Pushing to GHCR uses the built-in `GITHUB_TOKEN` with `packages: write`
+#      (granted by the job `permissions:` block below — no extra secret to
+#      create). The login + push + sign + SBOM steps are *additionally* gated
+#      on an explicit `vars.ENABLE_RELEASE_PUSH == 'true'` repo variable AND on
+#      a token being present, so a fork or a dry-run tag never publishes by
+#      accident. Set that variable (Settings → Secrets and variables → Actions
+#      → Variables) to flip publishing on.
+#   3. To push to a *different* registry / org than the built-in token can
+#      reach, set the `GHCR_TOKEN` secret to a PAT with `write:packages` and it
+#      is preferred over `GITHUB_TOKEN` for the registry login.
+#   4. cosign keyless signing uses Sigstore OIDC (`id-token: write`) — no key
+#      secret to manage. For key-based signing instead, add a
+#      `COSIGN_PRIVATE_KEY` secret and swap the `cosign sign` invocation
+#      (commented inline).
+#
+# With the gate off this workflow is a build-only multi-arch validation on tag
+# — identical safety to the `docker` CI job, no credentials touched.
+
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Least-privilege default; the release job widens it.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: validate release ref
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      stable: ${{ steps.version.outputs.stable }}
+      publishable: ${{ steps.version.outputs.publishable }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate SemVer tag against workspace version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "version=manual-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            echo "publishable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag="${GITHUB_REF#refs/tags/}"
+          if [[ ! "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          workspace_version="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "eigenpulse") | .version')"
+          if [ "$version" != "$workspace_version" ]; then
+            echo "tag $version does not match workspace version $workspace_version" >&2
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "publishable=true" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: full verification
+    needs: [validate]
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: build + (gated) push multi-arch
+    runs-on: ubuntu-latest
+    needs: [validate, verify]
+    permissions:
+      contents: read
+      packages: write   # push to GHCR via GITHUB_TOKEN
+      id-token: write   # cosign keyless (OIDC) signing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive lowercased image name and tag
+        id: meta
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${owner}/eigenpulse" >> "$GITHUB_OUTPUT"
+          echo "version=${{ needs.validate.outputs.version }}" >> "$GITHUB_OUTPUT"
+          {
+            echo 'tags<<EOF'
+            echo "ghcr.io/${owner}/eigenpulse:${{ needs.validate.outputs.version }}"
+            if [ "${{ needs.validate.outputs.stable }}" = "true" ]; then
+              echo "ghcr.io/${owner}/eigenpulse:latest"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      # Single source of truth for the publish gate: opt-in variable AND a usable
+      # registry token. `GHCR_TOKEN` (a PAT) is preferred if set; otherwise the
+      # built-in `GITHUB_TOKEN` is used. Exposed as a step output so every
+      # downstream `if:` reads one boolean instead of re-deriving the condition.
+      - name: Resolve publish gate
+        id: gate
+        env:
+          ENABLE: ${{ vars.ENABLE_RELEASE_PUSH }}
+          HAS_PAT: ${{ secrets.GHCR_TOKEN != '' }}
+          HAS_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN != '' }}
+        run: |
+          if [ "${{ needs.validate.outputs.publishable }}" = "true" ] && [ "$ENABLE" = "true" ] && { [ "$HAS_PAT" = "true" ] || [ "$HAS_GITHUB_TOKEN" = "true" ]; }; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Publish gate OPEN — image will be pushed, signed, and SBOM-attested."
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Publish gate CLOSED — build-only validation (set ENABLE_RELEASE_PUSH=true to publish)."
+          fi
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Login is gated on the resolved publish flag. Prefer the GHCR_TOKEN PAT
+      # (broader scope / cross-org) and fall back to the built-in GITHUB_TOKEN.
+      - name: Log in to GHCR
+        if: ${{ steps.gate.outputs.publish == 'true' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # Build-and-maybe-push in one step. `push:` is true only when the gate is
+      # open; otherwise this is a build-only multi-arch validation (no registry,
+      # same as the `docker` CI job). The digest output is captured so cosign /
+      # syft can pin by immutable digest rather than a mutable tag.
+      - name: Build multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.gate.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          # Reuse the platform-specific caches populated by the required CI
+          # probe job. Without these scopes a tag release repeats the entire
+          # native/QEMU Rust build even though the exact images just passed.
+          cache-from: |
+            type=gha,scope=eigenpulse-amd64
+            type=gha,scope=eigenpulse-arm64
+
+      # ---- The remaining steps only run when an image was actually pushed ----
+
+      # Cosign keyless signing (Sigstore OIDC). No key secret required; the
+      # `id-token: write` permission above lets the runner mint an OIDC token.
+      # cosign v2 enables keyless by default (COSIGN_EXPERIMENTAL no longer
+      # needed). For key-based signing instead, add a COSIGN_PRIVATE_KEY secret
+      # and run: cosign sign --key env://COSIGN_PRIVATE_KEY --yes "${IMAGE}@${DIGEST}"
+      - name: Install cosign
+        if: ${{ steps.gate.outputs.publish == 'true' }}
+        uses: sigstore/cosign-installer@v3
+      - name: Sign the pushed image (keyless)
+        if: ${{ steps.gate.outputs.publish == 'true' }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # SBOM generation with syft, attached to the image as a signed
+      # attestation. syft produces SPDX JSON; cosign attests it against the
+      # pushed digest so the SBOM is verifiable alongside the signature.
+      - name: Install syft
+        if: ${{ steps.gate.outputs.publish == 'true' }}
+        uses: anchore/sbom-action/download-syft@v0
+      - name: Generate + attest SBOM
+        if: ${{ steps.gate.outputs.publish == 'true' }}
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          syft "${IMAGE}@${DIGEST}" -o spdx-json > sbom.spdx.json
+          cosign attest --yes --predicate sbom.spdx.json \
+            --type spdxjson "${IMAGE}@${DIGEST}"
+
+      - name: Upload SBOM artifact
+        if: ${{ steps.gate.outputs.publish == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ steps.meta.outputs.version }}
+          path: sbom.spdx.json
+          if-no-files-found: ignore

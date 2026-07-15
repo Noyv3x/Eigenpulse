@@ -1,0 +1,310 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+  charts:
+    name: chart runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/charts/package-lock.json
+      - name: Install pinned chart build dependencies
+        working-directory: tools/charts
+        run: npm ci --no-audit --no-fund
+      - name: Test chart contracts, licenses, and bundle budget
+        working-directory: tools/charts
+        run: npm test
+      - name: Verify committed chart bundle is reproducible
+        working-directory: tools/charts
+        run: npm run check:bundle
+      - name: Check chart loader syntax
+        run: node --check assets/chart-loader.js
+
+  # Fast feedback — exits within ~3 min on a warm cache.
+  check:
+    name: cargo check (ssr + hydrate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # `mold` is pinned by `.cargo/config.toml` for Linux-GNU targets.
+      # ubuntu-latest has it in apt; install before any cargo invocation.
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check
+      - name: cargo check --workspace
+        run: cargo check --workspace --locked
+      - name: cargo check -p eigenpulse --features ssr
+        run: cargo check -p eigenpulse --features ssr --no-default-features --locked
+      - name: cargo check -p eigenpulse (wasm32, hydrate)
+        run: cargo check -p eigenpulse --lib --target wasm32-unknown-unknown --features hydrate --no-default-features --locked
+      - name: hydrate dependency guard
+        run: |
+          cargo tree -p eigenpulse --target wasm32-unknown-unknown --features hydrate --no-default-features --edges normal --locked > hydrate-tree.txt
+          if grep -E '(^|[[:space:]])(sqlx|reqwest|lettre|argon2|axum|tokio|chrono|chrono-tz) v[0-9]' hydrate-tree.txt; then
+            echo "SSR-only dependency or timezone database leaked into the wasm32 hydrate graph"
+            exit 1
+          fi
+      - name: cargo check password reset example
+        run: cargo check -p ep-auth --features ssr --example reset_password --locked
+      - name: static asset and shortcut syntax
+        run: |
+          node --check assets/sw.js
+          node --check assets/theme-init.js
+          node --check assets/chart-loader.js
+          sh -n wasm-opt-shim.sh
+          printf 'wasm' > /tmp/ep-test.wasm
+          sh wasm-opt-shim.sh -Oz /tmp/ep-test.wasm -o /tmp/ep-test-out.wasm
+          cmp /tmp/ep-test.wasm /tmp/ep-test-out.wasm
+          if sh wasm-opt-shim.sh -Oz /tmp/ep-missing.wasm -o /tmp/ep-test-out.wasm; then
+            echo "wasm-opt-shim unexpectedly accepted a missing input"
+            exit 1
+          fi
+          bash -n examples/shortcuts/test.sh
+          python3 -m json.tool examples/shortcuts/quick-expense.json > /dev/null
+          python3 -m json.tool examples/shortcuts/quick-notify.json > /dev/null
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      - name: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: cargo clippy -p eigenpulse --features ssr
+        run: cargo clippy -p eigenpulse --features ssr --no-default-features --all-targets --locked -- -D warnings
+      - name: cargo clippy SSR leaf crates
+        run: cargo clippy -p ep-core -p ep-db -p ep-ui -p ep-finance -p ep-fitness -p ep-journal -p ep-i18n -p ep-api -p ep-auth -p ep-notify --features ssr --no-default-features --all-targets --locked -- -D warnings
+      - name: cargo clippy -p eigenpulse (wasm32, hydrate)
+        run: cargo clippy -p eigenpulse --lib --target wasm32-unknown-unknown --no-default-features --features hydrate --locked -- -D warnings
+
+  # Tests across the workspace plus SSR-only harnesses that default
+  # workspace features do not exercise. app/tests/smoke.rs is still
+  # reserved for the `smoke` job below because it needs cargo-leptos.
+  unit-tests:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: tests
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+      - name: cargo test SSR library graph
+        run: >-
+          cargo test
+          -p eigenpulse
+          -p ep-core
+          -p ep-db
+          -p ep-ui
+          -p ep-finance
+          -p ep-fitness
+          -p ep-journal
+          -p ep-i18n
+          -p ep-api
+          -p ep-auth
+          -p ep-notify
+          --lib --features ssr --no-default-features --locked
+      - name: cargo test SSR binary unit tests
+        run: cargo test -p eigenpulse --features ssr --no-default-features --bin eigenpulse --locked
+
+  # End-to-end smoke against the SSR binary. Builds the full leptos site
+  # (SSR binary + wasm hydrate bundle), then the smoke test spawns the binary,
+  # verifies the canonical WASM artifact, and walks login -> dashboard -> PAT.
+  smoke:
+    name: cargo leptos build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mold
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: smoke
+      - name: Install cargo-leptos
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos@0.3.6
+      - name: Cargo Leptos build (release)
+        run: cargo leptos build --release
+      - name: Enforce hydrate WASM budget
+        run: scripts/check-wasm-size.sh
+      - name: Smoke test
+        run: cargo test --features ssr -p eigenpulse --test smoke --release --no-default-features --locked
+      - name: Package release site for browser E2E
+        run: tar -czf /tmp/eigenpulse-release.tgz target/release/eigenpulse target/site
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eigenpulse-release-site
+          path: /tmp/eigenpulse-release.tgz
+          retention-days: 1
+
+  # Real-browser end-to-end hydration suite (playwright/). This is the only
+  # guard that catches a CSP / hydration footgun that degrades every page to a
+  # dead SSR snapshot — a bug class the compile / clippy / unit / HTTP-smoke
+  # jobs all miss because it is only observable in a browser executing the
+  # hydrate WASM. Slow (full leptos build + Chromium), so it is its own job and
+  # runs on the same push/PR triggers as the rest. It restores the exact site
+  # artifact produced by `smoke`; `global-setup.ts` skips its own build and the
+  # webServer boots that matching binary/WASM pair.
+  e2e:
+    name: playwright e2e (hydration)
+    runs-on: ubuntu-latest
+    needs: [smoke]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: eigenpulse-release-site
+          path: /tmp/eigenpulse-release
+      - name: Restore release site
+        run: tar -xzf /tmp/eigenpulse-release/eigenpulse-release.tgz
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playwright/package-lock.json
+      - name: Install npm deps
+        working-directory: playwright
+        run: npm ci --no-audit --no-fund
+      - name: Install Playwright Chromium
+        working-directory: playwright
+        run: npx playwright install --with-deps chromium
+      - name: Playwright type-check
+        working-directory: playwright
+        run: npx tsc --noEmit
+      - name: Run Playwright suite
+        working-directory: playwright
+        # The site is already built above; skip global-setup's own build.
+        env:
+          EP_SKIP_BUILD: "1"
+        run: npx playwright test
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright/playwright-report/
+          retention-days: 7
+
+  # cargo-deny: advisories (RUSTSEC vulns + unmaintained), banned/duplicate
+  # crates, license allow-list, and registry sources. Config in deny.toml at
+  # the repo root. advisories+bans+sources are hard failures; license is an
+  # allow-list (also hard) kept in sync with the lock graph. Does not need the
+  # mold linker or a full build — it only resolves the dependency graph.
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check
+
+  # Verify that each target produces a runnable target-architecture image.
+  # Native hosted runners keep the arm64 release gate fast enough to run on
+  # every change while still exercising the exact Dockerfile used by release.
+  # The per-platform cache scopes are reused by the tag publishing workflow.
+  docker:
+    name: docker build + health (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.arch }} image for native probe
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          tags: eigenpulse:ci-${{ matrix.arch }}
+          load: true
+          cache-from: type=gha,scope=eigenpulse-${{ matrix.arch }}
+          cache-to: type=gha,scope=eigenpulse-${{ matrix.arch }},mode=max
+      - name: Verify ${{ matrix.arch }} architecture and container health
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          image="eigenpulse:ci-${ARCH}"
+          container="ep-ci-${ARCH}"
+          architecture="$(docker image inspect -f '{{.Architecture}}' "$image")"
+          test "$architecture" = "$ARCH"
+
+          docker run -d --name "$container" -p 3000:3000 \
+            -e EP_ADMIN_PASSWORD='ci-test-pw' \
+            "$image"
+          for i in $(seq 1 120); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
+            if [ "$status" = "healthy" ] && curl -fsS -m 2 http://127.0.0.1:3000/readyz > /dev/null; then
+              echo "$ARCH image metadata, healthcheck, and host /readyz OK on attempt $i"
+              docker rm -f "$container"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" != "true" ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "$ARCH container did not become healthy"
+          docker inspect -f '{{json .State}}' "$container" || true
+          docker logs "$container" || true
+          docker rm -f "$container"
+          exit 1

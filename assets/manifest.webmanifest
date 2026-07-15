@@ -1,0 +1,26 @@
+{
+  "name": "Eigenpulse — Self-hosted Personal Hub",
+  "short_name": "Eigenpulse",
+  "description": "个人自部署多功能中心 — 独立的记账、健身管理与日记应用",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fbf9f5",
+  "theme_color": "#fbf9f5",
+  "icons": [
+    { "src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/static/icons/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml" },
+    { "src": "/static/icons/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml" },
+    { "src": "/static/icons/maskable.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "记一笔",   "short_name": "记账", "url": "/finance" },
+    { "name": "开始训练", "short_name": "训练", "url": "/fitness" },
+    { "name": "写日记",   "short_name": "日记", "url": "/journal" },
+    { "name": "系统设置", "short_name": "设置", "url": "/settings" }
+  ]
+}

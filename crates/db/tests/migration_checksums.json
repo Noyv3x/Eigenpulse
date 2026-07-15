@@ -1,0 +1,6 @@
+{
+  "migrations/0001_platform.sql": "692495c821f6a3f495b6483e37312dd7c1e55ca2e88e967f323c1a9fc6035ea3",
+  "modules/finance/migrations/001_finance.sql": "ace151066fd6c3300c495030f8e2e272b4fb367dd342417ea602c925e436ede9",
+  "modules/fitness/migrations/001_fitness.sql": "22251ae9e438352bab370d809141ea314078593fa739c0f5d2bd352b4c50deb3",
+  "modules/journal/migrations/001_journal.sql": "c1b2593ab26af05da1bacca87e0d6ce83a1da8e2ababa1a64e5a26fa14928549"
+}

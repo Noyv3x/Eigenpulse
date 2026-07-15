@@ -1,0 +1,32 @@
+[package]
+name        = "ep-api"
+version     = { workspace = true }
+edition     = { workspace = true }
+rust-version = { workspace = true }
+license     = { workspace = true }
+
+[features]
+default = []
+ssr     = [
+    "dep:axum", "dep:sqlx",
+    "dep:ep-core", "dep:ep-auth", "dep:serde", "dep:thiserror", "dep:tracing",
+    "ep-core/ssr", "ep-auth/ssr"
+]
+
+[dependencies]
+ep-core    = { workspace = true, optional = true }
+ep-auth    = { workspace = true, optional = true }
+serde      = { workspace = true, optional = true }
+thiserror  = { workspace = true, optional = true }
+tracing    = { workspace = true, optional = true }
+
+axum       = { workspace = true, optional = true }
+sqlx       = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+cookie      = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true, features = ["macros", "rt"] }
+tower       = { workspace = true, features = ["util"] }
